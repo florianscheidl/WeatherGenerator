@@ -147,9 +147,10 @@ class StreamEmbedTransformer(torch.nn.Module):
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
+            x_channels = x.unbind(dim=1)
             out = [
-                ue(ln(x[:, i]))
-                for i, (ue, ln) in enumerate(zip(self.unembed, self.ln_final, strict=True))
+                ue(ln(xc))
+                for xc, (ue, ln) in zip(x_channels, zip(self.unembed, self.ln_final, strict=True))
             ]
             out = torch.stack(out, dim=1).flatten(-2, -1)
         else:
