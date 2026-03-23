@@ -10,6 +10,7 @@
 # nor does it submit to any jurisdiction.
 import copy
 import logging
+import platform
 import time
 from contextlib import nullcontext
 from functools import partial
@@ -33,6 +34,7 @@ from weathergen.model.model_interface import (
     init_model_and_shard,
 )
 from weathergen.model.utils import apply_fct_to_blocks, set_to_eval
+from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
 from weathergen.train.lr_scheduler import LearningRateScheduler
 from weathergen.train.trainer_base import TrainerBase
@@ -63,10 +65,10 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer(TrainerBase):
-    def __init__(self, train_log_freq: Config):
+    def __init__(self, train_logging: Config):
         TrainerBase.__init__(self)
 
-        self.train_log_freq = train_log_freq
+        self.train_logging = train_logging
 
         self.data_loader: torch.utils.data.DataLoader | None = None
         self.data_loader_validation: torch.utils.data.DataLoader | None = None
@@ -90,6 +92,7 @@ class Trainer(TrainerBase):
         self.batch_size_per_gpu = -1
         self.batch_size_validation_per_gpu = -1
         self.batch_size_test_per_gpu = -1
+        self.collapse_monitor: CollapseMonitor | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -152,18 +155,21 @@ class Trainer(TrainerBase):
         self.world_size_original = cf.get("world_size_original", cf.get("world_size", None))
         cf.world_size_original = self.world_size_original
 
-        self.log_grad_norms = self.training_cfg.optimizer.get("log_grad_norms", False)
-
+        self.log_grad_norms = cf.train_logging.get("log_grad_norms", False)
         # create output directory
         if is_root():
             config.get_path_run(cf).mkdir(exist_ok=True, parents=True)
             config.get_path_model(cf).mkdir(exist_ok=True, parents=True)
 
             # create profiler trace directory
-            if cf.get("run_profiler", False):
+            if cf.get("profiling", {}).get("enabled", False):
                 config.get_path_profiler(cf).mkdir(exist_ok=True, parents=True)
 
         self.train_logger = TrainLogger(cf, config.get_path_run(self.cf))
+
+        # Initialize collapse monitor for SSL training
+        collapse_config = cf.train_logging.get("collapse_monitoring", {})
+        self.collapse_monitor = CollapseMonitor(collapse_config, None)  # device set later in run()
 
     def get_target_aux_calculators(self, mode_cfg):
         """
@@ -245,6 +251,9 @@ class Trainer(TrainerBase):
 
         device_type = torch.accelerator.current_accelerator()
         self.device = torch.device(f"{device_type}:{cf.local_rank}")
+
+        # Update collapse monitor device
+        self.collapse_monitor.device = self.device
 
         # create data loaders
         self.dataset = MultiStreamDataSampler(cf, self.training_cfg, stage=TRAIN)
@@ -379,7 +388,7 @@ class Trainer(TrainerBase):
 
             self.train(mini_epoch)
 
-            if cf.run_profiler:
+            if cf.profiling.enabled:
                 # Skip validation.
                 break
 
@@ -394,7 +403,7 @@ class Trainer(TrainerBase):
             self.save_model(mini_epoch)
 
         # Log the final model only when profiling is not enabled.
-        if not cf.run_profiler:
+        if not cf.profiling.enabled:
             self.save_model(self.training_cfg.num_mini_epochs)
 
     def validate_before_training(self):
@@ -496,9 +505,9 @@ class Trainer(TrainerBase):
 
             # log gradient norms
             if self.log_grad_norms:
-                if bidx % self.train_log_freq.terminal == 0:
+                if bidx % self.train_logging.terminal == 0:
                     self.last_grad_norm = self._get_tensor_item(total_norm)
-                if bidx % self.train_log_freq.metrics == 0:
+                if bidx % self.train_logging.metrics == 0:
                     self._log_instant_grad_norms(TRAIN)
 
             # optimizer step
@@ -524,12 +533,25 @@ class Trainer(TrainerBase):
             if self.validate_with_ema:
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
 
+            # Compute collapse monitoring metrics
+            if self.collapse_monitor.should_compute(self.cf.general.istep):
+                self.collapse_monitor._compute_collapse_metrics(
+                    self.cf,
+                    batch_size_total,
+                    self.target_and_aux_calculators,
+                    preds,
+                    targets_and_auxs,
+                )
+
             self._log_terminal(bidx, mini_epoch, TRAIN)
-            if bidx % self.train_log_freq.metrics == 0:
+            if bidx % self.train_logging.metrics == 0:
                 self._log(TRAIN)
+                # Log collapse metrics
+                if self.collapse_monitor.should_log(self.cf.general.istep):
+                    self._log_collapse_metrics(TRAIN)
 
             # save model checkpoint (with designation _latest)
-            if bidx % self.train_log_freq.checkpoint == 0 and bidx > 0:
+            if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
                 self.save_model(-1)
 
             self.cf.general.istep += 1
@@ -550,7 +572,9 @@ class Trainer(TrainerBase):
 
         with torch.no_grad():
             # print progress bar but only in interactive mode, i.e. when without ddp
-            with tqdm.tqdm(total=mode_cfg.samples_per_mini_epoch, disable=self.cf.with_ddp) as pbar:
+            with tqdm.tqdm(
+                total=len(self.data_loader_validation), disable=self.cf.with_ddp
+            ) as pbar:
                 for bidx, batch in enumerate(dataset_val_iter):
                     if cf.data_loading.get("memory_pinning", False):
                         # pin memory for faster CPU-GPU transfer
@@ -758,7 +782,7 @@ class Trainer(TrainerBase):
             self.train_logger.log_metrics(stage, grad_norms)
 
     def _log_terminal(self, bidx: int, mini_epoch: int, stage: Stage):
-        print_freq = self.train_log_freq.terminal
+        print_freq = self.train_logging.terminal
         if bidx % print_freq == 0 and bidx > 0 or stage == VAL:
             # compute from last iteration
             loss_calculator = self.loss_calculator_val if stage == VAL else self.loss_calculator
@@ -820,32 +844,42 @@ class ProfilingTrainer(Trainer):
 
         wrap_module_forward_with_profiling(self.model, prefix="model")
 
-        wait, warmup, active, repeat = 2, 4, 2, 1
-
-        max_profile_steps = (wait + warmup + active) * repeat
+        max_profile_steps = (
+            cf.profiling.wait_iteration + cf.profiling.warmup_iteration + cf.profiling.active_iteration
+        ) * cf.profiling.repeat
 
         handler = partial(trace_handler, cf)
 
+        # Detect ARM architecture (e.g., NVIDIA GH200 uses aarch64 CPU)
+        # PyTorch's memory timeline profiler (export_memory_timeline) internally requires
+        # with_stack=True, which relies on C++ stack unwinding (record_context_cpp).
+        # This is only supported on Linux x86_64 — on aarch64 it silently fails during
+        # profiler teardown, causing a "Python replay stack is empty" RuntimeError.
+        # Therefore, on aarch64 we disable with_stack and skip the memory timeline export.
+        # CUDA kernel profiling, FLOPS, shapes, and chrome traces are unaffected.
+        on_aarch64 = platform.machine() == "aarch64"
+
         # Determine profiler setup
-        if cf.local_rank == 0:
+        if is_root():
             prof = profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=True,
                 profile_memory=True,
-                with_stack=True,
+                with_stack=not on_aarch64,
                 with_modules=True,
                 with_flops=True,
                 schedule=torch.profiler.schedule(
-                    wait=wait, warmup=warmup, active=active, repeat=repeat
+                    wait=cf.profiling.wait_iteration,
+                    warmup=cf.profiling.warmup_iteration,
+                    active=cf.profiling.active_iteration,
+                    repeat=cf.profiling.repeat,
                 ),
                 on_trace_ready=handler,
-                # on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs/'),
-                # schedule=torch.profiler.schedule(wait=2, warmup=4, active=2, repeat=1),
             )
         else:
             prof = nullcontext()
 
-        if cf.local_rank == 0:
+        if is_root():
             # Start recording memory snapshot history
             start_record_memory_history()
 
@@ -899,9 +933,9 @@ class ProfilingTrainer(Trainer):
                 )
 
                 if self.log_grad_norms:
-                    if bidx % self.train_log_freq.terminal == 0:
+                    if bidx % self.train_logging.terminal == 0:
                         self.last_grad_norm = self._get_tensor_item(total_norm)
-                    if bidx % self.train_log_freq.metrics == 0:
+                    if bidx % self.train_logging.metrics == 0:
                         self._log_instant_grad_norms(TRAIN)
 
                 self.grad_scaler.step(self.optimizer)
@@ -926,11 +960,10 @@ class ProfilingTrainer(Trainer):
                         self.cf.general.istep * batch_size_total, batch_size_total
                     )
 
-                self._log_terminal(bidx, mini_epoch, TRAIN)
-                if bidx % self.train_log_freq.metrics == 0:
+                if bidx % self.train_logging.metrics == 0:
                     self._log(TRAIN)
 
-                if bidx % self.train_log_freq.checkpoint == 0 and bidx > 0:
+                if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
                     self.save_model(-1)
 
                 self.cf.general.istep += 1
@@ -939,7 +972,7 @@ class ProfilingTrainer(Trainer):
                     prof.step()
 
             # Print only on rank 0
-            if cf.local_rank == 0 and hasattr(prof, "key_averages"):
+            if is_root() and hasattr(prof, "key_averages"):
                 logger.info("\n" + "=" * 80)
                 logger.info("PROFILING SUMMARY")
                 logger.info("=" * 80)
@@ -963,7 +996,7 @@ class ProfilingTrainer(Trainer):
                     prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=20)
                 )
 
-        if cf.local_rank == 0:
+        if is_root():
             # Create the memory snapshot file
             export_memory_snapshot(cf)
 
@@ -972,7 +1005,7 @@ class ProfilingTrainer(Trainer):
 
         torch.distributed.barrier()
 
-        if cf.local_rank == 0:
+        if is_root():
             logger.info("Training loop profiling is complete.")
             logger.info(
                 "The memory snapshot, memory usage distribution, and PyTorch profiler"
@@ -981,3 +1014,13 @@ class ProfilingTrainer(Trainer):
 
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
+
+
+def _log_collapse_metrics(self, stage: Stage) -> None:
+    """
+    Log cached collapse monitoring metrics.
+    """
+    metrics = self.collapse_monitor.get_cached_metrics()
+    if metrics and is_root():
+        metrics["num_samples"] = self.cf.general.istep
+        self.train_logger.log_metrics(stage, metrics)
