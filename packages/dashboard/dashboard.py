@@ -52,6 +52,7 @@ if st.session_state.get("authentication_status"):
             "Engineering": [
                 st.Page("eng_overview.py", title="overview"),
                 st.Page("exp_tracker.py", title="run details"),
+                st.Page("performance.py", title="performance"),
             ],
             "Model:atmo": [
                 st.Page("atmo_training.py", title="training"),
