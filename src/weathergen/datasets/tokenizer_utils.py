@@ -7,9 +7,9 @@ from torch import Tensor
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.utils import (
     locs_to_cell_coords_ctrs,
-    locs_to_ctr_coords,
     r3tos2,
     s2tor3,
+    vecs_to_rots,
 )
 
 # on some clusters our numpy version is pinned to be 1.x.x where the np.argsort does not
@@ -278,12 +278,18 @@ def tokenize_apply_mask_source(
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
     mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
     tokens_per_cell = torch.tensor([t.sum() for t in mask_tokens_per_cell])
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
+    # vectorized: per-cell sum of token lengths for tokens kept by the mask
+    flat_lens = np.asarray(idxs_lens, dtype=np.int64)
+    cell_ids = np.repeat(
+        np.arange(len(num_tokens_per_cell), dtype=np.int64), num_tokens_per_cell
+    )
+    masked_points_per_cell = torch.from_numpy(
+        np.bincount(
+            cell_ids,
+            weights=flat_lens * mask_tokens,
+            minlength=len(num_tokens_per_cell),
+        ).astype(np.int32)
+    )
     coords_local = get_source_coords_local(coords, hpy_verts_rots, masked_points_per_cell)
 
     # create tensor that contains all data
@@ -357,13 +363,18 @@ def tokenize_apply_mask_target(
         # data = data_padded[ : channel_mask]
 
     num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
+    # vectorized: per-cell sum of token lengths for tokens kept by the mask
+    flat_lens = np.asarray(idxs_lens, dtype=np.int64)
+    cell_ids = np.repeat(
+        np.arange(len(num_tokens_per_cell), dtype=np.int64), num_tokens_per_cell
+    )
+    masked_points_per_cell = torch.from_numpy(
+        np.bincount(
+            cell_ids,
+            weights=flat_lens * mask_tokens,
+            minlength=len(num_tokens_per_cell),
+        ).astype(np.int32)
+    )
 
     # compute encoding of target coordinates used in prediction network
     if torch.tensor(idxs_lens).sum() > 0:
@@ -498,9 +509,26 @@ def get_target_coords_local(
     zi = 63
     a[..., (geoinfo_offset + zi) : (geoinfo_offset + zi + vls.shape[-1])] = vls[4]
 
-    tcs_ctrs = torch.cat([ref - torch.cat(locs_to_ctr_coords(c, tcs)) for c in nctrs], -1)
+    # vectorized replacement for the per-neighbor `locs_to_ctr_coords` loop:
+    # compute rotations for all neighbors at once and apply via batched matmul
+    num_nbrs = nctrs.shape[0]
+    nctrs_rots = (
+        vecs_to_rots(nctrs.reshape(-1, 3))
+        .to(torch.float32)
+        .reshape(num_nbrs, nctrs.shape[1], 3, 3)
+    )
+    batch_indices = torch.repeat_interleave(
+        torch.arange(masked_points_per_cell.shape[0], device=target_coords.device),
+        masked_points_per_cell,
+    )
+    # (num_nbrs, total_points, 3, 3) @ (total_points, 3, 1) -> (num_nbrs, total_points, 3, 1)
+    rotated = torch.matmul(
+        nctrs_rots[:, batch_indices], target_coords.unsqueeze(-1)
+    ).squeeze(-1)
+    # concatenate the per-neighbor (3,) blocks along the last dim -> (total_points, 3 * num_nbrs)
+    tcs_ctrs = (ref - rotated).permute(1, 0, 2).reshape(target_coords.shape[0], -1)
     zi = 75
-    a[..., (geoinfo_offset + zi) : (geoinfo_offset + zi + (3 * 8))] = tcs_ctrs
+    a[..., (geoinfo_offset + zi) : (geoinfo_offset + zi + (3 * num_nbrs))] = tcs_ctrs
 
     # remaining geoinfos (zenith angle etc)
     zi = 99
