@@ -98,23 +98,11 @@ class TokenizerMasking(Tokenizer):
         if num_tokens == 0:
             return (mask_tokens, mask_channels)
 
-        # TODO, TODO, TODO: use np.repeat
-        # https://stackoverflow.com/questions/26038778/repeat-each-values-of-an-array-different-times
         # build token level mask: for each cell replicate the keep flag across its tokens
-        token_level_flags: list[np.typing.NDArray] = []
-        for km, lens_cell in zip(mask, idxs_cells_lens, strict=True):
-            num_tokens_cell = len(lens_cell)
-            if num_tokens_cell == 0:
-                continue
-            token_level_flags.append(
-                np.ones(num_tokens_cell, dtype=bool)
-                if km
-                else np.zeros(num_tokens_cell, dtype=bool)
-            )
-        if token_level_flags:
-            mask_tokens = np.concatenate(token_level_flags)
-        else:
-            mask_tokens = np.array([], dtype=bool)
+        lens = np.fromiter(
+            (len(t) for t in idxs_cells_lens), dtype=np.intp, count=len(idxs_cells_lens)
+        )
+        mask_tokens = np.repeat(np.asarray(mask, dtype=bool), lens)
 
         return (mask_tokens, mask_channels)
 

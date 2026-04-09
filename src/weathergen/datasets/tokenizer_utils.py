@@ -455,13 +455,7 @@ def get_target_coords_local(
     tcs_lens_mask = tcs_lens > 0
     tcs_lens = tcs_lens[tcs_lens_mask]
 
-    vls = torch.cat(
-        [
-            vl.repeat([tt, 1, 1])
-            for tt, vl in zip(tcs_lens, verts_local[tcs_lens_mask], strict=False)
-        ],
-        0,
-    )
+    vls = torch.repeat_interleave(verts_local[tcs_lens_mask], tcs_lens, dim=0)
     vls = vls.transpose(0, 1)
 
     zi = 0
