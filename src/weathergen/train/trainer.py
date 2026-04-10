@@ -846,6 +846,12 @@ class ProfilingTrainer(Trainer):
             cf.profiling.wait_iteration + cf.profiling.warmup_iteration + cf.profiling.active_iteration
         ) * cf.profiling.repeat
 
+        logger.info(
+            f"[profiler] Starting profiling run. max_profile_steps={max_profile_steps} "
+            f"(wait={cf.profiling.wait_iteration}, warmup={cf.profiling.warmup_iteration}, "
+            f"active={cf.profiling.active_iteration}, repeat={cf.profiling.repeat})"
+        )
+
         handler = partial(trace_handler, cf)
 
         # Detect ARM architecture (e.g., NVIDIA GH200 uses aarch64 CPU)
@@ -968,6 +974,8 @@ class ProfilingTrainer(Trainer):
 
                 if hasattr(prof, "step"):
                     prof.step()
+
+            logger.info(f"[profiler] Profiling loop finished after {bidx + 1} steps (max_profile_steps={max_profile_steps}).")
 
             # Print only on rank 0
             if is_root() and hasattr(prof, "key_averages"):

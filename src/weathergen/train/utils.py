@@ -246,12 +246,20 @@ def trace_handler(cfg: dict | OmegaConf, prof: torch.profiler.profile) -> None:
     file_prefix = base_path / f"{timestamp}_rank_{weathergen.utils.distributed.get_rank()}"
 
     # Construct the trace file.
-    prof.export_chrome_trace(f"{file_prefix}.json.gz")
+    try:
+        prof.export_chrome_trace(f"{file_prefix}.json.gz")
+        logger.info(f"[profiler] Chrome trace saved to {file_prefix}.json.gz")
+    except Exception as e:
+        logger.error(f"[profiler] Failed to export chrome trace: {e}")
 
     # Construct the memory timeline file.
     on_aarch64 = platform.machine() == "aarch64"
     if not on_aarch64:
-        prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
+        try:
+            prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
+            logger.info(f"[profiler] Memory timeline saved to {file_prefix}.html")
+        except Exception as e:
+            logger.error(f"[profiler] Failed to export memory timeline: {e}")
     else:
         logger.info("[profiler] Memory distribution timeline skipped on aarch64")
 
