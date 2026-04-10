@@ -252,17 +252,14 @@ torch-c-dlpack-ext = [
 
 
 torch = [
-# Explicit pin for GPU - no extra= so this also applies when torch is pulled in by transitive deps
-# (e.g. torch-c-dlpack-ext) outside of an extra context, preventing PyPI from resolving torch 2.11+CUDA13.
+# On Linux, always use the cu126 GPU wheel regardless of extra (cpu or gpu).
+# This avoids conflicts when transitive deps (e.g. torch-c-dlpack-ext via flash-attn-4) pull in torch
+# outside of an extra context, which would otherwise resolve to torch 2.11+CUDA13 from PyPI.
+# The GPU wheel works fine for CPU-only usage (unit tests), at the cost of a larger download.
   { url = "https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp312-cp312-linux_aarch64.whl", marker = 'sys_platform == "linux" and platform_machine == "aarch64"' },
   { url = "https://download.pytorch.org/whl/cu126/torch-2.6.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl", marker = 'sys_platform == "linux" and platform_machine == "x86_64"' },
-# Explicit pin for CPU.
-  { url = "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp312-cp312-linux_x86_64.whl",marker = "sys_platform == 'linux' and platform_machine == 'x86_64'",extra = "cpu" },
-  { url = "https://download.pytorch.org/whl/cpu/torch-2.6.0%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl",marker = "sys_platform == 'linux' and platform_machine == 'aarch64'",extra = "cpu" },
-  { url = "https://download.pytorch.org/whl/cpu/torch-2.6.0-cp312-none-macosx_11_0_arm64.whl",marker = "sys_platform == 'darwin'", extra="cpu" },
-  # No acceleration for now.
-  # TODO: explore pytorch + metal backend
-  { index = "pytorch-cpu", marker = "sys_platform == 'darwin'", extra="gpu"},
+# macOS: CPU only.
+  { url = "https://download.pytorch.org/whl/cpu/torch-2.6.0-cp312-none-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin'" },
 ]
 # branch = "feature/any-zarr-version-in-pyproject/"
 anemoi-datasets = { git = "https://github.com/tjhunter/anemoi-datasets", tag = "0.0.1"}
