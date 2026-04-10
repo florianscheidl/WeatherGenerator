@@ -86,7 +86,7 @@ cpu = [
 gpu = [
   "torch==2.6.0; sys_platform == 'linux'",
   # flash-attn also has a torch dependency.
-  "flash-attn-4",
+  "flash-attn-4; sys_platform == 'linux'",
 ]
 
 
@@ -241,6 +241,13 @@ flash-attn-4 = [
 # The same wheel works on both aarch64 and x86_64.
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta6/flash_attn_4-4.0.0b5-py3-none-any.whl", marker = "sys_platform == 'linux'" },
   # There is no official support for flash-attn on macos
+]
+
+# Pin to 0.1.4 to avoid 0.1.5 which pulls in CUDA 13 packages incompatible with our CUDA 12 HPC.
+torch-c-dlpack-ext = [
+  { url = "https://files.pythonhosted.org/packages/35/c0/0ae9067fd9f15f1feacfd7398314aa48f922ddb9cbeb5f95c8a2e1831cb8/torch_c_dlpack_ext-0.1.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { url = "https://files.pythonhosted.org/packages/5f/4c/7d59344006807613baca1daf3109ea6a81743146330b5afde96dc953115c/torch_c_dlpack_ext-0.1.4-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://files.pythonhosted.org/packages/84/c8/97c3d4a1c05dd41e4ba70a8abff47a93951c035a3db1a532777b372f63bc/torch_c_dlpack_ext-0.1.4-cp312-cp312-macosx_14_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
 ]
 
 
