@@ -169,7 +169,7 @@ link-mode = "symlink"
 # TODO: pytorch does not publish valid release timestamps, so sadly it does not work.
 exclude-newer = "2026-04-10T00:00:00Z"
 # flash-attn-4 depends on nvidia-cutlass-dsl>=4.4.2 which only has pre-release versions.
-prerelease = "if-necessary-or-explicit"
+prerelease = "allow"
 
 # The minimum version of uv required.
 # It is tightly controlled because the format of uv.lock has changed 
