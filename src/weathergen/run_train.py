@@ -192,7 +192,11 @@ def run_train(args):
     if cf.with_flash_attention:
         assert cf.with_mixed_precision
 
-    trainer = Trainer(cf.train_logging)
+    if cf.get("profiling", {}).get("enabled", False):
+        cf = config._check_profiling(cf)
+        trainer = ProfilingTrainer(cf.train_logging)
+    else:
+        trainer = Trainer(cf.train_logging)
 
     try:
         trainer.run(cf, devices)
