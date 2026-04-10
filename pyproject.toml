@@ -236,12 +236,9 @@ weathergen-metrics = { workspace = true }
 weathergen-readers-extra = { workspace = true }
 
 
-flash-attn-4 = [
-# flash-attn 4 ships as a pure-Python wheel (py3-none-any); CUDA kernels are loaded at runtime.
-# The same wheel works on both aarch64 and x86_64.
-  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta6/flash_attn_4-4.0.0b5-py3-none-any.whl", marker = "sys_platform == 'linux'" },
-  # There is no official support for flash-attn on macos
-]
+# Let uv resolve flash-attn-4 from PyPI rather than pinning to a specific wheel.
+# The beta5 wheel (previously pinned) required nvidia-cutlass-dsl>=4.4.2 which pulls in CUDA 13 packages.
+# An older beta from PyPI may have lighter or no cutlass dependency.
 
 # Pin to 0.1.4 to avoid 0.1.5 which pulls in CUDA 13 packages incompatible with our CUDA 12 HPC.
 torch-c-dlpack-ext = [
