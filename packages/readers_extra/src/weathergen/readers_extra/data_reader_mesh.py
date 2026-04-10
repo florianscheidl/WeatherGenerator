@@ -37,6 +37,7 @@ class DataReaderMesh(DataReaderTimestep):
     - Dynamic Patching (local) OR Global Sparse Sampling.
     """
 
+
     def __init__(
         self,
         tw_handler: TimeWindowHandler,
@@ -284,6 +285,7 @@ class DataReaderMesh(DataReaderTimestep):
         if len(t_idxs) == 0 or not channels:
             return ReaderData.empty(len(channels), 0)
 
+        channel_indices = [self.available_channels.index(c) for c in channels]
         channel_indices = [self.available_channels.index(c) for c in channels]
         start_t, end_t = t_idxs[0], t_idxs[-1] + 1
         n_steps = len(t_idxs)
