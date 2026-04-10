@@ -288,6 +288,7 @@ class DataReaderMesh(DataReaderTimestep):
         start_t, end_t = t_idxs[0], t_idxs[-1] + 1
         n_steps = len(t_idxs)
 
+        lats_ref = self.lats_src if is_source else self.lats_trg
         spatial_indices_ref = self.spatial_indices_src if is_source else self.spatial_indices_trg
         coords_ref = self.coords_src if is_source else self.coords_trg
         ds_ref = self.ds_source if is_source else self.ds_target

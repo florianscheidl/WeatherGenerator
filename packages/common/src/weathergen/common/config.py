@@ -334,6 +334,48 @@ def _check_datasets(config: Config) -> Config:
     return config
 
 
+def _check_logging(config: Config) -> Config:
+    """
+    Apply fixes to log frequency config.
+    """
+    config = config.copy()
+    if config.get("train_logging") is None:  # TODO remove this for next version
+        config.train_logging = OmegaConf.create(
+            {"checkpoint": 250, "terminal": 10, "metrics": config.train_logging.log_interval}
+        )
+
+    return config
+
+
+def _check_profiling(config: Config) -> Config:
+    """
+    Apply fixes to profiling config. If profiling section is missing, inject defaults.
+    If profiling exists but some fields are missing, fill in defaults.
+    Always forces enabled=True since this is called from run_profile.
+    """
+    config = config.copy()
+
+    defaults = {
+        "enabled": True,
+        "wait_iteration": 1,
+        "warmup_iteration": 1,
+        "active_iteration": 1,
+        "repeat": 1,
+    }
+
+    if config.get("profiling") is None:
+        # no profiling section at all — inject full defaults
+        config.profiling = OmegaConf.create(defaults)
+    else:
+        # profiling section exists — fill in any missing fields and force enabled=True
+        for key, value in defaults.items():
+            if config.profiling.get(key) is None:
+                config.profiling[key] = value
+        config.profiling.enabled = True  # always True when called from run_profile
+
+    return config
+
+
 def merge_configs(base_config: Config, update_config: Config):
     """
     Merge two configs using OmegaConf's default strategy
@@ -632,8 +674,13 @@ def load_streams(streams_directory: Path) -> list[Config]:
 
 
 def get_path_run(config: Config) -> Path:
-    """Get the current runs results_path for storing run results and logs."""
+    """Get the path for storing profiling logs."""
     return _get_shared_wg_path() / "results" / get_run_id_from_config(config)
+
+
+def get_path_profiler(config: Config) -> Path:
+    """Get the path for storing profiling logs."""
+    return _get_shared_wg_path() / "profiler_logs" / get_run_id_from_config(config)
 
 
 def get_path_model(config: Config | None = None, run_id: str | None = None) -> Path:
