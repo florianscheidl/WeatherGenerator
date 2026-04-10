@@ -1,0 +1,6 @@
+profiling:
+  enabled: True 
+  wait_iteration: 2
+  warmup_iteration: 4
+  active_iteration: 2
+  repeat: 4
