@@ -29,6 +29,9 @@ dependencies = [
  "weathergen-evaluate",
  "weathergen-readers-extra",
  "ninja>=1.13.0",
+ "torch-c-dlpack-ext>=0.1.5",
+ "einops>=0.8.2",
+ "apache-tvm-ffi==0.1.10",
 ]
 
 
@@ -169,7 +172,7 @@ link-mode = "symlink"
 # TODO: pytorch does not publish valid release timestamps, so sadly it does not work.
 exclude-newer = "2026-04-10T00:00:00Z"
 # flash-attn-4 depends on nvidia-cutlass-dsl>=4.4.2 which only has pre-release versions.
-prerelease = "allow"
+prerelease = "if-necessary"
 
 # The minimum version of uv required.
 # It is tightly controlled because the format of uv.lock has changed 
