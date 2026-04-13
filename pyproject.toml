@@ -82,7 +82,7 @@ cpu = [
 gpu = [
   "torch==2.11.0; sys_platform == 'linux'",
   # flash-attn also has a torch dependency.
-#  "flash-attn",
+  "flash-attn-4",
 ]
 
 
@@ -166,7 +166,8 @@ link-mode = "symlink"
 # by future releases of dependencies or sub-dependencies. 
 # See https://docs.astral.sh/uv/reference/settings/#exclude-newer
 # TODO: pytorch does not publish valid release timestamps, so sadly it does not work.
-exclude-newer = "2026-02-27T00:00:00Z"
+exclude-newer = "2026-04-13T00:00:00Z"
+prerelease = "allow"
 
 # The minimum version of uv required.
 # It is tightly controlled because the format of uv.lock has changed 
