@@ -10,6 +10,7 @@
 from functools import partial
 
 import torch
+import torch.nn.functional as F
 from flash_attn.cute import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
@@ -22,6 +23,12 @@ Attention blocks used by WeatherGenerator.
 Some blocks optionally apply 2D RoPE. When enabled, the caller must provide per-token 2D
 coordinates aligned with the token order (lat, lon in radians).
 """
+
+# FA4's SM90 persistent kernel (TMA + WGMMA) has excessive per-launch overhead for short
+# sequences — measured at ~37ms GPU time for max_seqlen=2 on GH200. Below this threshold
+# we fall back to SDPA with explicit padding, which is much cheaper for tiny seqlens.
+# Note: the SDPA fallback does not apply softcap; keep softcap=0 for short-seq modules.
+_VARLEN_SDPA_THRESHOLD = 8
 
 
 class MultiSelfAttentionHeadVarlen(torch.nn.Module):
@@ -102,19 +109,47 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         # flash_attn_varlen_func expects Python ints for max_seqlen_{q,k}; calling .max() twice
         # would force two device->host syncs per attention call. Collapse to one .item().
         max_x_len = int(x_lens.max())
-        # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        with torch.cuda.nvtx.range(f"fa4_varlen_self n={x.shape[0]} max={max_x_len}"):
-            outs, _ = flash_attn_varlen_func(
-                qs,
-                ks,
-                vs,
-                cum_x_lens,
-                cum_x_lens,
-                max_x_len,
-                max_x_len,
-                softcap=self.softcap,
-                # dropout_p=dropout_rate,
+
+        if max_x_len <= _VARLEN_SDPA_THRESHOLD:
+            # FA4's SM90 persistent kernel has excessive per-launch overhead for short sequences.
+            # Convert varlen -> padded, run SDPA, unpad. All ops are vectorised (no Python loop).
+            B = x_lens.shape[0]
+            starts = (cum_x_lens - x_lens).long()
+            seq_ids = torch.repeat_interleave(
+                torch.arange(B, device=x_lens.device, dtype=torch.long), x_lens
             )
+            within_pos = (
+                torch.arange(qs.shape[0], device=qs.device, dtype=torch.long) - starts[seq_ids]
+            )
+            q_pad = qs.new_zeros(B, max_x_len, self.num_heads, self.dim_head_proj)
+            k_pad = ks.new_zeros(B, max_x_len, self.num_heads, self.dim_head_proj)
+            v_pad = vs.new_zeros(B, max_x_len, self.num_heads, self.dim_head_proj)
+            q_pad[seq_ids, within_pos] = qs
+            k_pad[seq_ids, within_pos] = ks
+            v_pad[seq_ids, within_pos] = vs
+            valid = torch.arange(max_x_len, device=x_lens.device) < x_lens[:, None]
+            with torch.cuda.nvtx.range(f"sdpa_varlen_self n={x.shape[0]} max={max_x_len}"):
+                outs_pad = F.scaled_dot_product_attention(
+                    q_pad.permute(0, 2, 1, 3),
+                    k_pad.permute(0, 2, 1, 3),
+                    v_pad.permute(0, 2, 1, 3),
+                    attn_mask=valid[:, None, None, :],
+                ).permute(0, 2, 1, 3)  # (B, L, H, D)
+            outs = outs_pad[valid]  # (total_tokens, H, D)
+        else:
+            # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
+            with torch.cuda.nvtx.range(f"fa4_varlen_self n={x.shape[0]} max={max_x_len}"):
+                outs, _ = flash_attn_varlen_func(
+                    qs,
+                    ks,
+                    vs,
+                    cum_x_lens,
+                    cum_x_lens,
+                    max_x_len,
+                    max_x_len,
+                    softcap=self.softcap,
+                    # dropout_p=dropout_rate,
+                )
 
         out = self.proj_out(outs.flatten(-2, -1))
 
@@ -488,24 +523,68 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         # per-iteration device->host syncs triggered by flash_attn's int args.
         max_q_len = int(x_q_lens.max())
         max_kv_len = int(x_kv_lens.max())
-        outs = []
-        for _i, qs_i in enumerate(qs):
-            with torch.cuda.nvtx.range(
-                f"fa4_varlen_sliced[{_i}] max_q={max_q_len} max_kv={max_kv_len}"
-            ):
-                outs += [
-                    flash_attn_varlen_func(
-                        qs_i,
-                        ks,
-                        vs,
-                        cum_x_q_lens,
-                        cum_x_kv_lens,
-                        max_q_len,
-                        max_kv_len,
-                        softcap=self.softcap,
-                        # dropout_p=dropout_rate,
-                    )[0]
-                ]
+
+        if max(max_q_len, max_kv_len) <= _VARLEN_SDPA_THRESHOLD:
+            # FA4 SM90 kernel overhead dominates for short sequences — use padded SDPA instead.
+            B = x_q_lens.shape[0]
+            starts_q = (cum_x_q_lens - x_q_lens).long()
+            starts_kv = (cum_x_kv_lens - x_kv_lens).long()
+            seq_ids_q = torch.repeat_interleave(
+                torch.arange(B, device=x_q_lens.device, dtype=torch.long), x_q_lens
+            )
+            seq_ids_kv = torch.repeat_interleave(
+                torch.arange(B, device=x_kv_lens.device, dtype=torch.long), x_kv_lens
+            )
+            within_pos_q = (
+                torch.arange(qs[0].shape[0], device=qs[0].device, dtype=torch.long)
+                - starts_q[seq_ids_q]
+            )
+            within_pos_kv = (
+                torch.arange(ks.shape[0], device=ks.device, dtype=torch.long)
+                - starts_kv[seq_ids_kv]
+            )
+            # k, v pads are shared across all q slices
+            k_pad = ks.new_zeros(B, max_kv_len, self.num_heads, self.dim_head_proj)
+            v_pad = vs.new_zeros(B, max_kv_len, self.num_heads, self.dim_head_proj)
+            k_pad[seq_ids_kv, within_pos_kv] = ks
+            v_pad[seq_ids_kv, within_pos_kv] = vs
+            valid_q = torch.arange(max_q_len, device=x_q_lens.device) < x_q_lens[:, None]
+            valid_kv = torch.arange(max_kv_len, device=x_kv_lens.device) < x_kv_lens[:, None]
+            k_pad_t = k_pad.permute(0, 2, 1, 3)
+            v_pad_t = v_pad.permute(0, 2, 1, 3)
+            outs = []
+            for _i, qs_i in enumerate(qs):
+                q_pad = qs_i.new_zeros(B, max_q_len, self.num_heads, self.dim_head_proj)
+                q_pad[seq_ids_q, within_pos_q] = qs_i
+                with torch.cuda.nvtx.range(
+                    f"sdpa_varlen_sliced[{_i}] max_q={max_q_len} max_kv={max_kv_len}"
+                ):
+                    outs_pad = F.scaled_dot_product_attention(
+                        q_pad.permute(0, 2, 1, 3),
+                        k_pad_t,
+                        v_pad_t,
+                        attn_mask=valid_kv[:, None, None, :],
+                    ).permute(0, 2, 1, 3)  # (B, max_q_len, H, D)
+                outs.append(outs_pad[valid_q])  # (total_q_tokens, H, D)
+        else:
+            outs = []
+            for _i, qs_i in enumerate(qs):
+                with torch.cuda.nvtx.range(
+                    f"fa4_varlen_sliced[{_i}] max_q={max_q_len} max_kv={max_kv_len}"
+                ):
+                    outs += [
+                        flash_attn_varlen_func(
+                            qs_i,
+                            ks,
+                            vs,
+                            cum_x_q_lens,
+                            cum_x_kv_lens,
+                            max_q_len,
+                            max_kv_len,
+                            softcap=self.softcap,
+                            # dropout_p=dropout_rate,
+                        )[0]
+                    ]
 
         outs = self.proj_out(torch.stack(outs).transpose(1, 0).flatten(-2, -1))
         if self.with_residual:
