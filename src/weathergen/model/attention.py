@@ -103,17 +103,18 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         # would force two device->host syncs per attention call. Collapse to one .item().
         max_x_len = int(x_lens.max())
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs, _ = flash_attn_varlen_func(
-            qs,
-            ks,
-            vs,
-            cum_x_lens,
-            cum_x_lens,
-            max_x_len,
-            max_x_len,
-            softcap=self.softcap,
-            # dropout_p=dropout_rate,
-        )
+        with torch.cuda.nvtx.range(f"fa4_varlen_self n={x.shape[0]} max={max_x_len}"):
+            outs, _ = flash_attn_varlen_func(
+                qs,
+                ks,
+                vs,
+                cum_x_lens,
+                cum_x_lens,
+                max_x_len,
+                max_x_len,
+                softcap=self.softcap,
+                # dropout_p=dropout_rate,
+            )
 
         out = self.proj_out(outs.flatten(-2, -1))
 
@@ -369,17 +370,21 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
             # Collapse two device->host syncs (one per .max()) into one .item() each.
             max_q_len = int(x_q_lens.max())
             max_kv_len = int(x_kv_lens.max())
-            outs, _ = flash_attn_varlen_func(
-                qs,
-                ks,
-                vs,
-                cum_x_q_lens,
-                cum_x_kv_lens,
-                max_q_len,
-                max_kv_len,
-                softcap=self.softcap,
-                # dropout_p=dropout_rate,
-            )
+            with torch.cuda.nvtx.range(
+                f"fa4_varlen_cross q={x_q.shape[0]} kv={x_kv.shape[0]} "
+                f"max_q={max_q_len} max_kv={max_kv_len}"
+            ):
+                outs, _ = flash_attn_varlen_func(
+                    qs,
+                    ks,
+                    vs,
+                    cum_x_q_lens,
+                    cum_x_kv_lens,
+                    max_q_len,
+                    max_kv_len,
+                    softcap=self.softcap,
+                    # dropout_p=dropout_rate,
+                )
         else:
             assert False
 
@@ -485,19 +490,22 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         max_kv_len = int(x_kv_lens.max())
         outs = []
         for _i, qs_i in enumerate(qs):
-            outs += [
-                flash_attn_varlen_func(
-                    qs_i,
-                    ks,
-                    vs,
-                    cum_x_q_lens,
-                    cum_x_kv_lens,
-                    max_q_len,
-                    max_kv_len,
-                    softcap=self.softcap,
-                    # dropout_p=dropout_rate,
-                )[0]
-            ]
+            with torch.cuda.nvtx.range(
+                f"fa4_varlen_sliced[{_i}] max_q={max_q_len} max_kv={max_kv_len}"
+            ):
+                outs += [
+                    flash_attn_varlen_func(
+                        qs_i,
+                        ks,
+                        vs,
+                        cum_x_q_lens,
+                        cum_x_kv_lens,
+                        max_q_len,
+                        max_kv_len,
+                        softcap=self.softcap,
+                        # dropout_p=dropout_rate,
+                    )[0]
+                ]
 
         outs = self.proj_out(torch.stack(outs).transpose(1, 0).flatten(-2, -1))
         if self.with_residual:
@@ -584,7 +592,8 @@ class MultiSelfAttentionHead(torch.nn.Module):
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs, _ = flash_attn_func(qs, ks, vs, softcap=self.softcap)  # , dropout_p=dropout_rate)
+        with torch.cuda.nvtx.range(f"fa4_self shape={tuple(qs.shape)}"):
+            outs, _ = flash_attn_func(qs, ks, vs, softcap=self.softcap)  # , dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
