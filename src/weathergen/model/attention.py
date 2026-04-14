@@ -99,6 +99,9 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
         cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
+        # flash_attn_varlen_func expects Python ints for max_seqlen_{q,k}; calling .max() twice
+        # would force two device->host syncs per attention call. Collapse to one .item().
+        max_x_len = int(x_lens.max())
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs, _ = flash_attn_varlen_func(
             qs,
@@ -106,8 +109,8 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             vs,
             cum_x_lens,
             cum_x_lens,
-            x_lens.max(),
-            x_lens.max(),
+            max_x_len,
+            max_x_len,
             softcap=self.softcap,
             # dropout_p=dropout_rate,
         )
@@ -360,16 +363,20 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
         if x_kv_lens is not None:
+            assert x_q_lens is not None
             cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+            # Collapse two device->host syncs (one per .max()) into one .item() each.
+            max_q_len = int(x_q_lens.max())
+            max_kv_len = int(x_kv_lens.max())
             outs, _ = flash_attn_varlen_func(
                 qs,
                 ks,
                 vs,
                 cum_x_q_lens,
                 cum_x_kv_lens,
-                x_q_lens.max(),
-                x_kv_lens.max(),
+                max_q_len,
+                max_kv_len,
                 softcap=self.softcap,
                 # dropout_p=dropout_rate,
             )
@@ -469,8 +476,13 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
+        assert x_q_lens is not None and x_kv_lens is not None
         cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
         cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+        # Hoist .max() out of the loop and collapse to one .item() each to avoid
+        # per-iteration device->host syncs triggered by flash_attn's int args.
+        max_q_len = int(x_q_lens.max())
+        max_kv_len = int(x_kv_lens.max())
         outs = []
         for _i, qs_i in enumerate(qs):
             outs += [
@@ -480,8 +492,8 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                     vs,
                     cum_x_q_lens,
                     cum_x_kv_lens,
-                    x_q_lens.max(),
-                    x_kv_lens.max(),
+                    max_q_len,
+                    max_kv_len,
                     softcap=self.softcap,
                     # dropout_p=dropout_rate,
                 )[0]
