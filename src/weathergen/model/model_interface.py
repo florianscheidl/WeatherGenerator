@@ -29,6 +29,7 @@ from weathergen.model.attention import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
+from weathergen.model.norms import RMSNorm
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
@@ -38,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 # same as in config: student_teacher, forecasting, masking
 type TrainingMode = str
+
+
+def _cast_rmsnorm_weights(module: torch.nn.Module, dtype: torch.dtype) -> None:
+    for submodule in module.modules():
+        if isinstance(submodule, RMSNorm):
+            submodule.weight.data = submodule.weight.data.to(dtype=dtype)
 
 
 def init_model_and_shard(
@@ -158,6 +165,9 @@ def init_model_and_shard(
             model.to_empty(device="cuda")
             if with_fsdp:
                 model.reset_parameters()
+
+    if cf.with_mixed_precision and not (with_ddp and with_fsdp) and cf.norm_type == "RMSNorm":
+        _cast_rmsnorm_weights(model, get_dtype(cf.mixed_precision_dtype))
 
     # model params
     model_params = ModelParams(cf).create(cf)

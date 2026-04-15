@@ -32,6 +32,10 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = torch.nn.Parameter(torch.ones(dim))
+        self._cached_weight_dtype: torch.dtype | None = None
+        self._cached_weight_device: torch.device | None = None
+        self._cached_weight_version: int | None = None
+        self._cached_weight_low_precision: torch.Tensor | None = None
 
     def _norm(self, x):
         """

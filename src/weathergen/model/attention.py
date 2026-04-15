@@ -562,7 +562,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         qs = self.lnorm_q(self.proj_heads_q(x).reshape(s))
         ks = self.lnorm_k(self.proj_heads_k(x).reshape(s))
         vs = self.proj_heads_v(x).reshape(s)
-
+        
         if self.with_2d_rope:
             if coords is None:
                 raise ValueError("coords must be provided when with_2d_rope=True")
@@ -572,6 +572,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         dropout_rate = self.dropout_rate if self.training else 0.0
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
+        print(f"Right below flash-attn: qs dtype: {qs.dtype}, ks dtype: {ks.dtype}, vs dtype: {vs.dtype}, x dtype: {x.dtype}")
         outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
