@@ -554,6 +554,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
     def forward(self, x, coords=None, ada_ln_aux=None):
         if self.with_residual:
             x_in = x
+        x_pre_norm = x
         x = self.lnorm(x) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
 
         # project onto heads and q,k,v and
@@ -571,8 +572,22 @@ class MultiSelfAttentionHead(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         dropout_rate = self.dropout_rate if self.training else 0.0
 
+        lnorm_weight = getattr(self.lnorm, "weight", None)
+        lnorm_q_weight = getattr(self.lnorm_q, "weight", None)
+        lnorm_k_weight = getattr(self.lnorm_k, "weight", None)
+
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        print(f"Right below flash-attn: qs dtype: {qs.dtype}, ks dtype: {ks.dtype}, vs dtype: {vs.dtype}, x dtype: {x.dtype}")
+        print(
+            "Right below flash-attn: "
+            f"x_pre_norm dtype: {x_pre_norm.dtype}, "
+            f"lnorm weight dtype: {lnorm_weight.dtype if lnorm_weight is not None else 'n/a'}, "
+            f"q norm weight dtype: {lnorm_q_weight.dtype if lnorm_q_weight is not None else 'n/a'}, "
+            f"k norm weight dtype: {lnorm_k_weight.dtype if lnorm_k_weight is not None else 'n/a'}, "
+            f"q proj weight dtype: {self.proj_heads_q.weight.dtype}, "
+            f"k proj weight dtype: {self.proj_heads_k.weight.dtype}, "
+            f"v proj weight dtype: {self.proj_heads_v.weight.dtype}, "
+            f"qs dtype: {qs.dtype}, ks dtype: {ks.dtype}, vs dtype: {vs.dtype}, x dtype: {x.dtype}"
+        )
         outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
