@@ -47,6 +47,18 @@ def _cast_rmsnorm_weights(module: torch.nn.Module, dtype: torch.dtype) -> None:
             submodule.weight.data = submodule.weight.data.to(dtype=dtype)
 
 
+def _ddp_requires_unused_parameter_detection(cf: Config) -> bool:
+    training_cfg = cf.get("training_config", {})
+    losses = training_cfg.get("losses", {})
+    for loss_cfg in losses.values():
+        if (
+            loss_cfg.get("enabled", True)
+            and loss_cfg.get("type", None) == "LossLatentSSLStudentTeacher"
+        ):
+            return True
+    return False
+
+
 def init_model_and_shard(
     cf,
     dataset,
@@ -71,10 +83,13 @@ def init_model_and_shard(
 
     if with_ddp and not with_fsdp:
         # create DDP model if running without FSDP
+        find_unused_parameters = cf.get("ddp_find_unused_parameters", True)
+        if _ddp_requires_unused_parameter_detection(cf):
+            find_unused_parameters = True
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             broadcast_buffers=True,
-            find_unused_parameters=cf.get("ddp_find_unused_parameters", True),
+            find_unused_parameters=find_unused_parameters,
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
         )
