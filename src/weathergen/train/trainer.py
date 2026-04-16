@@ -332,7 +332,10 @@ class Trainer(TrainerBase):
             betas=(beta1, beta2),
             eps=eps,
         )
-        self.grad_scaler = torch.amp.GradScaler("cuda")
+        self.grad_scaler = torch.amp.GradScaler(
+            "cuda",
+            enabled=cf.with_mixed_precision and self.mixed_precision_dtype == torch.float16,
+        )
 
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
 
