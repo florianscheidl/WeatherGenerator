@@ -59,6 +59,10 @@ def _ddp_requires_unused_parameter_detection(cf: Config) -> bool:
     return False
 
 
+def _ddp_requires_static_graph(cf: Config) -> bool:
+    return _ddp_requires_unused_parameter_detection(cf)
+
+
 def init_model_and_shard(
     cf,
     dataset,
@@ -83,13 +87,17 @@ def init_model_and_shard(
 
     if with_ddp and not with_fsdp:
         # create DDP model if running without FSDP
+        static_graph = _ddp_requires_static_graph(cf)
         find_unused_parameters = cf.get("ddp_find_unused_parameters", True)
-        if _ddp_requires_unused_parameter_detection(cf):
+        if static_graph:
+            find_unused_parameters = False
+        elif _ddp_requires_unused_parameter_detection(cf):
             find_unused_parameters = True
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             broadcast_buffers=True,
             find_unused_parameters=find_unused_parameters,
+            static_graph=static_graph,
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
         )
