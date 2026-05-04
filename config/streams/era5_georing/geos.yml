@@ -1,8 +1,6 @@
-
 METEOSAT_SEVIRI :
   type : obs
   stream_id : 2
-  # filenames : ['observations-od-ai-0001-201311-202505-msg-combined-seviri-o256-v1.zarr']
   filenames : ['observations-file-2014-2024-seviri-h512-v5.zarr']
   loss_weight : 1.0
   token_size : 128
@@ -28,7 +26,6 @@ METEOSAT_SEVIRI :
 GOES_ABI :
   type : obs
   stream_id : 3
-  # filenames : ['observations-file-2017-2024-abi-goes16-IR-o256-v2.zarr']
   filenames : ['observations-file-2017-2024-abi-goes16-IR-h512-v2.zarr']
   loss_weight : 1.0
   token_size : 128
@@ -54,7 +51,6 @@ GOES_ABI :
 HIMAWARI_AHI :
   type : obs
   stream_id : 4
-  # filenames : ['observations-file-2015-2022-himawari8-IR-o256-v1.zarr']
   filenames : ['observations-file-2015-2022-himawari8-IR-h512-v1.zarr']
   loss_weight : 1.0
   token_size : 128
