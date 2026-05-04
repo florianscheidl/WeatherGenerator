@@ -574,6 +574,16 @@ class Trainer(TrainerBase):
             self.cf.general.istep += 1
 
         self.dataset.advance()
+    
+    def _log_collapse_metrics(self, stage: Stage) -> None:
+        """
+        Log cached collapse monitoring metrics.
+        """
+        metrics = self.collapse_monitor.get_cached_metrics()
+        if metrics and is_root():
+            metrics["num_samples"] = self.cf.general.istep
+            self.train_logger.log_metrics(stage, metrics)
+
 
     def validate(self, mini_epoch, mode_cfg, batch_size):
         """
@@ -1035,11 +1045,11 @@ class ProfilingTrainer(Trainer):
             torch.distributed.destroy_process_group()
 
 
-def _log_collapse_metrics(self, stage: Stage) -> None:
-    """
-    Log cached collapse monitoring metrics.
-    """
-    metrics = self.collapse_monitor.get_cached_metrics()
-    if metrics and is_root():
-        metrics["num_samples"] = self.cf.general.istep
-        self.train_logger.log_metrics(stage, metrics)
+    def _log_collapse_metrics(self, stage: Stage) -> None:
+        """
+        Log cached collapse monitoring metrics.
+        """
+        metrics = self.collapse_monitor.get_cached_metrics()
+        if metrics and is_root():
+            metrics["num_samples"] = self.cf.general.istep
+            self.train_logger.log_metrics(stage, metrics)
