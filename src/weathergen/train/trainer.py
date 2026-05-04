@@ -50,7 +50,6 @@ from weathergen.train.utils import (
     get_active_stage_config,
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
-    start_record_memory_history,
     stop_record_memory_history,
     trace_handler,
     wrap_module_forward_with_profiling,
@@ -907,10 +906,6 @@ class ProfilingTrainer(Trainer):
             )
         else:
             prof = nullcontext()
-
-        if is_root():
-            # Start recording memory snapshot history
-            start_record_memory_history()
 
         with prof:
             for bidx, batch in enumerate(islice(dataset_iter, max_profile_steps)):
