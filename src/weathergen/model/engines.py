@@ -68,6 +68,7 @@ class EmbeddingEngine(torch.nn.Module):
                     num_blocks=si["embed"]["num_blocks"],
                     num_heads=si["embed"]["num_heads"],
                     dropout_rate=self.cf.embed_dropout_rate,
+                    with_flash=self.cf.with_flash_attention,
                     norm_type=self.cf.norm_type,
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
