@@ -149,26 +149,29 @@ class StreamEmbedTransformer(torch.nn.Module):
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
-            ln_weight = torch.stack([ln.weight for ln in self.ln_final], dim=0)
-
             if isinstance(self.ln_final[0], RMSNorm):
-                x_norm = x.float()
-                x_norm = x_norm * torch.rsqrt(x_norm.pow(2).mean(-1, keepdim=True) + self.ln_final[0].eps)
-                x_norm = x_norm.type_as(x) * ln_weight.unsqueeze(0)
+                ln_weight = torch.stack([ln.weight for ln in self.ln_final], dim=0).to(device=x.device, dtype=x.dtype)
+                x_norm = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.ln_final[0].eps)
+                x_norm = x_norm * ln_weight.unsqueeze(0)
             else:
-                ln_bias = torch.stack([ln.bias for ln in self.ln_final], dim=0)
-                x_norm = torch.nn.functional.layer_norm(
-                    x.float(),
-                    (self.dim_embed,),
-                    weight=None,
-                    bias=None,
-                    eps=self.ln_final[0].eps,
-                )
-                x_norm = x_norm.type_as(x) * ln_weight.unsqueeze(0) + ln_bias.unsqueeze(0)
+                ln_weight = torch.stack([ln.weight for ln in self.ln_final], dim=0).to(device=x.device, dtype=x.dtype)
+                ln_bias = torch.stack([ln.bias for ln in self.ln_final], dim=0).to(device=x.device, dtype=x.dtype)
+                x_centered = x - x.mean(dim=-1, keepdim=True)
+                var = x_centered.pow(2).mean(dim=-1, keepdim=True)
+                x_norm = x_centered * torch.rsqrt(var + self.ln_final[0].eps)
+                x_norm = x_norm * ln_weight.unsqueeze(0) + ln_bias.unsqueeze(0)
 
-            unembed_weight = torch.stack([ue.weight for ue in self.unembed], dim=0)
-            unembed_bias = torch.stack([ue.bias for ue in self.unembed], dim=0)
-            out = torch.einsum("bcd,cod->bco", x_norm, unembed_weight) + unembed_bias.unsqueeze(0)
+            unembed_weight = torch.stack([ue.weight for ue in self.unembed], dim=0).to(
+                device=x.device, dtype=x.dtype
+            )
+            unembed_bias = torch.stack([ue.bias for ue in self.unembed], dim=0).to(
+                device=x.device, dtype=x.dtype
+            )
+            out = torch.vmap(
+                lambda x_c, w_c, b_c: torch.nn.functional.linear(x_c, w_c, b_c),
+                in_dims=(1, 0, 0),
+                out_dims=1,
+            )(x_norm, unembed_weight, unembed_bias)
             out = out.flatten(-2, -1)
         else:
             raise ValueError(f"Unknown unembed mode: {self.unembed_mode}")
