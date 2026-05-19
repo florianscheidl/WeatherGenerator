@@ -75,11 +75,10 @@ def init_model_and_shard(
     overrides={},
 ):
     model_creation_device = "meta" if with_ddp and with_fsdp else "cuda"
-    target_dtype = get_dtype(cf.mixed_precision_dtype) if cf.with_mixed_precision else torch.float32
-    with torch.device(model_creation_device), temporary_default_dtype(target_dtype):
+    with torch.device(model_creation_device):
         model = get_model(cf, training_mode, dataset, overrides)
 
-    log_parameter_dtypes(model, target_dtype)
+    log_parameter_dtypes(model, torch.float32)
 
     # freeze request model part
     apply_fct_to_blocks(model, cf.freeze_modules, freeze_weights)
