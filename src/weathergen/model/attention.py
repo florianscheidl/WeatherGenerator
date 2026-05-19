@@ -590,7 +590,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
     def forward(self, x, coords=None, ada_ln_aux=None):
         if self.with_residual:
             x_in = x
-        x = self.lnorm(x) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
+        x = self.lnorm(x).to(self.dtype) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
