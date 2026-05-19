@@ -12,6 +12,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from weathergen.model.triton_layernorm import layernorm as triton_layernorm, HAS_TRITON as HAS_TRITON_LAYERNORM
+from weathergen.model.triton_rmsnorm import rmsnorm as triton_rmsnorm, HAS_TRITON
+
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
@@ -58,6 +61,9 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
+        if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda:
+            return triton_rmsnorm(x, self.weight, self.eps)
+
         output = self._norm(x)
         return output * self.weight
 
@@ -81,6 +87,9 @@ class LayerNorm(torch.nn.Module):
         self.bias = torch.nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
+        if HAS_TRITON_LAYERNORM and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda and self.bias.is_cuda:
+            return triton_layernorm(x, self.weight, self.bias, self.eps)
+
         var, mean = torch.var_mean(x, -1, keepdim=True, correction=0)
         x_norm = (x - mean) * torch.rsqrt(var + self.eps)
         x_norm = x_norm * self.weight + self.bias
