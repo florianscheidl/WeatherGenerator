@@ -74,23 +74,14 @@ class LayerNorm(torch.nn.Module):
         norm(dim)  # second call ignored, already initialized
     """
 
-    def __init__(self, dim: int | None = None, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self._dim = None
-
-    def _init_weights(self, dim: int):
-        """Lazily initialize weight/bias once dim is known."""
-        self._dim = dim
         self.weight = torch.nn.Parameter(torch.ones(dim))
         self.bias = torch.nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
-        # Lazily init on first forward (supports two-call pattern)
-        if self._dim is None:
-            self._init_weights(x.shape[-1])
-
-        var, mean = x.var_mean(-1, keepdim=True, correction=0)
+        var, mean = torch.var_mean(x, -1, keepdim=True, correction=0)
         x_norm = (x - mean) * torch.rsqrt(var + self.eps)
         x_norm = x_norm * self.weight + self.bias
         return x_norm
