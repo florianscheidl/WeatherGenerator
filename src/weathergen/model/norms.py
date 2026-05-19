@@ -44,7 +44,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        var, _ = x.pow(2).var_mean(-1, keepdim=True)
+        return x * torch.rsqrt(var + self.eps)
 
     def forward(self, x):
         """
@@ -59,6 +60,33 @@ class RMSNorm(torch.nn.Module):
         """
         output = self._norm(x)
         return output * self.weight
+
+
+class LayerNorm(torch.nn.Module):
+    """LayerNorm that stays in the input tensor's dtype (avoids fp32 upcast).
+
+    Standard torch.nn.LayerNorm computes mean/var in fp32 internally.
+    This variant uses var_mean (which preserves dtype) for the reduction,
+    keeping the entire normalization in bf16/fp16 when desired.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+            self.bias = torch.nn.Parameter(torch.zeros(dim))
+        else:
+            self.weight = None
+            self.bias = None
+
+    def forward(self, x):
+        var, mean = x.var_mean(-1, keepdim=True, correction=0)
+        x_norm = (x - mean) * torch.rsqrt(var + self.eps)
+        if self.elementwise_affine:
+            x_norm = x_norm * self.weight + self.bias
+        return x_norm
 
 
 class AdaLayerNorm(torch.nn.Module):
@@ -77,7 +105,7 @@ class AdaLayerNorm(torch.nn.Module):
         self.embed_aux.append(torch.nn.SiLU())
         self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x))
 
-        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
+        self.norm = LayerNorm(dim_embed_x, eps=norm_eps, elementwise_affine=norm_elementwise_affine)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
@@ -128,7 +156,7 @@ class AdaLayerNormLayer(torch.nn.Module):
         self.dim = dim
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True))
 
-        self.ln = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps)
+        self.ln = LayerNorm(dim, elementwise_affine=False, eps=norm_eps)
         self.layer = layer
 
         # Initialize weights to zero for modulation and gating layers
