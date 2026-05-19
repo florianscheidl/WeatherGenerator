@@ -15,7 +15,7 @@ from weathergen.model.attention import MultiSelfAttentionHead
 from weathergen.model.layers import MLP
 
 # from weathergen.model.mlp import MLP
-from weathergen.model.norms import LayerNorm, RMSNorm
+from weathergen.model.norms import RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
 
@@ -31,7 +31,6 @@ class StreamEmbedTransformer(torch.nn.Module):
         num_blocks,
         num_heads,
         dropout_rate=0.0,
-        with_flash=True,
         norm_type="LayerNorm",
         unembed_mode="full",
         stream_name="stream_embed",
@@ -59,7 +58,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
 
-        norm = LayerNorm if norm_type == "LayerNorm" else RMSNorm
+        norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
@@ -69,7 +68,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     self.num_heads,
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
-                    with_flash=with_flash,
+                    with_flash=True,
                 )
             )
             self.layers.append(

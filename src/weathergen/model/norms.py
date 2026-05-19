@@ -12,9 +12,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from weathergen.model.triton_layernorm import layernorm as triton_layernorm, HAS_TRITON as HAS_TRITON_LAYERNORM
-from weathergen.model.triton_rmsnorm import rmsnorm as triton_rmsnorm, HAS_TRITON
-
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
@@ -47,8 +44,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        var, _ = x.pow(2).var_mean(-1, keepdim=True)
-        return x * torch.rsqrt(var + self.eps)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         """
@@ -61,39 +57,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda:
-            return triton_rmsnorm(x, self.weight, self.eps)
-
-        output = self._norm(x)
+        output = self._norm(x.float()).type_as(x)
         return output * self.weight
-
-
-class LayerNorm(torch.nn.Module):
-    """LayerNorm that stays in the input tensor's dtype (avoids fp32 upcast).
-
-    Standard torch.nn.LayerNorm computes mean/var in fp32 internally.
-    This variant uses var_mean (which preserves dtype) for the reduction,
-    keeping the entire normalization in bf16/fp16 when desired.
-
-    Supports the two-call pattern used in attention.py:
-        norm = LayerNorm(eps=norm_eps)  # dim inferred lazily on first forward
-        norm(dim)  # second call ignored, already initialized
-    """
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
-        self.bias = torch.nn.Parameter(torch.zeros(dim))
-
-    def forward(self, x):
-        if HAS_TRITON_LAYERNORM and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda and self.bias.is_cuda:
-            return triton_layernorm(x, self.weight, self.bias, self.eps)
-
-        var, mean = torch.var_mean(x, -1, keepdim=True, correction=0)
-        x_norm = (x - mean) * torch.rsqrt(var + self.eps)
-        x_norm = x_norm * self.weight + self.bias
-        return x_norm
 
 
 class AdaLayerNorm(torch.nn.Module):
@@ -112,7 +77,7 @@ class AdaLayerNorm(torch.nn.Module):
         self.embed_aux.append(torch.nn.SiLU())
         self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x))
 
-        self.norm = LayerNorm(dim=dim_embed_x, eps=norm_eps)
+        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
@@ -163,7 +128,7 @@ class AdaLayerNormLayer(torch.nn.Module):
         self.dim = dim
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True))
 
-        self.ln = LayerNorm(dim=dim, eps=norm_eps)
+        self.ln = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps)
         self.layer = layer
 
         # Initialize weights to zero for modulation and gating layers
