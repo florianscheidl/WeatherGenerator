@@ -77,20 +77,23 @@ class LayerNorm(torch.nn.Module):
     def __init__(self, dim: int | None = None, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self._dim = None
-
-    def _init_weights(self, dim: int):
-        """Lazily initialize weight/bias once dim is known."""
         self._dim = dim
-        self.weight = torch.nn.Parameter(torch.ones(dim))
-        self.bias = torch.nn.Parameter(torch.zeros(dim))
+        # Weight/bias are always registered so module is fully initialized.
+        # If dim is None (two-call pattern with norm(dim) to create instance),
+        # use placeholder dim=1 here; forward() will resize on first call.
+        _dim = dim if dim is not None else 1
+        self.weight = torch.nn.Parameter(torch.ones(_dim))
+        self.bias = torch.nn.Parameter(torch.zeros(_dim))
 
     def forward(self, x):
-        # Lazily init on first forward (supports two-call pattern)
-        if self._dim is None:
-            self._init_weights(x.shape[-1])
+        # If dim was None at init (two-call pattern), resize weight/bias to match input
+        actual_dim = x.shape[-1]
+        if self._dim is None or self.weight.shape[0] != actual_dim:
+            self._dim = actual_dim
+            self.weight = torch.nn.Parameter(self.weight.new_full((actual_dim,), 1.0))
+            self.bias = torch.nn.Parameter(self.weight.new_zeros((actual_dim,)))
 
-        var, mean = x.var_mean(-1, keepdim=True, correction=0)
+        var, mean = torch.var_mean(x, -1, keepdim=True, correction=0)
         x_norm = (x - mean) * torch.rsqrt(var + self.eps)
         x_norm = x_norm * self.weight + self.bias
         return x_norm
