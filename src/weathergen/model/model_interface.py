@@ -79,6 +79,7 @@ def init_model_and_shard(
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
                     reduce_dtype=torch.float32,
+                    buffer_dtype=get_dtype(cf.mixed_precision_dtype),
                 )
                 if cf.with_mixed_precision
                 else None
@@ -118,6 +119,7 @@ def init_model_and_shard(
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
                     reduce_dtype=torch.float32,
+                    buffer_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
                 else None
@@ -129,7 +131,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        fully_shard(model, **fsdp_kwargs)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
