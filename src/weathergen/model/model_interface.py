@@ -11,6 +11,7 @@
 
 import itertools
 import logging
+from contextlib import contextmanager
 
 import torch
 from torch.distributed.fsdp import (
@@ -36,6 +37,28 @@ from weathergen.utils.utils import get_dtype
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def temporary_default_dtype(dtype: torch.dtype):
+    prev = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        yield
+    finally:
+        torch.set_default_dtype(prev)
+
+
+def log_parameter_dtypes(model: torch.nn.Module, expected_dtype: torch.dtype):
+    seen = set()
+    for name, param in model.named_parameters():
+        if not param.is_floating_point():
+            continue
+        seen.add(param.dtype)
+        if param.dtype != expected_dtype:
+            print(f"parameter dtype mismatch: {name}={param.dtype}, expected={expected_dtype}", flush=True)
+    if len(seen) > 1:
+        print(f"parameter dtype set: {sorted(str(dt) for dt in seen)}", flush=True)
+
+
 # same as in config: student_teacher, forecasting, masking
 type TrainingMode = str
 
@@ -52,11 +75,15 @@ def init_model_and_shard(
     overrides={},
 ):
     model_creation_device = "meta" if with_ddp and with_fsdp else "cuda"
-    with torch.device(model_creation_device):
+    target_dtype = get_dtype(cf.mixed_precision_dtype) if cf.with_mixed_precision else torch.float32
+    with torch.device(model_creation_device), temporary_default_dtype(target_dtype):
         model = get_model(cf, training_mode, dataset, overrides)
+
+    log_parameter_dtypes(model, target_dtype)
 
     # freeze request model part
     apply_fct_to_blocks(model, cf.freeze_modules, freeze_weights)
+    log_parameter_dtypes(model, target_dtype)
 
     # TODO: this should be handled in the encoder to be close where q_cells is defined
     if "q_cells" in cf.freeze_modules:
