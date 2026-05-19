@@ -161,11 +161,8 @@ def layernorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: fl
     if HAS_TRITON:
         if not x.is_cuda or not weight.is_cuda or not bias.is_cuda:
             raise TypeError("Triton LayerNorm expected CUDA tensors on the fast path")
-        if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16 or bias.dtype != torch.bfloat16:
-            msg = (
-                f"dtype mismatch for layernorm: x={x.dtype}, weight={weight.dtype}, bias={bias.dtype}, "
-                "expected torch.bfloat16"
-            )
+        if x.dtype != torch.bfloat16:
+            msg = f"dtype mismatch for layernorm input {x.dtype}, expected torch.bfloat16"
             print(msg, flush=True)
             raise TypeError(msg)
         return _TritonLayerNormFn.apply(x, weight, bias, eps)

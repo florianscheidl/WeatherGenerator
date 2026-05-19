@@ -57,7 +57,8 @@ class RMSNorm(torch.nn.Module):
         """
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
+        dtype = torch.get_default_dtype()
+        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def _norm(self, x):
         """
@@ -97,8 +98,9 @@ class LayerNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
-        self.bias = torch.nn.Parameter(torch.zeros(dim))
+        dtype = torch.get_default_dtype()
+        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
+        self.bias = torch.nn.Parameter(torch.zeros(dim, dtype=dtype))
 
     def reset_parameters(self):
         nn.init.ones_(self.weight)
