@@ -4,3 +4,14 @@ profiling:
   warmup_iteration: 4
   active_iteration: 2
   repeat: 4
+
+data_loading :
+  num_workers: 12
+  memory_pinning: True
+
+# config for training
+training_config:
+  num_mini_epochs: 1
+  samples_per_mini_epoch: 32
+  forecast :
+      num_steps: 1
