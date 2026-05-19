@@ -79,7 +79,6 @@ def init_model_and_shard(
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
                     reduce_dtype=torch.float32,
-                    buffer_dtype=get_dtype(cf.mixed_precision_dtype),
                 )
                 if cf.with_mixed_precision
                 else None
@@ -119,7 +118,6 @@ def init_model_and_shard(
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
                     reduce_dtype=torch.float32,
-                    buffer_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
                 else None
