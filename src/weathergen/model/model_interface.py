@@ -75,7 +75,8 @@ def init_model_and_shard(
     overrides={},
 ):
     model_creation_device = "meta" if with_ddp and with_fsdp else "cuda"
-    with torch.device(model_creation_device):
+    target_dtype = get_dtype(cf.mixed_precision_dtype) if cf.with_mixed_precision else torch.float32
+    with torch.device(model_creation_device), temporary_default_dtype(target_dtype):
         model = get_model(cf, training_mode, dataset, overrides)
 
     log_parameter_dtypes(model, torch.float32)
@@ -138,20 +139,9 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
-        full_precision_fsdp_kwargs = {
-            "mp_policy": (
-                MixedPrecisionPolicy(
-                    param_dtype=torch.float32,
-                    reduce_dtype=torch.float32,
-                )
-                if cf.with_mixed_precision
-                else None
-            ),
-        }
-
         for module in model.target_token_engines.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs)
 
     if with_ddp and with_fsdp:
         fully_shard(model)
