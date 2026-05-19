@@ -82,7 +82,6 @@ def init_model_and_shard(
 
     # freeze request model part
     apply_fct_to_blocks(model, cf.freeze_modules, freeze_weights)
-    log_parameter_dtypes(model, target_dtype)
 
     # TODO: this should be handled in the encoder to be close where q_cells is defined
     if "q_cells" in cf.freeze_modules:
