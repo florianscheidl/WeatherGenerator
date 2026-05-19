@@ -26,6 +26,7 @@ from weathergen.model.engines import (
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 from weathergen.model.norms import assert_tensor_dtype, assert_integer_tensor
+from weathergen.utils.utils import get_dtype
 
 
 class EncoderModule(torch.nn.Module):
@@ -41,6 +42,7 @@ class EncoderModule(torch.nn.Module):
         """
         super(EncoderModule, self).__init__()
         self.cf = cf
+        self.dtype = get_dtype(cf.attention_dtype)
 
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
