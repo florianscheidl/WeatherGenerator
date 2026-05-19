@@ -39,7 +39,7 @@ class SelfAttentionBlock(nn.Module):
         if self.with_adanorm:
             self.mhsa_block = AdaLayerNormLayer(dim, dim_aux, self.mhsa, dropout_rate)
         else:
-            self.ln_sa = LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_sa = LayerNorm(eps=kwargs["attention_kwargs"]["norm_eps"])
             self.mhsa_block = lambda x, _, **kwargs: self.mhsa(self.ln_sa(x), **kwargs) + x
 
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -55,7 +55,7 @@ class SelfAttentionBlock(nn.Module):
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
             self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate)
         else:
-            self.ln_mlp = LayerNorm(norm_eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_mlp = LayerNorm(eps=kwargs["attention_kwargs"]["norm_eps"])
             self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x), None, **kwargs) + x
 
         self.initialise_weights()
@@ -116,7 +116,7 @@ class CrossAttentionBlock(nn.Module):
             if self.with_adanorm:
                 self.mhsa_block = AdaLayerNormLayer(dim_q, dim_aux, self.mhsa, dropout_rate)
             else:
-                self.ln_sa = LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+                self.ln_sa = LayerNorm(eps=kwargs["attention_kwargs"]["norm_eps"])
                 self.mhsa_block = lambda x, _, **kwargs: self.mhsa(self.ln_sa(x), **kwargs) + x
 
         self.cross_attn = MultiCrossAttentionHeadVarlen(
@@ -129,7 +129,7 @@ class CrossAttentionBlock(nn.Module):
         if self.with_adanorm:
             self.cross_attn_block = AdaLayerNormLayer(dim_q, dim_aux, self.cross_attn, dropout_rate)
         else:
-            self.ln_ca = LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_ca = LayerNorm(eps=kwargs["attention_kwargs"]["norm_eps"])
             self.cross_attn_block = (
                 lambda x, _, **kwargs: self.cross_attn(self.ln_ca(x), **kwargs) + x
             )
@@ -147,7 +147,7 @@ class CrossAttentionBlock(nn.Module):
                 self.mlp_fn = lambda x, **kwargs: self.mlp(x)
                 self.mlp_block = AdaLayerNormLayer(dim_q, dim_aux, self.mlp_fn, dropout_rate)
             else:
-                self.ln_mlp = LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+                self.ln_mlp = LayerNorm(eps=kwargs["attention_kwargs"]["norm_eps"])
                 self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x)) + x
         else:
             self.mlp_block = lambda x, _, **kwargs: x
