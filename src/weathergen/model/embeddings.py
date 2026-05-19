@@ -178,7 +178,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         # final normalize and dropout
         out = self.dropout_final(self.ln_final(out))
 
-        return out.to(torch.float16)
+        return out
 
     def forward(self, x_in):
         if self.mode == "channels":
