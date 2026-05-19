@@ -15,4 +15,3 @@ training_config:
   samples_per_mini_epoch: 32
   forecast :
       num_steps: 1
-norm_type: "RMSNorm"

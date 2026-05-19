@@ -47,7 +47,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        var, _ = x.pow(2).var_mean(-1, keepdim=True)
+        var, _ = torch.var_mean(x.pow(2), -1, keepdim=True)
         return x * torch.rsqrt(var + self.eps)
 
     def forward(self, x):
@@ -61,6 +61,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
+        breakpoint()
         if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda:
             return triton_rmsnorm(x, self.weight, self.eps)
 
