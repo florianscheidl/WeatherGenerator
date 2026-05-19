@@ -37,7 +37,6 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.norms import LayerNorm
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
@@ -551,7 +550,7 @@ class Model(torch.nn.Module):
 
         # Latent heads for losses
         self.latent_heads = nn.ModuleDict()
-        self.latent_pre_norm = LayerNorm(cf.ae_global_dim_embed)
+        self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
 
         ssl_losses_cfgs = [
             v
@@ -562,7 +561,7 @@ class Model(torch.nn.Module):
         # TODO: support multiple LossLatentSSLStudentTeacher terms
         assert len(ssl_losses_cfgs) <= 1, "To be implemented."
         for ssl_target_losses in ssl_losses_cfgs:
-            self.latent_pre_norm = LayerNorm(cf.ae_global_dim_embed)
+            self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
             for loss, loss_conf in ssl_target_losses.loss_fcts.items():
                 if loss == "iBOT":
                     self.latent_heads[loss] = self._create_latent_pred_head(
@@ -593,7 +592,7 @@ class Model(torch.nn.Module):
 
     def reset_parameters(self):
         def _reset_params(module):
-            if isinstance(module, nn.Linear | LayerNorm):
+            if isinstance(module, nn.Linear | nn.LayerNorm):
                 module.reset_parameters()
             else:
                 pass
