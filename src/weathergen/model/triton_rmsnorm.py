@@ -151,7 +151,13 @@ class _TritonRMSNormFn(torch.autograd.Function):
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
     """Apply RMSNorm, using Triton for CUDA bf16 tensors when available."""
 
-    if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and weight.is_cuda:
+    if HAS_TRITON:
+        if not x.is_cuda or not weight.is_cuda:
+            raise TypeError("Triton RMSNorm expected CUDA tensors on the fast path")
+        if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+            msg = f"dtype mismatch for rmsnorm: x={x.dtype}, weight={weight.dtype}, expected torch.bfloat16"
+            print(msg, flush=True)
+            raise TypeError(msg)
         return _TritonRMSNormFn.apply(x, weight, eps)
 
     var, _ = torch.var_mean(x.pow(2), dim=-1, keepdim=True, correction=0)

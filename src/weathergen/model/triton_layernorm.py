@@ -158,7 +158,16 @@ class _TritonLayerNormFn(torch.autograd.Function):
 def layernorm(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float):
     """Apply LayerNorm, using Triton for CUDA bf16 tensors when available."""
 
-    if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and weight.is_cuda and bias.is_cuda:
+    if HAS_TRITON:
+        if not x.is_cuda or not weight.is_cuda or not bias.is_cuda:
+            raise TypeError("Triton LayerNorm expected CUDA tensors on the fast path")
+        if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16 or bias.dtype != torch.bfloat16:
+            msg = (
+                f"dtype mismatch for layernorm: x={x.dtype}, weight={weight.dtype}, bias={bias.dtype}, "
+                "expected torch.bfloat16"
+            )
+            print(msg, flush=True)
+            raise TypeError(msg)
         return _TritonLayerNormFn.apply(x, weight, bias, eps)
 
     var, mean = torch.var_mean(x, dim=-1, keepdim=True, correction=0)

@@ -25,6 +25,7 @@ from weathergen.model.engines import (
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
+from weathergen.model.norms import assert_tensor_dtype, assert_integer_tensor
 
 
 class EncoderModule(torch.nn.Module):
@@ -85,12 +86,12 @@ class EncoderModule(torch.nn.Module):
             self.ae_local_global_engine = Local2GlobalAssimilationEngine(cf)
 
         # learnable queries
-        if cf.ae_local_queries_per_cell:
+        if self.cf.ae_local_queries_per_cell:
             s = (self.num_healpix_cells, cf.ae_local_num_queries, cf.ae_global_dim_embed)
-            q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
+            q_cells = torch.rand(s, requires_grad=True, dtype=self.dtype) / cf.ae_global_dim_embed
             # add meta data
             q_cells[:, :, -8:-6] = (
-                (torch.arange(self.num_healpix_cells) / self.num_healpix_cells)
+                (torch.arange(self.num_healpix_cells, dtype=self.dtype) / self.num_healpix_cells)
                 .unsqueeze(1)
                 .unsqueeze(1)
                 .repeat((1, cf.ae_local_num_queries, 2))
@@ -104,11 +105,11 @@ class EncoderModule(torch.nn.Module):
             q_cells[:, :, -3:] = (
                 torch.sin(phi).unsqueeze(1).unsqueeze(1).repeat((1, cf.ae_local_num_queries, 3))
             )
-            q_cells[:, :, -9] = torch.arange(cf.ae_local_num_queries)
-            q_cells[:, :, -10] = torch.arange(cf.ae_local_num_queries)
+            q_cells[:, :, -9] = torch.arange(cf.ae_local_num_queries, dtype=self.dtype)
+            q_cells[:, :, -10] = torch.arange(cf.ae_local_num_queries, dtype=self.dtype)
         else:
             s = (1, cf.ae_local_num_queries, cf.ae_global_dim_embed)
-            q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
+            q_cells = torch.rand(s, requires_grad=True, dtype=self.dtype) / cf.ae_global_dim_embed
         self.q_cells = torch.nn.Parameter(q_cells, requires_grad=True)
 
         # query aggregation engine
@@ -125,10 +126,12 @@ class EncoderModule(torch.nn.Module):
         stream_cell_tokens = checkpoint(
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
+        assert_tensor_dtype(stream_cell_tokens, "encoder.stream_cell_tokens", self.dtype)
 
         tokens_global, posteriors = checkpoint(
             self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
         )
+        assert_tensor_dtype(tokens_global, "encoder.tokens_global_after_local", self.dtype)
 
         tokens_global = checkpoint(
             self.ae_global_engine,
@@ -136,6 +139,7 @@ class EncoderModule(torch.nn.Module):
             coords=model_params.rope_coords,
             use_reentrant=False,
         )
+        assert_tensor_dtype(tokens_global, "encoder.tokens_global_after_global", self.dtype)
 
         return tokens_global, posteriors
 
@@ -288,6 +292,7 @@ class EncoderModule(torch.nn.Module):
         """
 
         cell_lens = torch.sum(batch.tokens_lens, 2).flatten()
+        assert_integer_tensor(cell_lens, "encoder.cell_lens")
 
         num_steps_input = batch.get_num_steps()
         rs = num_steps_input * len(batch)
@@ -295,7 +300,9 @@ class EncoderModule(torch.nn.Module):
         # create register and latent tokens and prepend to latent spatial tokens
         num_extra_tokens = self.num_register_tokens + self.num_class_tokens
         pos_enc = positional_encoding_harmonic
+        assert_tensor_dtype(self.q_cells, "encoder.q_cells", self.dtype)
         tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1))
+        assert_tensor_dtype(tokens_global_register_class, "encoder.tokens_global_register_class", self.dtype)
 
         # TODO: re-enable or remove ae_local_queries_per_cell
         if self.cf.ae_local_queries_per_cell:
@@ -304,6 +311,7 @@ class EncoderModule(torch.nn.Module):
             num_tokens = self.num_healpix_cells
             tokens_global = self.q_cells.repeat(num_tokens, 1, 1) + model_params.pe_global
             tokens_global = tokens_global.repeat(rs, 1, 1)
+        assert_tensor_dtype(tokens_global, "encoder.tokens_global_pre_assimilation", self.dtype)
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(

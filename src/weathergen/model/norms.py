@@ -17,6 +17,29 @@ from weathergen.model.triton_rmsnorm import rmsnorm as triton_rmsnorm, HAS_TRITO
 
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
+
+def assert_tensor_dtype(tensor: torch.Tensor, name: str, expected_dtype: torch.dtype):
+    if tensor.dtype != expected_dtype:
+        msg = f"dtype mismatch for {name}: got {tensor.dtype}, expected {expected_dtype}"
+        print(msg, flush=True)
+        raise TypeError(msg)
+
+
+def assert_triton_ready(tensor: torch.Tensor, name: str):
+    if not tensor.is_cuda:
+        msg = f"tensor {name} is on {tensor.device}, expected CUDA for Triton path"
+        print(msg, flush=True)
+        raise TypeError(msg)
+    assert_tensor_dtype(tensor, name, torch.bfloat16)
+
+
+def assert_integer_tensor(tensor: torch.Tensor, name: str):
+    if tensor.dtype not in (torch.int32, torch.int64):
+        msg = f"dtype mismatch for {name}: got {tensor.dtype}, expected an integer dtype"
+        print(msg, flush=True)
+        raise TypeError(msg)
+
+
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         """
@@ -61,7 +84,6 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        breakpoint()
         if HAS_TRITON and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda:
             return triton_rmsnorm(x, self.weight, self.eps)
 
