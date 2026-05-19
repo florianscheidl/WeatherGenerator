@@ -69,22 +69,17 @@ class RMSNorm(torch.nn.Module):
 
 
 class LayerNorm(torch.nn.Module):
-    """LayerNorm that stays in the input tensor's dtype (avoids fp32 upcast).
-
-    Standard torch.nn.LayerNorm computes mean/var in fp32 internally.
-    This variant uses var_mean (which preserves dtype) for the reduction,
-    keeping the entire normalization in bf16/fp16 when desired.
-
-    Supports the two-call pattern used in attention.py:
-        norm = LayerNorm(eps=norm_eps)  # dim inferred lazily on first forward
-        norm(dim)  # second call ignored, already initialized
-    """
+    """LayerNorm with Triton bf16 fast path and standard fallback."""
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = torch.nn.Parameter(torch.ones(dim))
         self.bias = torch.nn.Parameter(torch.zeros(dim))
+
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
+        nn.init.zeros_(self.bias)
 
     def forward(self, x):
         if HAS_TRITON_LAYERNORM and x.is_cuda and x.dtype == torch.bfloat16 and self.weight.is_cuda and self.bias.is_cuda:
