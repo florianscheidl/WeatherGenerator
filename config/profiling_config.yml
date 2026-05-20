@@ -7,6 +7,6 @@ profiling:
 
 training_config:
   num_mini_epochs: 1
-  samples_per_mini_epoch: 32
+  samples_per_mini_epoch: 2048
   forecast :
       num_steps: 1

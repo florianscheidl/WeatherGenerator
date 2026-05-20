@@ -93,10 +93,10 @@ def init_model_and_shard(
             MultiSelfAttentionHeadVarlen,
         )
 
-        # for stream_embed_list in model.encoder.embed_engine.embeds.values():
-        #     for module in stream_embed_list.modules():
-        #         if isinstance(module, modules_to_shard):
-        #             fully_shard(module, **fsdp_kwargs)
+        for stream_embed_list in model.encoder.embed_engine.embeds.values():
+            for module in stream_embed_list.modules():
+                if isinstance(module, modules_to_shard):
+                    fully_shard(module, **fsdp_kwargs)
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
@@ -118,6 +118,10 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
+        # not mentioned above but in the model:
+        # model.latent_pre_norm # (type ModuleDict)
+        # model.pred_heads # (type ModuleDict)
+
         full_precision_fsdp_kwargs = {
             "mp_policy": (
                 MixedPrecisionPolicy(
@@ -134,7 +138,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        # fully_shard(model, **fsdp_kwargs) # this groups all remaining parts of the model in a single communication group for sharding -> what exactly lands here and could we improve the grouping?
+        fully_shard(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
