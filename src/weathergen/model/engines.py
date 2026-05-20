@@ -619,10 +619,7 @@ class ForecastingEngine(torch.nn.Module):
 
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
-            if isinstance(block, LayerNorm):
-                tokens = checkpoint(block, tokens, use_reentrant=False)
-            else:
-                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
 
@@ -1058,10 +1055,7 @@ class LatentPredictionHeadTransformer(nn.Module):
         patch_class_tokens = torch.cat(patch_class_tokens, dim=1)
 
         for _b_idx, block in enumerate(self.blocks):
-            if isinstance(block, LayerNorm):
-                patch_class_tokens = block(patch_class_tokens)
-            else:
-                patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+            patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
         return patch_class_tokens
 
 
