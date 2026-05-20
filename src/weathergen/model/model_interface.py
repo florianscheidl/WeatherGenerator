@@ -134,7 +134,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        fully_shard(model, **fsdp_kwargs)
+        # fully_shard(model, **fsdp_kwargs) # this groups all remaining parts of the model in a single communication group for sharding -> what exactly lands here and could we improve the grouping?
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
@@ -161,7 +161,7 @@ def init_model_and_shard(
     else:
         if with_ddp and with_fsdp:
             model.to_empty(device="cuda")
-            if with_fsdp:
+            if with_fsdp: # this will always hold in that clause.
                 model.reset_parameters()
 
     # model params
