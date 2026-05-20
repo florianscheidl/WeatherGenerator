@@ -29,6 +29,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.norms import LayerNorm
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -519,7 +520,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
             )
         if self.cf.get("ae_global_trailing_layer_norm", False):
             self.ae_global_blocks.append(
-                torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+                LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
             )
 
     def forward(self, tokens, coords=None):
@@ -597,7 +598,7 @@ class ForecastingEngine(torch.nn.Module):
                 # Optionally, add LayerNorm after i-th layer
                 if i in self.cf.get("fe_layer_norm_after_blocks", []):
                     self.fe_blocks.append(
-                        torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+                        LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
                     )
 
         def init_weights_final(m):
@@ -618,7 +619,7 @@ class ForecastingEngine(torch.nn.Module):
 
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
-            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
+            if isinstance(block, LayerNorm):
                 tokens = checkpoint(block, tokens, use_reentrant=False)
             else:
                 tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
@@ -846,8 +847,8 @@ class TargetPredictionEngine(nn.Module):
             "attention_dtype": get_dtype(self.cf.attention_dtype),
         }
         self.tte = nn.ModuleList()
-        self.output_in_norm = nn.LayerNorm(self.dims_embed[0])
-        self.latent_in_norm = nn.LayerNorm(self.cf.ae_global_dim_embed)
+        self.output_in_norm = LayerNorm(self.dims_embed[0])
+        self.latent_in_norm = LayerNorm(self.cf.ae_global_dim_embed)
         self.final_norm = nn.Identity()  # nn.RMSNorm(self.dims_embed[-1])
         self.dropout = nn.Dropout(0.2)
         self.pos_embed = nn.Parameter(torch.zeros(1, 9, self.cf.ae_global_dim_embed))
@@ -1057,7 +1058,7 @@ class LatentPredictionHeadTransformer(nn.Module):
         patch_class_tokens = torch.cat(patch_class_tokens, dim=1)
 
         for _b_idx, block in enumerate(self.blocks):
-            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
+            if isinstance(block, LayerNorm):
                 patch_class_tokens = block(patch_class_tokens)
             else:
                 patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
