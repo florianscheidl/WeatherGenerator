@@ -82,6 +82,8 @@ cpu = [
 gpu = [
   "torch==2.9.1; sys_platform == 'linux'",
   # flash-attn also has a torch dependency.
+  "torch==2.9.1; sys_platform == 'linux'",
+  # flash-attn also has a torch dependency.
   "flash-attn",
   "transformer_engine_torch; sys_platform == 'linux' and platform_machine == 'aarch64'",
 ]
@@ -228,6 +230,8 @@ weathergen-readers-extra = { workspace = true }
 flash-attn = [
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
+  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
   # There is no official support for flash-attn on macos
 ]
 
@@ -238,6 +242,8 @@ transformer_engine_torch = [
 
 torch = [
 # Explicit pin for GPU
+  { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_aarch64.whl", marker = 'sys_platform == "linux" and platform_machine == "aarch64"', extra="gpu" },
+  { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_x86_64.whl", marker = 'sys_platform == "linux"  and platform_machine == "x86_64"', extra="gpu" },
   { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_aarch64.whl", marker = 'sys_platform == "linux" and platform_machine == "aarch64"', extra="gpu" },
   { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_x86_64.whl", marker = 'sys_platform == "linux"  and platform_machine == "x86_64"', extra="gpu" },
 # Explicit pin for CPU.
