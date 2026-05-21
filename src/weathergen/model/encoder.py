@@ -123,7 +123,7 @@ class EncoderModule(torch.nn.Module):
         """
 
         stream_cell_tokens = checkpoint(
-            self.embed_engine, batch, model_params.pe_embed, use_reentrant=False, debug=True
+            self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
         tokens_global, posteriors = checkpoint(
@@ -132,7 +132,6 @@ class EncoderModule(torch.nn.Module):
             stream_cell_tokens,
             batch,
             use_reentrant=False,
-            debug=True,
         )
 
         tokens_global = checkpoint(
@@ -140,7 +139,6 @@ class EncoderModule(torch.nn.Module):
             tokens_global,
             coords=model_params.rope_coords,
             use_reentrant=False,
-            debug=True,
         )
 
         return tokens_global, posteriors
