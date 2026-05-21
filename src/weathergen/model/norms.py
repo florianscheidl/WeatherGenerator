@@ -12,60 +12,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from flash_attn.ops.triton.layer_norm import layer_norm_fn, rms_norm_fn
+    from flash_attn.ops.triton.layer_norm import rms_norm_fn
 
-    HAS_FLASH_ATTN_FUSED_NORM = True
+    HAS_FLASH_ATTN_FUSED_RMS_NORM = True
 except Exception:  # pragma: no cover - flash-attn is optional outside GPU envs
-    layer_norm_fn = None
     rms_norm_fn = None
-    HAS_FLASH_ATTN_FUSED_NORM = False
+    HAS_FLASH_ATTN_FUSED_RMS_NORM = False
 
-
-class LayerNorm(torch.nn.Module):
-    """LayerNorm that uses FlashAttention fused kernels when available."""
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-6,
-        elementwise_affine: bool = True,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__()
-        self.eps = eps
-        self.elementwise_affine = elementwise_affine
-        self.use_bias = bias
-        factory_kwargs = {"device": device, "dtype": dtype}
-
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim, **factory_kwargs))
-            self.bias = nn.Parameter(torch.zeros(dim, **factory_kwargs)) if bias else None
-        else:
-            self.register_buffer("weight", torch.ones(dim, **factory_kwargs), persistent=False)
-            self.bias = None
-
-    def reset_parameters(self):
-        if self.elementwise_affine:
-            torch.nn.init.ones_(self.weight)
-            if self.bias is not None:
-                torch.nn.init.zeros_(self.bias)
-        else:
-            self.weight.fill_(1.0)
-
-    def forward(self, x):
-        if HAS_FLASH_ATTN_FUSED_NORM and x.is_cuda:
-            return layer_norm_fn(
-                x,
-                self.weight,
-                self.bias,
-                eps=self.eps,
-                out_dtype=x.dtype,
-                is_rms_norm=False,
-            )
-
-        return torch.nn.functional.layer_norm(x, (x.shape[-1],), self.weight, self.bias, self.eps)
+LayerNorm = torch.nn.LayerNorm
 
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
@@ -98,11 +52,10 @@ class RMSNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        if HAS_FLASH_ATTN_FUSED_NORM and x.is_cuda:
+        if HAS_FLASH_ATTN_FUSED_RMS_NORM and x.is_cuda:
             return rms_norm_fn(x, self.weight, None, eps=self.eps)
 
-        var, _ = torch.var_mean(x.pow(2), dim=-1, keepdim=True, correction=0)
-        return x * torch.rsqrt(var + self.eps)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         """
