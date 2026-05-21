@@ -526,7 +526,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
     def forward(self, tokens, coords=None):
         aux_info = None
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False, debug=True)
         return tokens
 
 
@@ -619,7 +619,7 @@ class ForecastingEngine(torch.nn.Module):
 
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False, debug=True)
         return tokens
 
 
@@ -771,7 +771,9 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = checkpoint(
+                    block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False, debug=True
+                )
             else:
                 tc_tokens = checkpoint(
                     block,
@@ -781,6 +783,7 @@ class TargetPredictionEngineClassic(nn.Module):
                     tokens_lens,
                     tcs_aux,
                     use_reentrant=False,
+                    debug=True,
                 )
         return tc_tokens
 
@@ -941,6 +944,7 @@ class TargetPredictionEngine(nn.Module):
                     latent_lens=latent_lens,
                     output_lens=output_lens,
                     use_reentrant=False,
+                    debug=True,
                 )
             elif isinstance(layer, CrossAttentionBlock):
                 output = checkpoint(
@@ -951,6 +955,7 @@ class TargetPredictionEngine(nn.Module):
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
                     use_reentrant=False,
+                    debug=True,
                 )
             else:
                 output = checkpoint(
@@ -959,6 +964,7 @@ class TargetPredictionEngine(nn.Module):
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     use_reentrant=False,
+                    debug=True,
                 )
         output = (
             self.final_norm(output)
@@ -1055,7 +1061,9 @@ class LatentPredictionHeadTransformer(nn.Module):
         patch_class_tokens = torch.cat(patch_class_tokens, dim=1)
 
         for _b_idx, block in enumerate(self.blocks):
-            patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+            patch_class_tokens = checkpoint(
+                block, patch_class_tokens, use_reentrant=False, debug=True
+            )
         return patch_class_tokens
 
 
