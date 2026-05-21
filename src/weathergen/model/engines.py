@@ -13,7 +13,6 @@ import math
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.model.attention import (
@@ -526,7 +525,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
     def forward(self, tokens, coords=None):
         aux_info = None
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False, debug=True)
+            tokens = block(tokens, coords, aux_info)
         return tokens
 
 
@@ -619,7 +618,7 @@ class ForecastingEngine(torch.nn.Module):
 
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False, debug=True)
+            tokens = block(tokens, coords, aux_info)
         return tokens
 
 
@@ -1047,9 +1046,7 @@ class LatentPredictionHeadTransformer(nn.Module):
         patch_class_tokens = torch.cat(patch_class_tokens, dim=1)
 
         for _b_idx, block in enumerate(self.blocks):
-            patch_class_tokens = checkpoint(
-                block, patch_class_tokens, use_reentrant=False, debug=True
-            )
+            patch_class_tokens = block(patch_class_tokens)
         return patch_class_tokens
 
 
