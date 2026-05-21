@@ -13,6 +13,14 @@ import torch
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+try:
+    from transformer_engine.pytorch import LayerNormLinear as TELayerNormLinear
+
+    HAS_TRANSFORMER_ENGINE = True
+except Exception:  # pragma: no cover - optional GPU dependency
+    TELayerNormLinear = None
+    HAS_TRANSFORMER_ENGINE = False
+
 from weathergen.model.norms import AdaLayerNorm, LayerNorm, RMSNorm
 from weathergen.model.positional_encoding import rotary_pos_emb_2d
 
@@ -22,6 +30,72 @@ Attention blocks used by WeatherGenerator.
 Some blocks optionally apply 2D RoPE. When enabled, the caller must provide per-token 2D
 coordinates aligned with the token order (lat, lon in radians).
 """
+
+
+def _module_construction_device() -> torch.device:
+    return torch.empty(0).device
+
+
+def _should_use_te_fused_qkv(norm_type, dim_aux) -> bool:
+    return HAS_TRANSFORMER_ENGINE and norm_type == "LayerNorm" and dim_aux is None
+
+
+def _inject_legacy_qkv_projection_weights(state_dict, prefix, fused_weight_key):
+    q_key = prefix + "proj_heads_q.weight"
+    k_key = prefix + "proj_heads_k.weight"
+    v_key = prefix + "proj_heads_v.weight"
+    if fused_weight_key not in state_dict and all(key in state_dict for key in (q_key, k_key, v_key)):
+        state_dict[fused_weight_key] = torch.cat(
+            [state_dict.pop(q_key), state_dict.pop(k_key), state_dict.pop(v_key)], dim=0
+        )
+
+
+class FusedLayerNormQKVProjection(torch.nn.Module):
+    _weathergen_custom_reset_parameters = True
+
+    def __init__(self, dim_embed, dim_qkv, eps):
+        super().__init__()
+        self.dim_qkv = dim_qkv
+        self.proj = TELayerNormLinear(
+            dim_embed,
+            3 * dim_qkv,
+            eps=eps,
+            bias=False,
+            normalization="LayerNorm",
+            device=_module_construction_device(),
+            params_dtype=torch.get_default_dtype(),
+        )
+        self.reset_parameters()
+
+    @property
+    def weight(self):
+        return self.proj.weight
+
+    @property
+    def layer_norm_weight(self):
+        return self.proj.layer_norm_weight
+
+    @property
+    def layer_norm_bias(self):
+        return self.proj.layer_norm_bias
+
+    def reset_parameters(self):
+        reset = getattr(self.proj, "reset_parameters", None)
+        if reset is not None:
+            reset()
+        with torch.no_grad():
+            if self.layer_norm_weight is not None:
+                self.layer_norm_weight.fill_(1.0)
+            if self.layer_norm_bias is not None:
+                self.layer_norm_bias.zero_()
+        if self.layer_norm_weight is not None:
+            self.layer_norm_weight.requires_grad_(False)
+        if self.layer_norm_bias is not None:
+            self.layer_norm_bias.requires_grad_(False)
+
+    def forward(self, x):
+        qkv = self.proj(x)
+        return qkv.split(self.dim_qkv, dim=-1)
 
 
 class MultiSelfAttentionHeadVarlen(torch.nn.Module):
@@ -565,9 +639,15 @@ class MultiSelfAttentionHead(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.use_te_qkv_projection = _should_use_te_fused_qkv(norm_type, dim_aux)
+        if self.use_te_qkv_projection:
+            self.qkv_proj = FusedLayerNormQKVProjection(
+                dim_embed, num_heads * self.dim_head_proj, eps=norm_eps
+            )
+        else:
+            self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+            self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+            self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
@@ -591,14 +671,21 @@ class MultiSelfAttentionHead(torch.nn.Module):
     def forward(self, x, coords=None, ada_ln_aux=None):
         if self.with_residual:
             x_in = x
-        x = self.lnorm(x).to(self.dtype) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
+        if self.use_te_qkv_projection and ada_ln_aux is None:
+            q_proj, k_proj, v_proj = self.qkv_proj(x)
+            x = x.to(self.dtype)
+        else:
+            x = self.lnorm(x).to(self.dtype) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
+            q_proj = self.proj_heads_q(x)
+            k_proj = self.proj_heads_k(x)
+            v_proj = self.proj_heads_v(x)
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
         s = [*([x.shape[0], 1] if len(x.shape) == 2 else x.shape[:-1]), self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype)
-        ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype)
-        vs = self.proj_heads_v(x).reshape(s).to(self.dtype)
+        qs = self.lnorm_q(q_proj.reshape(s)).to(self.dtype)
+        ks = self.lnorm_k(k_proj.reshape(s)).to(self.dtype)
+        vs = v_proj.reshape(s).to(self.dtype)
 
         if self.with_2d_rope:
             if coords is None:
@@ -616,6 +703,29 @@ class MultiSelfAttentionHead(torch.nn.Module):
             out = out + x_in
 
         return out
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        if self.use_te_qkv_projection:
+            _inject_legacy_qkv_projection_weights(state_dict, prefix, prefix + "qkv_proj.proj.weight")
+
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
 
 class MultiCrossAttentionHead(torch.nn.Module):

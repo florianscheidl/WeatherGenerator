@@ -593,7 +593,9 @@ class Model(torch.nn.Module):
 
     def reset_parameters(self):
         def _reset_params(module):
-            if isinstance(module, nn.Linear) or isinstance(module, LayerNorm):
+            if getattr(module, "_weathergen_custom_reset_parameters", False):
+                module.reset_parameters()
+            elif isinstance(module, nn.Linear) or isinstance(module, LayerNorm):
                 module.reset_parameters()
             else:
                 pass
