@@ -80,10 +80,9 @@ cpu = [
 ]
 
 gpu = [
-  "torch==2.8.0; sys_platform == 'linux'",
-  # flash-attn and transformer-engine-torch also depend on torch.
+  "torch==2.9.1; sys_platform == 'linux'",
+  # flash-attn also has a torch dependency.
   "flash-attn",
-  "transformer-engine-torch; sys_platform == 'linux'",
 ]
 
 
@@ -226,15 +225,15 @@ weathergen-readers-extra = { workspace = true }
 
 
 flash-attn = [
-  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.1/flash_attn-2.8.1+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+  { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
   # There is no official support for flash-attn on macos
 ]
 
 torch = [
 # Explicit pin for GPU
-  { url = "https://download.pytorch.org/whl/cu129/torch-2.8.0%2Bcu129-cp312-cp312-manylinux_2_28_aarch64.whl", marker = 'sys_platform == "linux" and platform_machine == "aarch64"', extra="gpu" },
-  { url = "https://download.pytorch.org/whl/cu129/torch-2.8.0%2Bcu129-cp312-cp312-manylinux_2_28_x86_64.whl", marker = 'sys_platform == "linux"  and platform_machine == "x86_64"', extra="gpu" },
+  { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_aarch64.whl", marker = 'sys_platform == "linux" and platform_machine == "aarch64"', extra="gpu" },
+  { url = "https://download-r2.pytorch.org/whl/cu126/torch-2.9.1+cu126-cp312-cp312-manylinux_2_28_x86_64.whl", marker = 'sys_platform == "linux"  and platform_machine == "x86_64"', extra="gpu" },
 # Explicit pin for CPU.
   { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.9.1+cpu-cp312-cp312-manylinux_2_28_aarch64.whl",marker = "sys_platform == 'linux' and platform_machine == 'aarch64'",extra = "cpu" },
   { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.9.1+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",marker = "sys_platform == 'linux' and platform_machine == 'x86_64'",extra = "cpu" },
@@ -242,9 +241,6 @@ torch = [
   # No acceleration for now.
   # TODO: explore pytorch + metal backend
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'", extra="gpu"},
-]
-transformer-engine-torch = [
-  { url = "https://github.com/NVIDIA/TransformerEngine/releases/download/v2.15/transformer_engine_torch-2.15.0+cu12torch2.8.0+cu129cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 ]
 # branch = "feature/any-zarr-version-in-pyproject/"
 anemoi-datasets = { git = "https://github.com/tjhunter/anemoi-datasets", tag = "0.0.1"}
