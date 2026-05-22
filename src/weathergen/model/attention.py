@@ -13,13 +13,7 @@ import torch
 from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-try:
-    from transformer_engine.pytorch import LayerNormLinear as TELayerNormLinear
-
-    HAS_TRANSFORMER_ENGINE = True
-except Exception:  # pragma: no cover - optional GPU dependency
-    TELayerNormLinear = None
-    HAS_TRANSFORMER_ENGINE = False
+from transformer_engine.pytorch import LayerNormLinear as TELayerNormLinear
 
 from weathergen.model.norms import AdaLayerNorm, LayerNorm, RMSNorm
 from weathergen.model.positional_encoding import rotary_pos_emb_2d
@@ -37,7 +31,13 @@ def _module_construction_device() -> torch.device:
 
 
 def _should_use_te_fused_qkv(norm_type, dim_aux) -> bool:
-    return HAS_TRANSFORMER_ENGINE and norm_type == "LayerNorm" and dim_aux is None
+    if dim_aux is not None:
+        raise NotImplementedError("TransformerEngine fused QKV does not support dim_aux")
+    if norm_type != "LayerNorm":
+        raise NotImplementedError(
+            f"TransformerEngine fused QKV requires norm_type='LayerNorm', got {norm_type!r}"
+        )
+    return True
 
 
 def _inject_legacy_qkv_projection_weights(state_dict, prefix, fused_weight_key):
@@ -640,14 +640,9 @@ class MultiSelfAttentionHead(torch.nn.Module):
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
         self.use_te_qkv_projection = _should_use_te_fused_qkv(norm_type, dim_aux)
-        if self.use_te_qkv_projection:
-            self.qkv_proj = FusedLayerNormQKVProjection(
-                dim_embed, num_heads * self.dim_head_proj, eps=norm_eps
-            )
-        else:
-            self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-            self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-            self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
+        self.qkv_proj = FusedLayerNormQKVProjection(
+            dim_embed, num_heads * self.dim_head_proj, eps=norm_eps
+        )
         self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
@@ -671,14 +666,8 @@ class MultiSelfAttentionHead(torch.nn.Module):
     def forward(self, x, coords=None, ada_ln_aux=None):
         if self.with_residual:
             x_in = x
-        if self.use_te_qkv_projection and ada_ln_aux is None:
-            q_proj, k_proj, v_proj = self.qkv_proj(x)
-            x = x.to(self.dtype)
-        else:
-            x = self.lnorm(x).to(self.dtype) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
-            q_proj = self.proj_heads_q(x)
-            k_proj = self.proj_heads_k(x)
-            v_proj = self.proj_heads_v(x)
+        q_proj, k_proj, v_proj = self.qkv_proj(x)
+        x = x.to(self.dtype)
 
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
@@ -714,8 +703,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         unexpected_keys,
         error_msgs,
     ):
-        if self.use_te_qkv_projection:
-            _inject_legacy_qkv_projection_weights(state_dict, prefix, prefix + "qkv_proj.proj.weight")
+        _inject_legacy_qkv_projection_weights(state_dict, prefix, prefix + "qkv_proj.proj.weight")
 
         super()._load_from_state_dict(
             state_dict,
