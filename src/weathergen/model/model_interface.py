@@ -72,62 +72,6 @@ def init_model_and_shard(
             bucket_cap_mb=512,
         )
 
-    elif with_ddp and with_fsdp:
-        # with DDP *and() FSDP
-        fsdp_kwargs = {
-            "mp_policy": (
-                MixedPrecisionPolicy(
-                    param_dtype=get_dtype(cf.mixed_precision_dtype),
-                    reduce_dtype=torch.float32,
-                )
-                if cf.with_mixed_precision
-                else None
-            ),
-        }
-        modules_to_shard = (
-            MLP,
-            MultiSelfAttentionHeadLocal,
-            MultiSelfAttentionHead,
-            MultiCrossAttentionHeadVarlen,
-            MultiCrossAttentionHeadVarlenSlicedQ,
-            MultiSelfAttentionHeadVarlen,
-        )
-
-        for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.forecast_engine.fe_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        for module in model.latent_heads.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
-
-        full_precision_fsdp_kwargs = {
-            "mp_policy": (
-                MixedPrecisionPolicy(
-                    param_dtype=torch.float32,
-                    reduce_dtype=torch.float32,
-                )
-                if cf.with_mixed_precision
-                else None
-            ),
-        }
-
-        for module in model.target_token_engines.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
-
     if with_ddp and with_fsdp:
         fully_shard(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
