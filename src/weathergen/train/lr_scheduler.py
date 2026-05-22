@@ -179,7 +179,7 @@ class LearningRateScheduler:
 
         # explicitly track steps to be able to switch between optimizers
         self.i_step = 0
-        self.lr = self.cur_scheduler.get_last_lr()
+        self.lr = self.optimizer.param_groups[0]["lr"] if self.cur_scheduler is None else self.cur_scheduler.get_last_lr()[0]
 
         # advance manually to step_contd (last_mini_epoch parameter for schedulers is not working
         # and this is also more brittle with the different phases)
@@ -218,8 +218,11 @@ class LearningRateScheduler:
                 for g in self.optimizer.param_groups:
                     g["lr"] = self.lr
         else:
-            self.cur_scheduler.step()
-            self.lr = self.cur_scheduler.get_last_lr()[0]
+            if self.cur_scheduler is not None:
+                self.cur_scheduler.step()
+                self.lr = self.cur_scheduler.get_last_lr()[0]
+            else:
+                self.lr = self.optimizer.param_groups[0]["lr"]
 
         # switch scheduler when learning rate regime completed
         if self.i_step == self.n_steps_warmup:

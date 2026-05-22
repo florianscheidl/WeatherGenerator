@@ -4,3 +4,9 @@ profiling:
   warmup_iteration: 4
   active_iteration: 2
   repeat: 4
+
+training_config:
+  num_mini_epochs: 1
+  samples_per_mini_epoch: 2048
+  forecast :
+      num_steps: 1
