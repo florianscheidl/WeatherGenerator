@@ -129,7 +129,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        # fully_shard(model) # TODO: this might crash, so need to experiment - check if we can control the FSDP sharding groups.
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
