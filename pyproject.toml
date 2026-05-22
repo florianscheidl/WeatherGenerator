@@ -27,7 +27,11 @@ dependencies = [
  "anemoi-datasets",
  "weathergen-common",
  "weathergen-evaluate",
- "weathergen-readers-extra"
+ "weathergen-readers-extra",
+ "ninja>=1.13.0",
+ "cmake>=4.3.2",
+ "pybind11[global]>=3.0.4",
+ "setuptools<=80.0.0",
 ]
 
 
@@ -85,9 +89,8 @@ gpu = [
   "torch==2.9.1; sys_platform == 'linux'",
   # flash-attn also has a torch dependency.
   "flash-attn",
-  "transformer_engine_torch; sys_platform == 'linux' and platform_machine == 'aarch64'",
+  "transformer-engine"
 ]
-
 
 [tool.black]
 
@@ -226,7 +229,6 @@ weathergen-evaluate = { workspace = true }
 weathergen-metrics = { workspace = true }
 weathergen-readers-extra = { workspace = true }
 
-
 flash-attn = [
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
@@ -234,6 +236,11 @@ flash-attn = [
   { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
   # There is no official support for flash-attn on macos
 ]
+
+# transformer-engine = { url = "file:///e/project1/weatherai/scheidl2/wheels/transformer_engine-2.15.0+cabc6b6b-cp312-cp312-linux_aarch64.whl" }
+# transformer-engine = [{ url = "file:///e/project1/weatherai/scheidl2/wheels/transformer_engine-2.15.0+cabc6b6b-cp312-cp312-linux_aarch64.whl" }]
+transformer-engine = { path = "../wheels/transformer_engine-2.15.0+cabc6b6b-cp312-cp312-linux_aarch64.whl" }
+
 
 torch = [
 # Explicit pin for GPU
