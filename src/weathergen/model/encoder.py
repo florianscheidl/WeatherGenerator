@@ -167,7 +167,6 @@ class EncoderModule(torch.nn.Module):
         # combined cell lens for all tokens in batch across all input steps
         # reuse module buffers initialized in __init__ (same device as tokens)
         zero_pad = self.zero_pad
-        l0_init = self.l0_init
 
         # subdivision factor for required splitting
         clen = self.num_healpix_cells // (2 if self.cf.healpix_level <= 5 else 8)
@@ -178,7 +177,7 @@ class EncoderModule(torch.nn.Module):
             # make sure we properly catch all elements in last chunk
             i_end = (i + 1) * clen if i < (cell_lens.shape[0] // clen) - 1 else cell_lens.shape[0]
             l0, l1 = (
-                (l0_init if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
+                (self.l0_init if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
                 cell_lens[:i_end].cumsum(0)[-1],
             )
 
