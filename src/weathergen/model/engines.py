@@ -85,7 +85,8 @@ class EmbeddingEngine(torch.nn.Module):
     def forward(self, batch, pe_embed):
         num_steps_input = batch.get_num_steps()
 
-        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
+        # TODO: checking if sync makes sense here - with each device seeing a different batch?
+        num_tokens = torch.sum(batch.tokens_lens)
         tokens_all = torch.empty(
             (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
         )

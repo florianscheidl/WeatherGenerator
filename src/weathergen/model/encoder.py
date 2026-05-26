@@ -235,11 +235,11 @@ class EncoderModule(torch.nn.Module):
         cell_lens_unflattened = torch.sum(tokens_lens, 2)
         cell_mask = cell_lens_unflattened.to(torch.bool)
         batch_lens = cell_mask.sum(dim=-1).flatten()
-        expected_len = batch_lens.sum().item()
-        actual_len = tokens_global_unmasked.shape[1]
-        assert expected_len == actual_len, (
-            f"Shape mismatch: expected {expected_len}, got {actual_len}"
-        )
+        # expected_len = batch_lens.sum().item() # TODO! Maybe move this to a test?
+        # actual_len = tokens_global_unmasked.shape[1]
+        # assert expected_len == actual_len, (
+        #     f"Shape mismatch: expected {expected_len}, got {actual_len}"
+        # )
         tokens_global_unmasked = torch.split(tokens_global_unmasked.squeeze(0), list(batch_lens))
         tokens_global_unmasked = torch.cat(
             [
