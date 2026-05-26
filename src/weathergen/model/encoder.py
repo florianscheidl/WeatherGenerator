@@ -56,6 +56,10 @@ class EncoderModule(torch.nn.Module):
         self.embed_engine: EmbeddingEngine | None = None
         self.interpolator_latents: LatentInterpolator | None = None
 
+        # zero tensors for chunked processing (initialized once, reused on device)
+        self.register_buffer("zero_pad", torch.zeros(1, dtype=torch.int32), persistent=False)
+        self.register_buffer("l0_init", torch.tensor(0, dtype=torch.int64), persistent=False)
+
         # embedding engine
         # determine stream names once so downstream components use consistent keys
         self.stream_names = [str(stream_cfg["name"]) for stream_cfg in cf.streams]
@@ -161,7 +165,9 @@ class EncoderModule(torch.nn.Module):
         """
 
         # combined cell lens for all tokens in batch across all input steps
-        zero_pad = torch.zeros(1, device=tokens.device, dtype=torch.int32)
+        # reuse module buffers initialized in __init__ (same device as tokens)
+        zero_pad = self.zero_pad
+        l0_init = self.l0_init
 
         # subdivision factor for required splitting
         clen = self.num_healpix_cells // (2 if self.cf.healpix_level <= 5 else 8)
@@ -172,12 +178,12 @@ class EncoderModule(torch.nn.Module):
             # make sure we properly catch all elements in last chunk
             i_end = (i + 1) * clen if i < (cell_lens.shape[0] // clen) - 1 else cell_lens.shape[0]
             l0, l1 = (
-                (0 if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
+                (l0_init if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
                 cell_lens[:i_end].cumsum(0)[-1],
             )
 
-            toks = tokens[:l1] if l0 == 0 else tokens[l0:l1]
-            
+            toks = tokens[l0:l1]
+
             # if we have a very sparse input, we may have no tokens in the chunk, toks
             # skip processing of the empty chunk in this case
             # Check if this chunk is empty
