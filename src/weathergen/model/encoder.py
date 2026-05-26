@@ -171,12 +171,9 @@ class EncoderModule(torch.nn.Module):
         for i in range(cell_lens.shape[0] // clen):
             # make sure we properly catch all elements in last chunk
             i_end = (i + 1) * clen if i < (cell_lens.shape[0] // clen) - 1 else cell_lens.shape[0]
-            l1 = cell_lens[:i_end].cumsum(0)[-1]
-            l0, l1 = (
-                (torch.tensor(0).to(cell_lens.device) if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
-                cell_lens[:i_end].cumsum(0)[-1],
-            )
-            toks = tokens[l0:l1]
+            l0, l1 = cell_lens[: i * clen].cumsum(0)[-1], cell_lens[:i_end].cumsum(0)[-1]
+
+            toks = tokens[:l1] if i==0 else tokens[l0:l1]
 
             # if we have a very sparse input, we may have no tokens in the chunk, toks
             # skip processing of the empty chunk in this case
