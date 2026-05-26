@@ -55,7 +55,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         self.dim_head_proj = dim_embed // num_heads if dim_head_proj is None else dim_head_proj
 
         if norm_type == "LayerNorm":
-            norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
+            norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps, dtype=attention_dtype)
         else:
             norm = RMSNorm
 
