@@ -153,6 +153,32 @@ class EncoderModule(torch.nn.Module):
 
         return tokens, posteriors
 
+    def assimilate_local_project(self, tokens, tokens_global, cell_lens, q_cells_lens):
+        """Apply the local assimilation engine and then the local-to-global adapter"""
+
+        # FlashAttention varlen lengths use a leading 0
+        zero_pad = torch.zeros(1, device=tokens.device, dtype=torch.int32)
+        cell_lens_padded = torch.cat([zero_pad, cell_lens])
+
+        tokens = self.ae_local_engine(tokens, cell_lens_padded, use_reentrant=False)
+        tokens, posteriors = self.interpolate_latents(tokens)
+
+        # Select only cells with at least one local token; keep varlen lengths in [0, ...] form.
+        mask = cell_lens.to(torch.bool)
+        tokens_global_unmasked = tokens_global[mask]
+        q_cells_lens_unmasked = torch.cat([zero_pad, q_cells_lens[1:][mask]])
+        cell_lens_unmasked = torch.cat([zero_pad, cell_lens[mask]])
+
+        # local to global adapter engine
+        tokens_global_unmasked = self.ae_local_global_engine(
+            tokens,
+            tokens_global_unmasked,
+            q_cells_lens_unmasked,
+            cell_lens_unmasked,
+        )
+
+        return tokens_global_unmasked, posteriors
+
     def assimilate_local_project_chunked(self, tokens, tokens_global, cell_lens, q_cells_lens):
         """
         Apply the local assimilation engine and then the
@@ -306,9 +332,13 @@ class EncoderModule(torch.nn.Module):
             tokens_global = tokens_global.repeat(rs, 1, 1)
 
         # apply local assimilation engine and project onto global latent vectors
-        tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
+        tokens_global_unmasked, posteriors = self.assimilate_local_project(
             tokens, tokens_global, cell_lens, model_params.q_cells_lens
         )
+        
+        # tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
+        #     tokens, tokens_global, cell_lens, model_params.q_cells_lens
+        # )
 
         # apply aggregation engine on unmasked tokens
         tokens_global_unmasked = self.aggregation_engine_unmasked(
