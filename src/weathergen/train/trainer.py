@@ -906,6 +906,7 @@ class ProfilingTrainer(Trainer):
                     repeat=cf.profiling.repeat,
                 ),
                 on_trace_ready=handler,
+                acc_events=True,
             )
         else:
             prof = nullcontext()
