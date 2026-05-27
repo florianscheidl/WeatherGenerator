@@ -182,7 +182,7 @@ class EncoderModule(torch.nn.Module):
                 cell_lens[:i_end].cumsum(0)[-1],
             )
 
-            toks = tokens[l0:l1]
+            toks = tokens[l0:l1] # This slicing remains problematic.
 
             # if we have a very sparse input, we may have no tokens in the chunk, toks
             # skip processing of the empty chunk in this case
