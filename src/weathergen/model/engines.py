@@ -240,7 +240,11 @@ class LocalAssimilationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens_c, cell_lens_c, use_reentrant):
+    def forward(self, tokens_c, cell_lens_c, use_reentrant, token_mask=None):
+        if token_mask is not None:
+            tokens_c = tokens_c[token_mask]
+        if tokens_c.shape[0] == 0:
+            return tokens_c
         for block in self.ae_local_blocks:
             tokens_c = block(tokens_c, cell_lens_c)
         return tokens_c
