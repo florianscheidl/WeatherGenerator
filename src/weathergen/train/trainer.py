@@ -378,12 +378,14 @@ class Trainer(TrainerBase):
             len_per_rank = (
                 len(self.dataset) // (self.world_size_original * self.batch_size_per_gpu)
             ) * self.batch_size_per_gpu
-            mini_epoch_base = int(
-                self.cf.general.istep
-                / (
-                    min(len_per_rank, self.training_cfg.samples_per_mini_epoch)
-                    * self.world_size_original
-                )
+            samples_in_mini_epoch = (
+                min(len_per_rank, self.training_cfg.samples_per_mini_epoch)
+                * self.world_size_original
+            )
+            mini_epoch_base = (
+                int(self.cf.general.istep / samples_in_mini_epoch)
+                if samples_in_mini_epoch > 0
+                else 0
             )
 
         if is_root():
