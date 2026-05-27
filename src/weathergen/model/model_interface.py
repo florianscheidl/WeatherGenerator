@@ -95,23 +95,23 @@ def init_model_and_shard(
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs, reshard_after_forward=False)
 
         for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs, reshard_after_forward=False)
 
         for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs, reshard_after_forward=False)
 
         for module in model.forecast_engine.fe_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs, reshard_after_forward=False)
 
         for module in model.latent_heads.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs, reshard_after_forward=False)
 
         full_precision_fsdp_kwargs = {
             "mp_policy": (
@@ -126,10 +126,10 @@ def init_model_and_shard(
 
         for module in model.target_token_engines.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
+                fully_shard(module, **full_precision_fsdp_kwargs, reshard_after_forward=False)
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        fully_shard(model, reshard_after_forward=False)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
