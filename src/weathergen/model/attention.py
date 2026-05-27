@@ -107,15 +107,14 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs, _ = flash_attn_varlen_func(
-            qs,
-            ks,
-            vs,
-            cum_x_lens,
-            cum_x_lens,
-            x_lens.max(),
-            x_lens.max(),
+            q=qs,
+            k=ks,
+            v=vs,
+            cu_seqlens_q=cum_x_lens,
+            cu_seqlens_k=cum_x_lens,
+            max_seqlen_q=x_lens.max(),
+            max_seqlen_k=x_lens.max(),
             softcap=self.softcap,
-            # dropout_p=dropout_rate,
         )
 
         out = self.proj_out(outs.flatten(-2, -1))
@@ -387,13 +386,13 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
             cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
             outs, _ = flash_attn_varlen_func(
-                qs,
-                ks,
-                vs,
-                cum_x_q_lens,
-                cum_x_kv_lens,
-                x_q_lens.max(),
-                x_kv_lens.max(),
+                q=qs,
+                k=ks,
+                v=vs,
+                cu_seqlens_q=cum_x_q_lens,
+                cu_seqlens_k=cum_x_kv_lens,
+                max_seqlen_q=x_q_lens.max(),
+                max_seqlen_k=x_kv_lens.max(),
                 softcap=self.softcap,
                 # dropout_p=dropout_rate,
             )
@@ -505,13 +504,13 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         for _i, qs_i in enumerate(qs):
             outs += [
                 flash_attn_varlen_func(
-                    qs_i,
-                    ks,
-                    vs,
-                    cum_x_q_lens,
-                    cum_x_kv_lens,
-                    x_q_lens.max(),
-                    x_kv_lens.max(),
+                    q=qs_i,
+                    k=ks,
+                    v=vs,
+                    cu_seqlens_q=cum_x_q_lens,
+                    cu_seqlens_k=cum_x_kv_lens,
+                    max_seqlen_q=x_q_lens.max(),
+                    max_seqlen_k=x_kv_lens.max(),
                     softcap=self.softcap,
                     # dropout_p=dropout_rate,
                 )[0]
