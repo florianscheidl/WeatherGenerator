@@ -229,6 +229,7 @@ flash-attn-4 = [
 # TODO: open issue
 #  { url = "https://github.com/cathalobrien/get-flash-attn/releases/download/v0.1-alpha/flash_attn-2.7.4+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 { url = "https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta15/flash_attn_4-4.0.0b15-py3-none-any.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+{ url = "https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta15/flash_attn_4-4.0.0b15-py3-none-any.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" },
 # This version was rebuilt locally on santis and uploaded.
 #  { url = "https://object-store.os-api.cci1.ecmwf.int/weathergenerator-dev/wheels/flash_attn-2.7.3-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
 { url = "https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta15/flash_attn_4-4.0.0b15-py3-none-any.whl", marker = "sys_platform == 'linux'  and platform_machine == 'x86_64'" },
