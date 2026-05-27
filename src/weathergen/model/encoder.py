@@ -56,8 +56,9 @@ class EncoderModule(torch.nn.Module):
         self.embed_engine: EmbeddingEngine | None = None
         self.interpolator_latents: LatentInterpolator | None = None
 
-        # zero tensor for chunked processing (initialized once, reused on device)
+        # zero tensors for chunked processing (initialized once, reused on device)
         self.register_buffer("zero_pad", torch.zeros(1, dtype=torch.int32), persistent=False)
+        self.register_buffer("l0_init", torch.tensor(0, dtype=torch.int64), persistent=False)
 
         # embedding engine
         # determine stream names once so downstream components use consistent keys
@@ -163,58 +164,57 @@ class EncoderModule(torch.nn.Module):
         to work around to bug in flash attention, the computations is performed in chunks
         """
 
+        # combined cell lens for all tokens in batch across all input steps
+        # reuse module buffers initialized in __init__ (same device as tokens)
         zero_pad = self.zero_pad
-        token_positions = torch.arange(tokens.shape[0], device=tokens.device)
-        token_offsets = torch.cumsum(cell_lens, 0, dtype=torch.int64)
+        l0_init = self.l0_init
 
         # subdivision factor for required splitting
         clen = self.num_healpix_cells // (2 if self.cf.healpix_level <= 5 else 8)
-        num_chunks = (cell_lens.shape[0] + clen - 1) // clen
         tokens_global_unmasked = []
         posteriors = []
 
-        for i in range(num_chunks):
+        for i in range(cell_lens.shape[0] // clen):
             # make sure we properly catch all elements in last chunk
-            i_end = min((i + 1) * clen, cell_lens.shape[0])
-            cell_lens_cur = torch.cat([zero_pad, cell_lens[i * clen : i_end]])
-            q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
+            i_end = (i + 1) * clen if i < (cell_lens.shape[0] // clen) - 1 else cell_lens.shape[0]
+            l0, l1 = (
+                (l0_init if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
+                cell_lens[:i_end].cumsum(0)[-1],
+            )
 
-            l0 = token_offsets[i * clen - 1] if i > 0 else token_offsets.new_zeros(())
-            l1 = token_offsets[i_end - 1]
-            token_mask = (token_positions >= l0) & (token_positions < l1)
+            toks = tokens[l0:l1]
 
-            # if we have a very sparse input, we may have no tokens in the chunk
-            if not token_mask.any():
+            # if we have a very sparse input, we may have no tokens in the chunk, toks
+            # skip processing of the empty chunk in this case
+            # Check if this chunk is empty
+            if l0 == l1 or toks.shape[0] == 0:
                 continue
 
             toks_global = tokens_global[i * clen : i_end]
+            cell_lens_cur = torch.cat([zero_pad, cell_lens[i * clen : i_end]])
+            q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
-            # local assimilation model over masked token subset
-            toks = self.ae_local_engine(
-                tokens,
-                cell_lens_cur,
-                use_reentrant=False,
-                token_mask=token_mask,
-            )
+            # local assimilation model
+            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
 
             # create mask for global tokens, without first element (used for padding)
             mask = cell_lens_cur[1:].to(torch.bool)
-            toks_global_unmasked_chunk = toks_global[mask]
+            toks_global_unmasked = toks_global[mask]
             q_cells_lens_unmasked = torch.cat([zero_pad, q_cells_lens_cur[1:][mask]])
             cell_lens_unmasked = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
 
             # local to global adapter engine
-            toks_global_unmasked_chunk = self.ae_local_global_engine(
+            toks_global_unmasked = self.ae_local_global_engine(
                 toks,
-                toks_global_unmasked_chunk,
+                toks_global_unmasked,
                 q_cells_lens_unmasked,
                 cell_lens_unmasked,
             )
 
-            tokens_global_unmasked += [toks_global_unmasked_chunk]
+            tokens_global_unmasked += [toks_global_unmasked]
 
         if len(tokens_global_unmasked) == 0:
             assert False, "Not yet implemented"
