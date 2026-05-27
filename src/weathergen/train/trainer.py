@@ -256,6 +256,10 @@ class Trainer(TrainerBase):
 
     def run(self, cf, devices, run_id_contd=None, mini_epoch_contd=None):
         # general initalization
+
+        if cf.profiling.enabled and is_root():
+            start_record_memory_history()
+
         self.init(cf, devices)
         cf = self.cf
 
@@ -392,6 +396,10 @@ class Trainer(TrainerBase):
 
         # run validation before training if requested
         self.validate_before_training()
+
+        if cf.profiling.enabled and is_root():
+            export_memory_snapshot(cf)
+            stop_record_memory_history()
 
         for mini_epoch in range(mini_epoch_base, self.training_cfg.num_mini_epochs):
             logger.info(f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: train.")
