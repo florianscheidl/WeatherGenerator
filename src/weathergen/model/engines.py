@@ -526,7 +526,10 @@ class GlobalAssimilationEngine(torch.nn.Module):
     def forward(self, tokens, coords=None):
         aux_info = None
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
+                tokens = block(tokens)
+            else:
+                tokens = block(tokens, coords, aux_info)
         return tokens
 
 
@@ -620,9 +623,9 @@ class ForecastingEngine(torch.nn.Module):
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
-                tokens = checkpoint(block, tokens, use_reentrant=False)
+                tokens = block(tokens)
             else:
-                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+                tokens = block(tokens, coords, aux_info)
         return tokens
 
 
@@ -774,17 +777,9 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = block(tc_tokens, tcs_lens, tcs_aux)
             else:
-                tc_tokens = checkpoint(
-                    block,
-                    tc_tokens,
-                    tokens_stream,
-                    tcs_lens,
-                    tokens_lens,
-                    tcs_aux,
-                    use_reentrant=False,
-                )
+                tc_tokens = block(tc_tokens, tokens_stream, tcs_lens, tokens_lens, tcs_aux)
         return tc_tokens
 
 
@@ -936,33 +931,23 @@ class TargetPredictionEngine(nn.Module):
         )
         for layer in self.tte:
             if isinstance(layer, OriginalPredictionBlock):
-                output = checkpoint(
-                    layer,
+                output = layer(
                     latent=latent.flatten(0, 1),
                     output=output,
                     coords=coordinates,
                     latent_lens=latent_lens,
                     output_lens=output_lens,
-                    use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
-                output = checkpoint(
-                    layer,
+                output = layer(
                     x=output,
                     x_kv=latent.flatten(0, 1),
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
-                    use_reentrant=False,
                 )
             else:
-                output = checkpoint(
-                    layer,
-                    x=output,
-                    x_lens=output_lens,
-                    aux=latent[:, 0],
-                    use_reentrant=False,
-                )
+                output = layer(x=output, x_lens=output_lens, aux=latent[:, 0])
         output = (
             self.final_norm(output)
             if self.cf.decoder_type != "PerceiverIOCoordConditioning"
@@ -1061,7 +1046,7 @@ class LatentPredictionHeadTransformer(nn.Module):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 patch_class_tokens = block(patch_class_tokens)
             else:
-                patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+                patch_class_tokens = block(patch_class_tokens)
         return patch_class_tokens
 
 
