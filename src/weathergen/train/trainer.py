@@ -873,7 +873,7 @@ class ProfilingTrainer(Trainer):
         # training loop
         self.t_start = time.time()
 
-        wrap_module_forward_with_profiling(self.model, prefix="model")
+        # wrap_module_forward_with_profiling(self.model, prefix="model")
 
         max_profile_steps = (
             cf.profiling.wait_iteration + cf.profiling.warmup_iteration + cf.profiling.active_iteration
