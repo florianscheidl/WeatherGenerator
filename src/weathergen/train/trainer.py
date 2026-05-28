@@ -873,32 +873,23 @@ class ProfilingTrainer(Trainer):
         # training loop
         self.t_start = time.time()
 
-        # wrap_module_forward_with_profiling(self.model, prefix="model")
-
         max_profile_steps = (
             cf.profiling.wait_iteration + cf.profiling.warmup_iteration + cf.profiling.active_iteration
         ) * cf.profiling.repeat
 
         handler = partial(trace_handler, cf)
 
-        # Detect ARM architecture (e.g., NVIDIA GH200 uses aarch64 CPU)
-        # PyTorch's memory timeline profiler (export_memory_timeline) internally requires
-        # with_stack=True, which relies on C++ stack unwinding (record_context_cpp).
-        # This is only supported on Linux x86_64 — on aarch64 it silently fails during
-        # profiler teardown, causing a "Python replay stack is empty" RuntimeError.
-        # Therefore, on aarch64 we disable with_stack and skip the memory timeline export.
-        # CUDA kernel profiling, FLOPS, shapes, and chrome traces are unaffected.
-        on_aarch64 = platform.machine() == "aarch64"
-
-        # Determine profiler setup
+        # Use a minimal profiler configuration while debugging FA4 failures.
+        # We keep trace capture and scheduling, but disable the heavier metadata
+        # collection options that can perturb tensor lifetimes and autograd behavior.
         if is_root():
             prof = profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-                with_modules=True,
-                with_flops=True,
+                record_shapes=False,
+                profile_memory=False,
+                with_stack=False,
+                with_modules=False,
+                with_flops=False,
                 schedule=torch.profiler.schedule(
                     wait=cf.profiling.wait_iteration,
                     warmup=cf.profiling.warmup_iteration,
@@ -909,10 +900,6 @@ class ProfilingTrainer(Trainer):
             )
         else:
             prof = nullcontext()
-
-        if is_root():
-            # Start recording memory snapshot history
-            start_record_memory_history()
 
         with prof:
             for bidx, batch in enumerate(islice(dataset_iter, max_profile_steps)):
@@ -1003,44 +990,29 @@ class ProfilingTrainer(Trainer):
                     prof.step()
 
             # Print only on rank 0
-            if is_root() and hasattr(prof, "key_averages"):
-                logger.info("\n" + "=" * 80)
-                logger.info("PROFILING SUMMARY")
-                logger.info("=" * 80)
+        if is_root() and hasattr(prof, "key_averages"):
+            logger.info("\n" + "=" * 80)
+            logger.info("PROFILING SUMMARY")
+            logger.info("=" * 80)
 
-                logger.info("\n--- Top Operations by FLOPs ---")
-                logger.info(
-                    prof.key_averages().table(
-                        sort_by="flops", row_limit=20, top_level_events_only=False
-                    )
+            logger.info("\n--- Top CUDA Time Operations ---")
+            logger.info(
+                prof.key_averages().table(
+                    sort_by="self_cuda_time_total", row_limit=20, top_level_events_only=False
                 )
+            )
 
-                logger.info("\n--- Operations Grouped by Module ---")
-                logger.info(
-                    prof.key_averages(group_by_stack_n=5).table(
-                        sort_by="cuda_time_total", row_limit=30
-                    )
+            logger.info("\n--- Top CPU Time Operations ---")
+            logger.info(
+                prof.key_averages().table(
+                    sort_by="self_cpu_time_total", row_limit=20, top_level_events_only=False
                 )
-
-                logger.info("\n--- Memory Usage ---")
-                logger.info(
-                    prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=20)
-                )
-
-        if is_root():
-            # Create the memory snapshot file
-            export_memory_snapshot(cf)
-
-            # Stop recording memory snapshot history
-            stop_record_memory_history()
-
-        torch.distributed.barrier()
+            )
 
         if is_root():
             logger.info("Training loop profiling is complete.")
             logger.info(
-                "The memory snapshot, memory usage distribution, and PyTorch profiler"
-                "trace can be found in the profiler_logs folder."
+                "The PyTorch profiler trace can be found in the profiler_logs folder."
             )
 
         if torch.distributed.is_initialized():
