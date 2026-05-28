@@ -24,6 +24,32 @@ coordinates aligned with the token order (lat, lon in radians).
 """
 
 
+def _zero_length_segment_indices(lengths: torch.Tensor) -> torch.Tensor:
+    return torch.nonzero(lengths[1:] == 0, as_tuple=False).flatten()
+
+
+def _filter_varlen_lengths(lengths: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    seg_lengths = lengths.to(torch.int64)[1:]
+    keep_mask = seg_lengths > 0
+    filtered_lengths = torch.cat(
+        [torch.zeros(1, device=lengths.device, dtype=torch.int32), seg_lengths[keep_mask].to(torch.int32)]
+    )
+    return filtered_lengths, keep_mask
+
+
+def _filter_varlen_tokens(tokens: torch.Tensor, lengths: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+    starts = torch.cumsum(lengths.to(torch.int64), 0)[:-1]
+    seg_lengths = lengths.to(torch.int64)[1:]
+    kept_segments = [
+        tokens[start : start + seg_len]
+        for start, seg_len, keep in zip(starts.tolist(), seg_lengths.tolist(), keep_mask.tolist(), strict=False)
+        if keep and seg_len > 0
+    ]
+    if kept_segments:
+        return torch.cat(kept_segments, dim=0)
+    return tokens.new_empty((0, *tokens.shape[1:]))
+
+
 class MultiSelfAttentionHeadVarlen(torch.nn.Module):
     def __init__(
         self,
@@ -104,12 +130,22 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
-        cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
+        zero_idx = _zero_length_segment_indices(x_lens)
+        if zero_idx.numel() > 0:
+            print(
+                f"[flash_attn self varlen] zero_length_segments count={zero_idx.numel()} first_indices={zero_idx[:10].tolist()}",
+                flush=True,
+            )
+        filtered_x_lens, keep_mask = _filter_varlen_lengths(x_lens)
+        qs = _filter_varlen_tokens(qs, x_lens, keep_mask)
+        ks = _filter_varlen_tokens(ks, x_lens, keep_mask)
+        vs = _filter_varlen_tokens(vs, x_lens, keep_mask)
+        cum_x_lens = torch.cumsum(filtered_x_lens, 0, dtype=torch.int32)
         print(
             "[flash_attn self varlen] "
             f"q_shape={tuple(qs.shape)} k_shape={tuple(ks.shape)} v_shape={tuple(vs.shape)} "
             f"q_dtype={qs.dtype} k_dtype={ks.dtype} v_dtype={vs.dtype} "
-            f"x_lens_shape={tuple(x_lens.shape)} x_lens_dtype={x_lens.dtype} "
+            f"x_lens_shape={tuple(filtered_x_lens.shape)} x_lens_dtype={filtered_x_lens.dtype} "
             f"cum_shape={tuple(cum_x_lens.shape)} cum_dtype={cum_x_lens.dtype} cum_stride={cum_x_lens.stride()} "
             f"cum_first={cum_x_lens[0].item() if cum_x_lens.numel() else 'empty'} "
             f"cum_last={cum_x_lens[-1].item() if cum_x_lens.numel() else 'empty'} "
@@ -392,14 +428,31 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
         if x_kv_lens is not None:
-            cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
-            cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+            zero_q_idx = _zero_length_segment_indices(x_q_lens)
+            zero_kv_idx = _zero_length_segment_indices(x_kv_lens)
+            if zero_q_idx.numel() > 0:
+                print(
+                    f"[flash_attn cross varlen] zero_length_q_segments count={zero_q_idx.numel()} first_indices={zero_q_idx[:10].tolist()}",
+                    flush=True,
+                )
+            if zero_kv_idx.numel() > 0:
+                print(
+                    f"[flash_attn cross varlen] zero_length_kv_segments count={zero_kv_idx.numel()} first_indices={zero_kv_idx[:10].tolist()}",
+                    flush=True,
+                )
+            filtered_x_q_lens, keep_q_mask = _filter_varlen_lengths(x_q_lens)
+            filtered_x_kv_lens, keep_kv_mask = _filter_varlen_lengths(x_kv_lens)
+            qs = _filter_varlen_tokens(qs, x_q_lens, keep_q_mask)
+            ks = _filter_varlen_tokens(ks, x_kv_lens, keep_kv_mask)
+            vs = _filter_varlen_tokens(vs, x_kv_lens, keep_kv_mask)
+            cum_x_q_lens = torch.cumsum(filtered_x_q_lens, 0, dtype=torch.int32)
+            cum_x_kv_lens = torch.cumsum(filtered_x_kv_lens, 0, dtype=torch.int32)
             print(
                 "[flash_attn cross varlen] "
                 f"q_shape={tuple(qs.shape)} k_shape={tuple(ks.shape)} v_shape={tuple(vs.shape)} "
                 f"q_dtype={qs.dtype} k_dtype={ks.dtype} v_dtype={vs.dtype} "
-                f"x_q_lens_shape={tuple(x_q_lens.shape)} x_q_lens_dtype={x_q_lens.dtype} "
-                f"x_kv_lens_shape={tuple(x_kv_lens.shape)} x_kv_lens_dtype={x_kv_lens.dtype} "
+                f"x_q_lens_shape={tuple(filtered_x_q_lens.shape)} x_q_lens_dtype={filtered_x_q_lens.dtype} "
+                f"x_kv_lens_shape={tuple(filtered_x_kv_lens.shape)} x_kv_lens_dtype={filtered_x_kv_lens.dtype} "
                 f"cum_q_shape={tuple(cum_x_q_lens.shape)} cum_q_dtype={cum_x_q_lens.dtype} cum_q_stride={cum_x_q_lens.stride()} "
                 f"cum_kv_shape={tuple(cum_x_kv_lens.shape)} cum_kv_dtype={cum_x_kv_lens.dtype} cum_kv_stride={cum_x_kv_lens.stride()} "
                 f"cum_q_first={cum_x_q_lens[0].item() if cum_x_q_lens.numel() else 'empty'} "
@@ -520,15 +573,32 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         # set dropout rate according to training/eval mode as required by flash_attn
         # dropout_rate = self.dropout_rate if self.training else 0.0
 
-        cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
-        cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+        zero_q_idx = _zero_length_segment_indices(x_q_lens)
+        zero_kv_idx = _zero_length_segment_indices(x_kv_lens)
+        if zero_q_idx.numel() > 0:
+            print(
+                f"[flash_attn cross varlen sliced-q] zero_length_q_segments count={zero_q_idx.numel()} first_indices={zero_q_idx[:10].tolist()}",
+                flush=True,
+            )
+        if zero_kv_idx.numel() > 0:
+            print(
+                f"[flash_attn cross varlen sliced-q] zero_length_kv_segments count={zero_kv_idx.numel()} first_indices={zero_kv_idx[:10].tolist()}",
+                flush=True,
+            )
+        filtered_x_q_lens, keep_q_mask = _filter_varlen_lengths(x_q_lens)
+        filtered_x_kv_lens, keep_kv_mask = _filter_varlen_lengths(x_kv_lens)
+        qs = [_filter_varlen_tokens(qs_i, x_q_lens, keep_q_mask) for qs_i in qs]
+        ks = _filter_varlen_tokens(ks, x_kv_lens, keep_kv_mask)
+        vs = _filter_varlen_tokens(vs, x_kv_lens, keep_kv_mask)
+        cum_x_q_lens = torch.cumsum(filtered_x_q_lens, 0, dtype=torch.int32)
+        cum_x_kv_lens = torch.cumsum(filtered_x_kv_lens, 0, dtype=torch.int32)
         print(
             "[flash_attn cross varlen sliced-q] "
             f"num_q_slices={len(qs)} k_shape={tuple(ks.shape)} v_shape={tuple(vs.shape)} "
             f"first_q_shape={tuple(qs[0].shape) if qs else 'empty'} "
             f"first_q_dtype={qs[0].dtype if qs else 'empty'} k_dtype={ks.dtype} v_dtype={vs.dtype} "
-            f"x_q_lens_shape={tuple(x_q_lens.shape)} x_q_lens_dtype={x_q_lens.dtype} "
-            f"x_kv_lens_shape={tuple(x_kv_lens.shape)} x_kv_lens_dtype={x_kv_lens.dtype} "
+            f"x_q_lens_shape={tuple(filtered_x_q_lens.shape)} x_q_lens_dtype={filtered_x_q_lens.dtype} "
+            f"x_kv_lens_shape={tuple(filtered_x_kv_lens.shape)} x_kv_lens_dtype={filtered_x_kv_lens.dtype} "
             f"cum_q_shape={tuple(cum_x_q_lens.shape)} cum_q_dtype={cum_x_q_lens.dtype} cum_q_stride={cum_x_q_lens.stride()} "
             f"cum_kv_shape={tuple(cum_x_kv_lens.shape)} cum_kv_dtype={cum_x_kv_lens.dtype} cum_kv_stride={cum_x_kv_lens.stride()} "
             f"cum_q_first={cum_x_q_lens[0].item() if cum_x_q_lens.numel() else 'empty'} "
