@@ -332,13 +332,13 @@ class EncoderModule(torch.nn.Module):
             tokens_global = tokens_global.repeat(rs, 1, 1)
 
         # apply local assimilation engine and project onto global latent vectors
-        tokens_global_unmasked, posteriors = self.assimilate_local_project(
-            tokens, tokens_global, cell_lens, model_params.q_cells_lens
-        )
-        
-        # tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
+        # tokens_global_unmasked, posteriors = self.assimilate_local_project(
         #     tokens, tokens_global, cell_lens, model_params.q_cells_lens
         # )
+        
+        tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
+            tokens, tokens_global, cell_lens, model_params.q_cells_lens
+        )
 
         # apply aggregation engine on unmasked tokens
         tokens_global_unmasked = self.aggregation_engine_unmasked(
