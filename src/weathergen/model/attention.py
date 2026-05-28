@@ -110,11 +110,6 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             q=qs,
             k=ks,
             v=vs,
-            cu_seqlens_q=cum_x_lens,
-            cu_seqlens_k=cum_x_lens,
-            max_seqlen_q=x_lens.max(),
-            max_seqlen_k=x_lens.max(),
-            softcap=self.softcap,
         )
 
         out = self.proj_out(outs.flatten(-2, -1))
@@ -389,12 +384,6 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
                 q=qs,
                 k=ks,
                 v=vs,
-                cu_seqlens_q=cum_x_q_lens,
-                cu_seqlens_k=cum_x_kv_lens,
-                max_seqlen_q=x_q_lens.max(),
-                max_seqlen_k=x_kv_lens.max(),
-                softcap=self.softcap,
-                # dropout_p=dropout_rate,
             )
         else:
             assert False
@@ -507,12 +496,6 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                     q=qs_i,
                     k=ks,
                     v=vs,
-                    cu_seqlens_q=cum_x_q_lens,
-                    cu_seqlens_k=cum_x_kv_lens,
-                    max_seqlen_q=x_q_lens.max(),
-                    max_seqlen_k=x_kv_lens.max(),
-                    softcap=self.softcap,
-                    # dropout_p=dropout_rate,
                 )[0]
             ]
 
