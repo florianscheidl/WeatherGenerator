@@ -31,10 +31,15 @@ def _zero_length_segment_indices(lengths: torch.Tensor) -> torch.Tensor:
 def _filter_varlen_lengths(lengths: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     seg_lengths = lengths.to(torch.int64)[1:]
     keep_mask = seg_lengths > 0
-    filtered_lengths = torch.cat(
+    filtered_lengths = _apply_keep_mask_to_lengths(lengths, keep_mask)
+    return filtered_lengths, keep_mask
+
+
+def _apply_keep_mask_to_lengths(lengths: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
+    seg_lengths = lengths.to(torch.int64)[1:]
+    return torch.cat(
         [torch.zeros(1, device=lengths.device, dtype=torch.int32), seg_lengths[keep_mask].to(torch.int32)]
     )
-    return filtered_lengths, keep_mask
 
 
 def _filter_varlen_tokens(tokens: torch.Tensor, lengths: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
@@ -440,13 +445,20 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
                     f"[flash_attn cross varlen] zero_length_kv_segments count={zero_kv_idx.numel()} first_indices={zero_kv_idx[:10].tolist()}",
                     flush=True,
                 )
-            filtered_x_q_lens, keep_q_mask = _filter_varlen_lengths(x_q_lens)
-            filtered_x_kv_lens, keep_kv_mask = _filter_varlen_lengths(x_kv_lens)
-            qs = _filter_varlen_tokens(qs, x_q_lens, keep_q_mask)
-            ks = _filter_varlen_tokens(ks, x_kv_lens, keep_kv_mask)
-            vs = _filter_varlen_tokens(vs, x_kv_lens, keep_kv_mask)
+            keep_q_mask = x_q_lens[1:] > 0
+            keep_kv_mask = x_kv_lens[1:] > 0
+            shared_keep_mask = keep_q_mask & keep_kv_mask
+            filtered_x_q_lens = _apply_keep_mask_to_lengths(x_q_lens, shared_keep_mask)
+            filtered_x_kv_lens = _apply_keep_mask_to_lengths(x_kv_lens, shared_keep_mask)
+            qs = _filter_varlen_tokens(qs, x_q_lens, shared_keep_mask)
+            ks = _filter_varlen_tokens(ks, x_kv_lens, shared_keep_mask)
+            vs = _filter_varlen_tokens(vs, x_kv_lens, shared_keep_mask)
             cum_x_q_lens = torch.cumsum(filtered_x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(filtered_x_kv_lens, 0, dtype=torch.int32)
+            print(
+                f"[flash_attn cross varlen] shared_nonempty_segments={int(shared_keep_mask.sum().item())} original_batch={shared_keep_mask.numel()}",
+                flush=True,
+            )
             print(
                 "[flash_attn cross varlen] "
                 f"q_shape={tuple(qs.shape)} k_shape={tuple(ks.shape)} v_shape={tuple(vs.shape)} "
@@ -585,13 +597,20 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                 f"[flash_attn cross varlen sliced-q] zero_length_kv_segments count={zero_kv_idx.numel()} first_indices={zero_kv_idx[:10].tolist()}",
                 flush=True,
             )
-        filtered_x_q_lens, keep_q_mask = _filter_varlen_lengths(x_q_lens)
-        filtered_x_kv_lens, keep_kv_mask = _filter_varlen_lengths(x_kv_lens)
-        qs = [_filter_varlen_tokens(qs_i, x_q_lens, keep_q_mask) for qs_i in qs]
-        ks = _filter_varlen_tokens(ks, x_kv_lens, keep_kv_mask)
-        vs = _filter_varlen_tokens(vs, x_kv_lens, keep_kv_mask)
+        keep_q_mask = x_q_lens[1:] > 0
+        keep_kv_mask = x_kv_lens[1:] > 0
+        shared_keep_mask = keep_q_mask & keep_kv_mask
+        filtered_x_q_lens = _apply_keep_mask_to_lengths(x_q_lens, shared_keep_mask)
+        filtered_x_kv_lens = _apply_keep_mask_to_lengths(x_kv_lens, shared_keep_mask)
+        qs = [_filter_varlen_tokens(qs_i, x_q_lens, shared_keep_mask) for qs_i in qs]
+        ks = _filter_varlen_tokens(ks, x_kv_lens, shared_keep_mask)
+        vs = _filter_varlen_tokens(vs, x_kv_lens, shared_keep_mask)
         cum_x_q_lens = torch.cumsum(filtered_x_q_lens, 0, dtype=torch.int32)
         cum_x_kv_lens = torch.cumsum(filtered_x_kv_lens, 0, dtype=torch.int32)
+        print(
+            f"[flash_attn cross varlen sliced-q] shared_nonempty_segments={int(shared_keep_mask.sum().item())} original_batch={shared_keep_mask.numel()}",
+            flush=True,
+        )
         print(
             "[flash_attn cross varlen sliced-q] "
             f"num_q_slices={len(qs)} k_shape={tuple(ks.shape)} v_shape={tuple(vs.shape)} "
