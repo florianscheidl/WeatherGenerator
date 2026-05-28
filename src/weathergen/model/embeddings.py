@@ -140,10 +140,10 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        x = peh(self.embed(x_in.transpose(-2, -1)))
+        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
 
         for layer in self.layers:
-            x = layer(x)
+            x = checkpoint(layer, x, use_reentrant=False)
 
         # read out
         if self.unembed_mode == "full":
@@ -200,6 +200,6 @@ class StreamEmbedLinear(torch.nn.Module):
         self.layer = torch.nn.Linear(dim_in, dim_out)
 
     def forward(self, x):
-        x = self.layer(x.flatten(-2, -1)).unsqueeze(0)
+        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
 
         return x
