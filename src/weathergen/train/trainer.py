@@ -901,6 +901,10 @@ class ProfilingTrainer(Trainer):
         else:
             prof = nullcontext()
 
+        if is_root():
+            # Start recording memory snapshot history
+            start_record_memory_history()
+
         with prof:
             for bidx, batch in enumerate(islice(dataset_iter, max_profile_steps)):
                 if cf.data_loading.get("memory_pinning", False):
@@ -990,29 +994,44 @@ class ProfilingTrainer(Trainer):
                     prof.step()
 
             # Print only on rank 0
-        if is_root() and hasattr(prof, "key_averages"):
-            logger.info("\n" + "=" * 80)
-            logger.info("PROFILING SUMMARY")
-            logger.info("=" * 80)
+            if is_root() and hasattr(prof, "key_averages"):
+                logger.info("\n" + "=" * 80)
+                logger.info("PROFILING SUMMARY")
+                logger.info("=" * 80)
 
-            logger.info("\n--- Top CUDA Time Operations ---")
-            logger.info(
-                prof.key_averages().table(
-                    sort_by="self_cuda_time_total", row_limit=20, top_level_events_only=False
+                logger.info("\n--- Top Operations by FLOPs ---")
+                logger.info(
+                    prof.key_averages().table(
+                        sort_by="flops", row_limit=20, top_level_events_only=False
+                    )
                 )
-            )
 
-            logger.info("\n--- Top CPU Time Operations ---")
-            logger.info(
-                prof.key_averages().table(
-                    sort_by="self_cpu_time_total", row_limit=20, top_level_events_only=False
+                logger.info("\n--- Operations Grouped by Module ---")
+                logger.info(
+                    prof.key_averages(group_by_stack_n=5).table(
+                        sort_by="cuda_time_total", row_limit=30
+                    )
                 )
-            )
+
+                logger.info("\n--- Memory Usage ---")
+                logger.info(
+                    prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=20)
+                )
+
+        if is_root():
+            # Create the memory snapshot file
+            export_memory_snapshot(cf)
+
+            # Stop recording memory snapshot history
+            stop_record_memory_history()
+
+        torch.distributed.barrier()
 
         if is_root():
             logger.info("Training loop profiling is complete.")
             logger.info(
-                "The PyTorch profiler trace can be found in the profiler_logs folder."
+                "The memory snapshot, memory usage distribution, and PyTorch profiler"
+                "trace can be found in the profiler_logs folder."
             )
 
         if torch.distributed.is_initialized():
