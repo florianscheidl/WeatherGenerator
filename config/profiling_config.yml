@@ -1,9 +1,9 @@
 profiling:
   enabled: True 
-  wait_iteration: 2
-  warmup_iteration: 4
-  active_iteration: 2
-  repeat: 4
+  wait_iteration: 0
+  warmup_iteration: 0
+  active_iteration: 1
+  repeat: 1
 
 training_config:
   num_mini_epochs: 1
