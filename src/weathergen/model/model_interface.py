@@ -63,6 +63,12 @@ def init_model_and_shard(
         model.encoder.q_cells.requires_grad = False
 
     if with_ddp and not with_fsdp:
+        # DDP + activation checkpointing can hit "Expected to mark a variable ready only once"
+        # when the same parameters participate in multiple non-reentrant checkpointed segments in a
+        # single iteration (e.g. shared prediction heads across output steps/streams). Disable inline
+        # checkpointing for plain DDP and use static_graph to make the parameter usage contract
+        # explicit.
+        set_inline_checkpointing(model, enabled=False)
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -70,6 +76,7 @@ def init_model_and_shard(
             find_unused_parameters=cf.get("ddp_find_unused_parameters", True),
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
+            static_graph=cf.get("ddp_static_graph", True),
         )
 
     elif with_ddp and with_fsdp:
