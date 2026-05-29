@@ -920,25 +920,25 @@ class ProfilingTrainer(Trainer):
                     batch = batch.pin_memory()
                 batch.to_device(self.device)
 
-                # with torch.autocast(
-                #     device_type=f"cuda:{cf.local_rank}",
-                #     dtype=self.mixed_precision_dtype,
-                #     enabled=cf.with_mixed_precision,
-                # ):
-                preds = self.model(
-                    self.model_params,
-                    batch.get_source_samples(),
-                )
-
-                targets_and_auxs = {}
-                for loss_name, target_aux in self.target_and_aux_calculators.items():
-                    target_idxs = get_target_idxs_from_cfg(self.training_cfg, loss_name)
-                    targets_and_auxs[loss_name] = target_aux.compute(
-                        self.cf.general.istep,
-                        batch.get_target_samples(target_idxs),
+                with torch.autocast(
+                    device_type=f"cuda:{cf.local_rank}",
+                    dtype=self.mixed_precision_dtype,
+                    enabled=cf.with_mixed_precision,
+                ):
+                    preds = self.model(
                         self.model_params,
-                        self.model,
+                        batch.get_source_samples(),
                     )
+
+                    targets_and_auxs = {}
+                    for loss_name, target_aux in self.target_and_aux_calculators.items():
+                        target_idxs = get_target_idxs_from_cfg(self.training_cfg, loss_name)
+                        targets_and_auxs[loss_name] = target_aux.compute(
+                            self.cf.general.istep,
+                            batch.get_target_samples(target_idxs),
+                            self.model_params,
+                            self.model,
+                        )
 
                 loss = self.loss_calculator.compute_loss(
                     preds=preds,
