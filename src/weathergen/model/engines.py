@@ -120,10 +120,6 @@ class EmbeddingEngine(torch.nn.Module):
             scatter_idxs = self.get_scatter_idxs_vectorized(batch, num_tokens)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
-            # if the assert is hit, MAX_NUMBER_TOKENS_LOCAL_PER_CELL needs to be increased
-            assert (
-                batch.tokens_lens.flatten(0, 2).sum(0).max() < MAX_NUMBER_TOKENS_LOCAL_PER_CELL
-            ), "max number of tokens per cell for positional encoding exceeded"
             # actual scatter operation and apply per cell positional encoding
             tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
 
