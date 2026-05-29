@@ -67,17 +67,17 @@ class AdaLayerNorm(torch.nn.Module):
     """
 
     def __init__(
-        self, dim_embed_x, dim_aux, norm_elementwise_affine: bool = False, norm_eps: float = 1e-5
+        self, dim_embed_x, dim_aux, norm_elementwise_affine: bool = False, norm_eps: float = 1e-5, dtype: torch.dtype = torch.bfloat16
     ):
         super().__init__()
 
         # simple 2-layer MLP for embedding auxiliary information
         self.embed_aux = torch.nn.ModuleList()
-        self.embed_aux.append(torch.nn.Linear(dim_aux, 4 * dim_aux))
+        self.embed_aux.append(torch.nn.Linear(dim_aux, 4 * dim_aux, dtype=dtype))
         self.embed_aux.append(torch.nn.SiLU())
-        self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x))
+        self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x, dtype=dtype))
 
-        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
+        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine, dtype=dtype)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:

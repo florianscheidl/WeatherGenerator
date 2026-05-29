@@ -43,6 +43,7 @@ class MLP(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         name: str | None = None,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         """Constructor"""
 
@@ -63,21 +64,21 @@ class MLP(torch.nn.Module):
 
         if pre_layer_norm:
             self.layers.append(
-                norm(dim_in, eps=norm_eps)
+                norm(dim_in, eps=norm_eps, dtype=dtype)
                 if dim_aux is None
-                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps)
+                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps, dtype=dtype)
             )
 
-        self.layers.append(torch.nn.Linear(dim_in, dim_hidden))
+        self.layers.append(torch.nn.Linear(dim_in, dim_hidden, dtype=dtype))
         self.layers.append(nonlin())
         self.layers.append(torch.nn.Dropout(p=dropout_rate))
 
         for _ in range(num_layers - 2):
-            self.layers.append(torch.nn.Linear(dim_hidden, dim_hidden))
+            self.layers.append(torch.nn.Linear(dim_hidden, dim_hidden, dtype=dtype))
             self.layers.append(nonlin())
             self.layers.append(torch.nn.Dropout(p=dropout_rate))
 
-        self.layers.append(torch.nn.Linear(dim_hidden, dim_out))
+        self.layers.append(torch.nn.Linear(dim_hidden, dim_out, dtype=dtype))
 
     def forward(self, *args):
         x, x_in, aux = args[0], args[0], args[-1]

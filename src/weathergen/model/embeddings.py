@@ -35,6 +35,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         norm_type="LayerNorm",
         unembed_mode="full",
         stream_name="stream_embed",
+        dtype: torch.dtype = torch.bfloat16,
     ):
         """Constructor
 
@@ -83,19 +84,20 @@ class StreamEmbedTransformer(torch.nn.Module):
             )
 
         if mode == "channels":
-            self.embed = torch.nn.Linear(self.dim_in, self.dim_embed)
+            self.embed = torch.nn.Linear(self.dim_in, self.dim_embed, dtype=dtype)
 
             if self.unembed_mode == "full":
-                self.ln_final = norm(num_channels * self.dim_embed, eps=1e-03)
+                self.ln_final = norm(num_channels * self.dim_embed, eps=1e-03, dtype=dtype)
                 self.unembed = torch.nn.Linear(
                     num_channels * self.dim_embed,
                     self.num_tokens * self.dim_out,
+                    dtype=dtype
                 )
 
             elif self.unembed_mode == "block":
                 dim_out = (self.num_tokens * self.dim_out) // num_channels
                 self.unembed = torch.nn.ModuleList(
-                    [torch.nn.Linear(dim_embed, dim_out) for _ in range(num_channels)]
+                    [torch.nn.Linear(dim_embed, dim_out, dtype=dtype) for _ in range(num_channels)]
                     # [
                     #     torch.nn.Sequential(
                     #         torch.nn.Linear(dim_embed, max(dim_embed//2,4*dim_out)),
@@ -105,31 +107,32 @@ class StreamEmbedTransformer(torch.nn.Module):
                     # ]
                 )
                 self.ln_final = torch.nn.ModuleList(
-                    [norm(dim_embed, eps=1e-6) for _ in range(num_channels)]
+                    [norm(dim_embed, eps=1e-6, dtype=dtype) for _ in range(num_channels)]
                 )
 
             else:
                 raise ValueError(f"Unknown unembed mode: {unembed_mode}")
 
         elif mode == "columns":
-            self.embed = torch.nn.Linear(self.dim_in, self.dim_embed)
+            self.embed = torch.nn.Linear(self.dim_in, self.dim_embed, dtype=dtype)
 
             assert self.unembed_mode == "block"  # only supported mode at the moment
             # padding needed if the unembedded columns cannot be concatenated to dim_out (e.g GPSRO)
             self.pad = self.dim_out % token_size
-            self.out_pad = torch.nn.Parameter(torch.zeros(self.pad), requires_grad=False)
+            self.out_pad = torch.nn.Parameter(torch.zeros(self.pad), requires_grad=False, dtype=dtype)
             self.unembed = torch.nn.Linear(
                 self.dim_embed,
                 self.num_tokens * (self.dim_out // token_size),
+                dtype=dtype
             )
-            self.ln_final = norm(dim_out, eps=1e-6)
+            self.ln_final = norm(dim_out, eps=1e-6, dtype=dtype)
 
             # TODO: factorization when sqrt is not int
             dim1 = int(np.sqrt(dim_out))
             assert dim1 * dim1 == dim_out
-            self.unembed1 = torch.nn.Linear(self.dim_embed, dim1)
+            self.unembed1 = torch.nn.Linear(self.dim_embed, dim1, dtype=dtype)
             self.unembed_nonlin = torch.nn.GELU()
-            self.unembed2 = torch.nn.Linear(self.token_size, dim1)
+            self.unembed2 = torch.nn.Linear(self.token_size, dim1, dtype=dtype)
 
         else:
             raise ValueError(f"Unknown mode: {mode}")

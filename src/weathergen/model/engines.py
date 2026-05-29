@@ -72,6 +72,7 @@ class EmbeddingEngine(torch.nn.Module):
                     norm_type=self.cf.norm_type,
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
+                    dtype = self.dtype,
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(
@@ -236,6 +237,7 @@ class LocalAssimilationEngine(torch.nn.Module):
                     dropout_rate=self.cf.ae_local_dropout_rate,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    dtype=get_dtype(self.cf.mixed_precision_dtype),
                 )
             )
 
@@ -286,6 +288,7 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
                     dropout_rate=self.cf.ae_adapter_dropout_rate,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    dtype=get_dtype(self.cf.mixed_precision_dtype),
                 )
             )
             self.ae_adapter.append(
@@ -345,6 +348,7 @@ class Local2GlobalSumEngine(torch.nn.Module):
                     dropout_rate=cf.ae_adapter_dropout_rate,
                     norm_type=cf.norm_type,
                     norm_eps=cf.mlp_norm_eps,
+                    dtype=get_dtype(cf.mixed_precision_dtype),
                 )
             )
 
@@ -440,6 +444,7 @@ class QueryAggregationEngine(torch.nn.Module):
                     hidden_factor=self.cf.ae_aggregation_mlp_hidden_factor,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    dtype=get_dtype(self.cf.mixed_precision_dtype),
                 )
             )
 
@@ -516,11 +521,12 @@ class GlobalAssimilationEngine(torch.nn.Module):
                     hidden_factor=self.cf.ae_global_mlp_hidden_factor,
                     norm_type=self.cf.norm_type,
                     norm_eps=self.cf.mlp_norm_eps,
+                    dtype=get_dtype(self.cf.mixed_precision_dtype),
                 )
             )
         if self.cf.get("ae_global_trailing_layer_norm", False):
             self.ae_global_blocks.append(
-                torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+                torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False, dtype=get_dtype(self.cf.mixed_precision_dtype))
             )
 
     def forward(self, tokens, coords=None):
@@ -593,12 +599,13 @@ class ForecastingEngine(torch.nn.Module):
                         norm_type=self.cf.norm_type,
                         dim_aux=dim_aux,
                         norm_eps=self.cf.mlp_norm_eps,
+                        dtype=get_dtype(self.cf.mixed_precision_dtype),
                     )
                 )
                 # Optionally, add LayerNorm after i-th layer
                 if i in self.cf.get("fe_layer_norm_after_blocks", []):
                     self.fe_blocks.append(
-                        torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False)
+                        torch.nn.LayerNorm(self.cf.ae_global_dim_embed, elementwise_affine=False, dtype=get_dtype(self.cf.mixed_precision_dtype))
                     )
 
         def init_weights_final(m):
@@ -762,6 +769,7 @@ class TargetPredictionEngineClassic(nn.Module):
                     norm_type=self.cf.norm_type,
                     dim_aux=(self.dim_coord_in if self.cf.pred_mlp_adaln else None),
                     norm_eps=self.cf.mlp_norm_eps,
+                    dtype=get_dtype(self.cf.mixed_precision_dtype),
                 )
             )
 
@@ -1041,6 +1049,7 @@ class LatentPredictionHeadTransformer(nn.Module):
                     norm_type=self.global_cf.norm_type,
                     # dim_aux=dim_aux,
                     norm_eps=self.global_cf.mlp_norm_eps,
+                    dtype=get_dtype(self.global_cf.mixed_precision_dtype),
                 )
             )
 

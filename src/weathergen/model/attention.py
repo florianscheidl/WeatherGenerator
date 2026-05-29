@@ -63,10 +63,10 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -158,10 +158,10 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
             norm = RMSNorm
 
         self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -247,10 +247,10 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -341,15 +341,15 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
             self.lnorm_in_q = norm(dim_embed_q, eps=norm_eps)
         self.lnorm_in_kv = norm(dim_embed_kv, eps=norm_eps)
 
-        self.proj_heads_q = torch.nn.Linear(dim_embed_q, num_heads * self.dim_head_proj, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed_q, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
         self.proj_heads_k = torch.nn.Linear(
-            dim_embed_kv, num_heads * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
         self.proj_heads_v = torch.nn.Linear(
-            dim_embed_kv, num_heads * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
 
-        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False)
+        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -453,16 +453,16 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         self.proj_heads_q = torch.nn.ModuleList()
         for _ in range(num_slices_q):
             self.proj_heads_q.append(
-                torch.nn.Linear(dim_embed_q, num_heads_r * self.dim_head_proj, bias=False)
+                torch.nn.Linear(dim_embed_q, num_heads_r * self.dim_head_proj, bias=False, dtype=attention_dtype)
             )
         self.proj_heads_k = torch.nn.Linear(
-            dim_embed_kv, num_heads_r * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads_r * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
         self.proj_heads_v = torch.nn.Linear(
-            dim_embed_kv, num_heads_r * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads_r * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
 
-        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False)
+        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -563,10 +563,10 @@ class MultiSelfAttentionHead(torch.nn.Module):
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
-        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
-        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_k = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_heads_v = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
+        self.proj_out = torch.nn.Linear(dim_embed, dim_embed, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
@@ -595,9 +595,9 @@ class MultiSelfAttentionHead(torch.nn.Module):
         # project onto heads and q,k,v and
         # ensure these are 4D tensors as required for flash attention
         s = [*([x.shape[0], 1] if len(x.shape) == 2 else x.shape[:-1]), self.num_heads, -1]
-        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s)).to(self.dtype)
-        ks = self.lnorm_k(self.proj_heads_k(x).reshape(s)).to(self.dtype)
-        vs = self.proj_heads_v(x).reshape(s).to(self.dtype)
+        qs = self.lnorm_q(self.proj_heads_q(x).reshape(s))
+        ks = self.lnorm_k(self.proj_heads_k(x).reshape(s))
+        vs = self.proj_heads_v(x).reshape(s)
 
         if self.with_2d_rope:
             if coords is None:
@@ -650,15 +650,15 @@ class MultiCrossAttentionHead(torch.nn.Module):
         self.lnorm_in_q = norm(dim_embed_q, eps=norm_eps)
         self.lnorm_in_kv = norm(dim_embed_kv, eps=norm_eps)
 
-        self.proj_heads_q = torch.nn.Linear(dim_embed_q, num_heads * self.dim_head_proj, bias=False)
+        self.proj_heads_q = torch.nn.Linear(dim_embed_q, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype)
         self.proj_heads_k = torch.nn.Linear(
-            dim_embed_kv, num_heads * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
         self.proj_heads_v = torch.nn.Linear(
-            dim_embed_kv, num_heads * self.dim_head_proj, bias=False
+            dim_embed_kv, num_heads * self.dim_head_proj, bias=False, dtype=attention_dtype
         )
 
-        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False)
+        self.proj_out = torch.nn.Linear(self.dim_head_proj * num_heads, dim_embed_q, bias=False, dtype=attention_dtype)
         self.dropout = (
             torch.nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else torch.nn.Identity()
         )
