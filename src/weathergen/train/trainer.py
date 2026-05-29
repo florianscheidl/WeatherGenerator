@@ -632,31 +632,31 @@ class Trainer(TrainerBase):
                     batch.to_device(self.device)
 
                     # evaluate model
-                    with torch.autocast(
-                        device_type=f"cuda:{cf.local_rank}",
-                        dtype=self.mixed_precision_dtype,
-                        enabled=cf.with_mixed_precision,
-                    ):
-                        if self.ema_model is None:
-                            preds = self.model(
-                                self.model_params,
-                                batch.get_source_samples(),
-                            )
-                        else:
-                            preds = self.ema_model.forward_eval(
-                                self.model_params,
-                                batch.get_source_samples(),
-                            )
+                    # with torch.autocast(
+                    #     device_type=f"cuda:{cf.local_rank}",
+                    #     dtype=self.mixed_precision_dtype,
+                    #     enabled=cf.with_mixed_precision,
+                    # ):
+                    if self.ema_model is None:
+                        preds = self.model(
+                            self.model_params,
+                            batch.get_source_samples(),
+                        )
+                    else:
+                        preds = self.ema_model.forward_eval(
+                            self.model_params,
+                            batch.get_source_samples(),
+                        )
 
-                        targets_and_auxs = {}
-                        for loss_name, target_aux in self.target_and_aux_calculators_val.items():
-                            target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
-                            targets_and_auxs[loss_name] = target_aux.compute(
-                                self.cf.general.istep,
-                                batch.get_target_samples(target_idxs),
-                                self.model_params,
-                                self.model,
-                            )
+                    targets_and_auxs = {}
+                    for loss_name, target_aux in self.target_and_aux_calculators_val.items():
+                        target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
+                        targets_and_auxs[loss_name] = target_aux.compute(
+                            self.cf.general.istep,
+                            batch.get_target_samples(target_idxs),
+                            self.model_params,
+                            self.model,
+                        )
 
                     _ = self.loss_calculator_val.compute_loss(
                         preds=preds,
