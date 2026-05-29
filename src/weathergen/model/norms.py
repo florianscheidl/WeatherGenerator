@@ -44,7 +44,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        var, _ = torch.var_mean(x.pow(2), dim=-1, keepdim=True, correction=0)
+        return x * torch.rsqrt(var + self.eps)
 
     def forward(self, x):
         """
@@ -57,7 +58,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        output = self._norm(x.float()).type_as(x)
+        output = self._norm(x)
         return output * self.weight
 
 
