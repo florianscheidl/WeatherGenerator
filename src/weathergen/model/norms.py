@@ -46,6 +46,7 @@ class LayerNorm(torch.nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_dtype = x.dtype
         dims = tuple(range(-len(self.normalized_shape), 0))
         var, mean = torch.var_mean(x, dim=dims, keepdim=True, correction=0)
         eps = torch.as_tensor(self.eps, dtype=var.dtype, device=var.device)
@@ -54,7 +55,7 @@ class LayerNorm(torch.nn.Module):
             x = x * self.weight
         if self.bias is not None:
             x = x + self.bias
-        return x
+        return x if x.dtype == input_dtype else x.to(input_dtype)
 
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
@@ -103,8 +104,10 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
+        input_dtype = x.dtype
         output = self._norm(x)
-        return output * self.weight
+        output = output * self.weight
+        return output if output.dtype == input_dtype else output.to(input_dtype)
 
 
 class AdaLayerNorm(torch.nn.Module):
