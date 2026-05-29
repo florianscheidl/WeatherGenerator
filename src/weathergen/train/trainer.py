@@ -96,12 +96,30 @@ class Trainer(TrainerBase):
         self.batch_size_test_per_gpu = -1
         self.collapse_monitor: CollapseMonitor | None = None
         self.perf_tracker: ThroughputTracker | NullThroughputTracker = NullThroughputTracker()
+        self.use_grad_scaler: bool = False
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
         Get total, effective batch size across all DDP ranks
         """
         return self.world_size_original * batch_size_per_gpu
+
+    def _backward_loss(self, loss: torch.Tensor) -> None:
+        if self.grad_scaler is None:
+            loss.backward()
+        else:
+            self.grad_scaler.scale(loss).backward()
+
+    def _unscale_optimizer_if_needed(self) -> None:
+        if self.grad_scaler is not None:
+            self.grad_scaler.unscale_(self.optimizer)
+
+    def _step_optimizer(self) -> None:
+        if self.grad_scaler is None:
+            self.optimizer.step()
+        else:
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
 
     def init(self, cf: Config, devices):
         # pylint: disable=attribute-defined-outside-init
@@ -344,7 +362,10 @@ class Trainer(TrainerBase):
             betas=(beta1, beta2),
             eps=eps,
         )
-        self.grad_scaler = torch.amp.GradScaler("cuda")
+        self.use_grad_scaler = (
+            cf.with_mixed_precision and self.mixed_precision_dtype == torch.float16
+        )
+        self.grad_scaler = torch.amp.GradScaler("cuda") if self.use_grad_scaler else None
 
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
 
@@ -507,10 +528,10 @@ class Trainer(TrainerBase):
 
             # backward pass
             self.optimizer.zero_grad()
-            self.grad_scaler.scale(loss).backward()
+            self._backward_loss(loss)
 
             # gradient clipping
-            self.grad_scaler.unscale_(self.optimizer)
+            self._unscale_optimizer_if_needed()
             total_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
             )
@@ -523,8 +544,7 @@ class Trainer(TrainerBase):
                     self._log_instant_grad_norms(TRAIN)
 
             # optimizer step
-            self.grad_scaler.step(self.optimizer)
-            self.grad_scaler.update()
+            self._step_optimizer()
 
             # update learning rate
             self.lr_scheduler.step()
@@ -956,9 +976,9 @@ class ProfilingTrainer(Trainer):
                 ]
 
                 self.optimizer.zero_grad()
-                self.grad_scaler.scale(loss).backward()
+                self._backward_loss(loss)
 
-                self.grad_scaler.unscale_(self.optimizer)
+                self._unscale_optimizer_if_needed()
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
                 )
@@ -969,8 +989,7 @@ class ProfilingTrainer(Trainer):
                     if bidx % self.train_logging.metrics == 0:
                         self._log_instant_grad_norms(TRAIN)
 
-                self.grad_scaler.step(self.optimizer)
-                self.grad_scaler.update()
+                self._step_optimizer()
 
                 self.lr_scheduler.step()
 
