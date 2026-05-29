@@ -46,13 +46,15 @@ class LayerNorm(torch.nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.aten.native_layer_norm(
+        out = torch.ops.aten.rms_norm(
             x,
-            self.normalized_shape,
+            list(self.normalized_shape),
             self.weight,
-            self.bias,
             self.eps,
-        )[0]
+        )
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
