@@ -93,6 +93,11 @@ def init_model_and_shard(
             MultiSelfAttentionHeadVarlen,
         )
 
+        for stream_embed_list in model.encoder.embed_engine.embeds.values():
+            for module in stream_embed_list.modules():
+                if isinstance(module, modules_to_shard):
+                    fully_shard(module, **fsdp_kwargs)
+
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
