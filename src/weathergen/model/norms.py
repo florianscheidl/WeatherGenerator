@@ -46,16 +46,13 @@ class LayerNorm(torch.nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input_dtype = x.dtype
-        dims = tuple(range(-len(self.normalized_shape), 0))
-        var, mean = torch.var_mean(x, dim=dims, keepdim=True, correction=0)
-        eps = torch.as_tensor(self.eps, dtype=var.dtype, device=var.device)
-        x = (x - mean) * torch.rsqrt(var + eps)
-        if self.weight is not None:
-            x = x * self.weight
-        if self.bias is not None:
-            x = x + self.bias
-        return x if x.dtype == input_dtype else x.to(input_dtype)
+        return torch.ops.aten.native_layer_norm(
+            x,
+            self.normalized_shape,
+            self.weight,
+            self.bias,
+            self.eps,
+        )[0]
 
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
@@ -89,9 +86,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        var, _ = torch.var_mean(x.pow(2), dim=-1, keepdim=True, correction=0)
-        eps = torch.as_tensor(self.eps, dtype=var.dtype, device=var.device)
-        return x * torch.rsqrt(var + eps)
+        return torch.ops.aten.rms_norm(x, [x.shape[-1]], None, self.eps)
 
     def forward(self, x):
         """
@@ -104,10 +99,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        input_dtype = x.dtype
-        output = self._norm(x)
-        output = output * self.weight
-        return output if output.dtype == input_dtype else output.to(input_dtype)
+        return torch.ops.aten.rms_norm(x, [self.weight.shape[0]], self.weight, self.eps)
 
 
 class AdaLayerNorm(torch.nn.Module):
