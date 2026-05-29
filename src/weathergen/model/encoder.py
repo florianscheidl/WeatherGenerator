@@ -25,6 +25,7 @@ from weathergen.model.engines import (
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
+from weathergen.utils.utils import get_dtype
 
 
 class EncoderModule(torch.nn.Module):
@@ -40,6 +41,7 @@ class EncoderModule(torch.nn.Module):
         """
         super(EncoderModule, self).__init__()
         self.cf = cf
+        self.dtype = get_dtype(cf.mixed_precision_dtype)
 
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
@@ -75,6 +77,7 @@ class EncoderModule(torch.nn.Module):
                 dim=cf.ae_local_dim_embed,
                 use_additive_noise=cf.latent_noise_use_additive_noise,
                 deterministic=cf.latent_noise_deterministic_latents,
+                dtype=self.dtype,
             )
 
         # local -> global assimilation engine adapter
@@ -87,7 +90,7 @@ class EncoderModule(torch.nn.Module):
         # learnable queries
         if cf.ae_local_queries_per_cell:
             s = (self.num_healpix_cells, cf.ae_local_num_queries, cf.ae_global_dim_embed)
-            q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
+            q_cells = torch.rand(s, requires_grad=True, dtype=self.dtype) / cf.ae_global_dim_embed
             # add meta data
             q_cells[:, :, -8:-6] = (
                 (torch.arange(self.num_healpix_cells) / self.num_healpix_cells)
@@ -108,7 +111,7 @@ class EncoderModule(torch.nn.Module):
             q_cells[:, :, -10] = torch.arange(cf.ae_local_num_queries)
         else:
             s = (1, cf.ae_local_num_queries, cf.ae_global_dim_embed)
-            q_cells = torch.rand(s, requires_grad=True) / cf.ae_global_dim_embed
+            q_cells = torch.rand(s, requires_grad=True, dtype=self.dtype) / cf.ae_global_dim_embed
         self.q_cells = torch.nn.Parameter(q_cells, requires_grad=True)
 
         # query aggregation engine
