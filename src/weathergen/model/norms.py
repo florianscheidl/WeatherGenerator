@@ -13,6 +13,49 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class LayerNorm(torch.nn.Module):
+    def __init__(
+        self,
+        normalized_shape: int | tuple[int, ...] | torch.Size,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = True,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+
+        if isinstance(normalized_shape, int):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = torch.Size(normalized_shape)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+
+        if self.elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(self.normalized_shape, dtype=dtype))
+            self.bias = (
+                nn.Parameter(torch.zeros(self.normalized_shape, dtype=dtype)) if bias else None
+            )
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def reset_parameters(self):
+        if self.weight is not None:
+            nn.init.ones_(self.weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dims = tuple(range(-len(self.normalized_shape), 0))
+        var, mean = torch.var_mean(x, dim=dims, keepdim=True, correction=0)
+        x = (x - mean) * torch.rsqrt(var + self.eps)
+        if self.weight is not None:
+            x = x * self.weight
+        if self.bias is not None:
+            x = x + self.bias
+        return x
+
+
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16):
@@ -78,7 +121,7 @@ class AdaLayerNorm(torch.nn.Module):
         self.embed_aux.append(torch.nn.SiLU())
         self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x, dtype=dtype))
 
-        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine, dtype=dtype)
+        self.norm = LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine, dtype=dtype)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
@@ -132,7 +175,7 @@ class AdaLayerNormLayer(torch.nn.Module):
             nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True, dtype=dtype)
         )
 
-        self.ln = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps, dtype=dtype)
+        self.ln = LayerNorm(dim, elementwise_affine=False, eps=norm_eps, dtype=dtype)
         self.layer = layer
 
         # Initialize weights to zero for modulation and gating layers

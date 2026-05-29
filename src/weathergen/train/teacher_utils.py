@@ -21,6 +21,7 @@ from weathergen.model.engines import (
     LatentPredictionHeadMLP,
     LatentPredictionHeadTransformer,
 )
+from weathergen.model.norms import LayerNorm
 from weathergen.utils.utils import get_dtype
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def prepare_encoder_teacher(model: nn.Module, training_cfg, override_cfg) -> Non
 
     # Ensure latent_pre_norm exists (teacher may not have had SSL training)
     if model.latent_pre_norm is None:
-        model.latent_pre_norm = nn.LayerNorm(
+        model.latent_pre_norm = LayerNorm(
             teacher_dim_embed, dtype=get_dtype(override_cfg.mixed_precision_dtype)
         )
 

@@ -16,7 +16,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.layers import MLP
-from weathergen.model.norms import AdaLayerNormLayer
+from weathergen.model.norms import AdaLayerNormLayer, LayerNorm
 from weathergen.utils.utils import get_dtype
 
 
@@ -43,7 +43,7 @@ class SelfAttentionBlock(nn.Module):
                 dim, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
             )
         else:
-            self.ln_sa = nn.LayerNorm(
+            self.ln_sa = LayerNorm(
                 dim,
                 eps=kwargs["attention_kwargs"]["norm_eps"],
                 dtype=attention_dtype,
@@ -64,7 +64,7 @@ class SelfAttentionBlock(nn.Module):
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
             self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate, dtype=dtype)
         else:
-            self.ln_mlp = nn.LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"], dtype=dtype)
+            self.ln_mlp = LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"], dtype=dtype)
             self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x), None, **kwargs) + x
 
         self.initialise_weights()
@@ -129,7 +129,7 @@ class CrossAttentionBlock(nn.Module):
                     dim_q, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
                 )
             else:
-                self.ln_sa = nn.LayerNorm(
+                self.ln_sa = LayerNorm(
                     dim_q,
                     eps=kwargs["attention_kwargs"]["norm_eps"],
                     dtype=attention_dtype,
@@ -148,7 +148,7 @@ class CrossAttentionBlock(nn.Module):
                 dim_q, dim_aux, self.cross_attn, dropout_rate, dtype=attention_dtype
             )
         else:
-            self.ln_ca = nn.LayerNorm(
+            self.ln_ca = LayerNorm(
                 dim_q,
                 eps=kwargs["attention_kwargs"]["norm_eps"],
                 dtype=attention_dtype,
@@ -173,7 +173,7 @@ class CrossAttentionBlock(nn.Module):
                     dim_q, dim_aux, self.mlp_fn, dropout_rate, dtype=dtype
                 )
             else:
-                self.ln_mlp = nn.LayerNorm(
+                self.ln_mlp = LayerNorm(
                     dim_q,
                     eps=kwargs["attention_kwargs"]["norm_eps"],
                     dtype=dtype,

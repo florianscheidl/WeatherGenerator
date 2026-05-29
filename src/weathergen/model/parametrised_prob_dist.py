@@ -32,7 +32,7 @@ class DiagonalGaussianDistribution:
         self.var = None
 
     def reset_parameters(self, parameters):
-        self.parameters = parameters.float()
+        self.parameters = parameters
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=self.channel_dim)
         self.sum_dims = tuple(range(1, self.mean.dim()))
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)

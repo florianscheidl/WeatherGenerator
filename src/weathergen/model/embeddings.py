@@ -15,7 +15,7 @@ from weathergen.model.layers import MLP
 from weathergen.model.utils import maybe_checkpoint
 
 # from weathergen.model.mlp import MLP
-from weathergen.model.norms import RMSNorm
+from weathergen.model.norms import LayerNorm, RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
 
@@ -60,7 +60,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
 
-        norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
+        norm = LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
@@ -121,7 +121,9 @@ class StreamEmbedTransformer(torch.nn.Module):
             assert self.unembed_mode == "block"  # only supported mode at the moment
             # padding needed if the unembedded columns cannot be concatenated to dim_out (e.g GPSRO)
             self.pad = self.dim_out % token_size
-            self.out_pad = torch.nn.Parameter(torch.zeros(self.pad), requires_grad=False, dtype=dtype)
+            self.out_pad = torch.nn.Parameter(
+                torch.zeros(self.pad, dtype=dtype), requires_grad=False
+            )
             self.unembed = torch.nn.Linear(
                 self.dim_embed,
                 self.num_tokens * (self.dim_out // token_size),
@@ -184,7 +186,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         # final normalize and dropout
         out = self.dropout_final(self.ln_final(out))
 
-        return out.to(torch.float16)
+        return out
 
     def forward(self, x_in):
         if self.mode == "channels":

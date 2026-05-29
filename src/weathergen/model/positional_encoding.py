@@ -41,11 +41,12 @@ def positional_encoding_harmonic_idx(x, s_idx):
 
     dim_embed = x.shape[-1]
     dev = x.device
+    dtype = x.dtype
 
     len_token_seq = x.shape[0]
-    pe = torch.zeros(x.shape[-2:], device=dev)
-    pos = (s_idx + 1) * torch.ones(len_token_seq, device=dev)
-    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev) / dim_embed
+    pe = torch.zeros(x.shape[-2:], device=dev, dtype=dtype)
+    pos = (s_idx + 1) * torch.ones(len_token_seq, device=dev, dtype=dtype)
+    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) / dim_embed
 
     pe[:, 0::2] = torch.sin(torch.outer(pos, xs))
     pe[:, 1::2] = torch.cos(torch.outer(pos, xs))
@@ -60,18 +61,23 @@ def positional_encoding_harmonic_global(x):
 
     dim_embed = x.shape[-1]
     dev = x.device
+    dtype = x.dtype
 
-    pe = torch.zeros(x.shape[-3], x.shape[-2], dim_embed, device=dev)
-    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev) / dim_embed
-    pe[..., 0::2] = 0.5 * torch.sin(torch.outer(8 * torch.arange(x.shape[-2], device=dev), xs))
+    pe = torch.zeros(x.shape[-3], x.shape[-2], dim_embed, device=dev, dtype=dtype)
+    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) / dim_embed
+    pe[..., 0::2] = 0.5 * torch.sin(
+        torch.outer(8 * torch.arange(x.shape[-2], device=dev, dtype=dtype), xs)
+    )
     pe[..., 0::2] += (
-        torch.sin(torch.outer(torch.arange(x.shape[-3], device=dev), xs))
+        torch.sin(torch.outer(torch.arange(x.shape[-3], device=dev, dtype=dtype), xs))
         .unsqueeze(1)
         .repeat((1, x.shape[-2], 1))
     )
-    pe[..., 1::2] = 0.5 * torch.cos(torch.outer(8 * torch.arange(x.shape[-2], device=dev), xs))
+    pe[..., 1::2] = 0.5 * torch.cos(
+        torch.outer(8 * torch.arange(x.shape[-2], device=dev, dtype=dtype), xs)
+    )
     pe[..., 1::2] += (
-        torch.cos(torch.outer(torch.arange(x.shape[-3], device=dev), xs))
+        torch.cos(torch.outer(torch.arange(x.shape[-3], device=dev, dtype=dtype), xs))
         .unsqueeze(1)
         .repeat((1, x.shape[-2], 1))
     )
@@ -86,9 +92,12 @@ def positional_encoding_harmonic_coord(x, lats, lons):
 
     dim_embed = x.shape[-1]
     dev = x.device
+    dtype = x.dtype
 
-    pe = torch.zeros(x.shape[0], dim_embed, device=dev)
-    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev) / dim_embed
+    pe = torch.zeros(x.shape[0], dim_embed, device=dev, dtype=dtype)
+    lats = lats.to(device=dev, dtype=dtype)
+    lons = lons.to(device=dev, dtype=dtype)
+    xs = 2.0 * np.pi * torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) / dim_embed
     pe[..., 0::2] = 0.5 * torch.sin(torch.outer(lats, xs))
     pe[..., 1::2] = 0.5 * torch.cos(torch.outer(lons, xs))[..., : pe[..., 1::2].shape[-1]]
     x = x + pe
