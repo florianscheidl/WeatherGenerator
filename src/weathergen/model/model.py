@@ -353,6 +353,7 @@ class Model(torch.nn.Module):
                 loss_cfg,
                 use_class_token=use_class_token,
                 use_patch_token=use_patch_token,
+                dtype=get_dtype(global_cfg.mixed_precision_dtype),
             )
         elif loss_cfg["head"].lower() == "transformer":
             return LatentPredictionHeadTransformer(
@@ -438,6 +439,7 @@ class Model(torch.nn.Module):
                             in_features=dim_coord_in,
                             out_features=dims_embed[0],
                             bias=False,
+                            dtype=get_dtype(cf.mixed_precision_dtype),
                         )
                     elif etc["net"] == "mlp":
                         self.embed_target_coords[stream_name] = MLP(
@@ -448,6 +450,7 @@ class Model(torch.nn.Module):
                             dropout_rate=dropout_rate,
                             norm_eps=self.cf.mlp_norm_eps,
                             name=f"embed_target_coords_{stream_name}",
+                            dtype=get_dtype(cf.mixed_precision_dtype),
                         )
                     else:
                         assert False
@@ -458,6 +461,7 @@ class Model(torch.nn.Module):
                             dims_embed[0],
                             cf.ae_global_dim_embed,
                             self.targets_num_channels[i_stream],
+                            dtype=get_dtype(cf.mixed_precision_dtype),
                         )
                     else:
                         # target prediction engines
@@ -492,6 +496,7 @@ class Model(torch.nn.Module):
                         norm_type=cf.norm_type,
                         final_activation=final_activation,
                         stream_name=stream_name,
+                        dtype=get_dtype(cf.mixed_precision_dtype),
                     )
 
             # iterate again to setup shared spatial pred heads if specified in config
@@ -546,11 +551,14 @@ class Model(torch.nn.Module):
                         norm_type=cf.norm_type,
                         final_activation=final_activation,
                         stream_name=stream_name,
+                        dtype=get_dtype(cf.mixed_precision_dtype),
                     )
 
         # Latent heads for losses
         self.latent_heads = nn.ModuleDict()
-        self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
+        self.latent_pre_norm = nn.LayerNorm(
+            cf.ae_global_dim_embed, dtype=get_dtype(cf.mixed_precision_dtype)
+        )
 
         ssl_losses_cfgs = [
             v
@@ -561,7 +569,9 @@ class Model(torch.nn.Module):
         # TODO: support multiple LossLatentSSLStudentTeacher terms
         assert len(ssl_losses_cfgs) <= 1, "To be implemented."
         for ssl_target_losses in ssl_losses_cfgs:
-            self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
+            self.latent_pre_norm = nn.LayerNorm(
+                cf.ae_global_dim_embed, dtype=get_dtype(cf.mixed_precision_dtype)
+            )
             for loss, loss_conf in ssl_target_losses.loss_fcts.items():
                 if loss == "iBOT":
                     self.latent_heads[loss] = self._create_latent_pred_head(

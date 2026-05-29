@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16):
         """
         Initialize the RMSNorm normalization layer.
 
@@ -31,7 +31,7 @@ class RMSNorm(torch.nn.Module):
         """
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
+        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def _norm(self, x):
         """
@@ -122,13 +122,16 @@ class AdaLayerNormLayer(torch.nn.Module):
         layer,
         norm_eps: float = 1e-6,
         dropout_rate: float = 0.0,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
 
         self.dim = dim
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True))
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True, dtype=dtype)
+        )
 
-        self.ln = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps)
+        self.ln = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps, dtype=dtype)
         self.layer = layer
 
         # Initialize weights to zero for modulation and gating layers

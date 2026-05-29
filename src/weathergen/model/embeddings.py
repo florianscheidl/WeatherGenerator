@@ -71,6 +71,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
                     with_flash=with_flash,
+                    attention_dtype=dtype,
                 )
             )
             self.layers.append(
@@ -80,6 +81,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     hidden_factor=2,
                     dropout_rate=dropout_rate,
                     with_residual=True,
+                    dtype=dtype,
                 )
             )
 
@@ -194,13 +196,19 @@ class StreamEmbedTransformer(torch.nn.Module):
 
 
 class StreamEmbedLinear(torch.nn.Module):
-    def __init__(self, dim_in, dim_out, stream_name="stream_embed"):
+    def __init__(
+        self,
+        dim_in,
+        dim_out,
+        stream_name="stream_embed",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         """Constructor"""
 
         super(StreamEmbedLinear, self).__init__()
 
         self.name = f"StreamEmbedder_{stream_name}"
-        self.layer = torch.nn.Linear(dim_in, dim_out)
+        self.layer = torch.nn.Linear(dim_in, dim_out, dtype=dtype)
 
     def forward(self, x):
         x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)

@@ -21,6 +21,7 @@ from weathergen.model.engines import (
     LatentPredictionHeadMLP,
     LatentPredictionHeadTransformer,
 )
+from weathergen.utils.utils import get_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,12 @@ def _create_teacher_heads(
 
     if head_type == "mlp":
         return LatentPredictionHeadMLP(
-            f"{name}-head", dim_embed, loss_conf, use_class_token, use_patch_token
+            f"{name}-head",
+            dim_embed,
+            loss_conf,
+            use_class_token,
+            use_patch_token,
+            dtype=get_dtype(cf.mixed_precision_dtype) if cf is not None else torch.bfloat16,
         )
     elif head_type == "transformer":
         if cf is None:
@@ -74,7 +80,9 @@ def prepare_encoder_teacher(model: nn.Module, training_cfg, override_cfg) -> Non
 
     # Ensure latent_pre_norm exists (teacher may not have had SSL training)
     if model.latent_pre_norm is None:
-        model.latent_pre_norm = nn.LayerNorm(teacher_dim_embed)
+        model.latent_pre_norm = nn.LayerNorm(
+            teacher_dim_embed, dtype=get_dtype(override_cfg.mixed_precision_dtype)
+        )
 
     # Create fresh latent heads from student's SSL config
     model.latent_heads = nn.ModuleDict()
@@ -88,7 +96,7 @@ def prepare_encoder_teacher(model: nn.Module, training_cfg, override_cfg) -> Non
             elif name in ("iBOT", "DINO"):
                 head_type = conf.get("head", "mlp").lower()
                 model.latent_heads[name] = _create_teacher_heads(
-                    name, head_type, teacher_dim_embed, conf
+                    name, head_type, teacher_dim_embed, conf, cf=override_cfg
                 )
             else:
                 logger.warning(f"Unknown SSL loss type {name!r} in teacher setup, skipping.")

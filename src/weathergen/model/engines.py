@@ -79,6 +79,7 @@ class EmbeddingEngine(torch.nn.Module):
                     self.sources_size[i] * si["token_size"],
                     self.cf.ae_local_dim_embed,
                     stream_name=stream_name,
+                    dtype=self.dtype,
                 )
             else:
                 raise ValueError("Unsupported embedding network type")
@@ -336,7 +337,12 @@ class Local2GlobalSumEngine(torch.nn.Module):
     def __init__(self, cf: Config) -> None:
         super(Local2GlobalSumEngine, self).__init__()
         self.cf = cf
-        self.proj = torch.nn.Linear(cf.ae_local_dim_embed, cf.ae_global_dim_embed, bias=False)
+        self.proj = torch.nn.Linear(
+            cf.ae_local_dim_embed,
+            cf.ae_global_dim_embed,
+            bias=False,
+            dtype=get_dtype(cf.mixed_precision_dtype),
+        )
         ae_adapter_num_blocks = cf.get("ae_adapter_num_blocks", 2)
         self.mlp_blocks = torch.nn.ModuleList()
         for _ in range(ae_adapter_num_blocks - 1):
@@ -644,6 +650,7 @@ class EnsPredictionHead(torch.nn.Module):
         norm_type="LayerNorm",
         hidden_factor=2,
         final_activation: None | str = None,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         """Constructor"""
 
@@ -661,13 +668,17 @@ class EnsPredictionHead(torch.nn.Module):
 
             # self.pred_heads[-1].append( norm( dim_embed))
             self.pred_heads[-1].append(
-                torch.nn.Linear(dim_embed, dim_out if enl == 1 else dim_internal)
+                torch.nn.Linear(dim_embed, dim_out if enl == 1 else dim_internal, dtype=dtype)
             )
 
             for i in range(ens_num_layers - 1):
                 self.pred_heads[-1].append(torch.nn.GELU())
                 self.pred_heads[-1].append(
-                    torch.nn.Linear(dim_internal, dim_out if enl - 2 == i else dim_internal)
+                    torch.nn.Linear(
+                        dim_internal,
+                        dim_out if enl - 2 == i else dim_internal,
+                        dtype=dtype,
+                    )
                 )
 
             # Add optional final non-linear activation
@@ -855,11 +866,14 @@ class TargetPredictionEngine(nn.Module):
             "attention_dtype": get_dtype(self.cf.attention_dtype),
         }
         self.tte = nn.ModuleList()
-        self.output_in_norm = nn.LayerNorm(self.dims_embed[0])
-        self.latent_in_norm = nn.LayerNorm(self.cf.ae_global_dim_embed)
+        module_dtype = get_dtype(self.cf.mixed_precision_dtype)
+        self.output_in_norm = nn.LayerNorm(self.dims_embed[0], dtype=module_dtype)
+        self.latent_in_norm = nn.LayerNorm(self.cf.ae_global_dim_embed, dtype=module_dtype)
         self.final_norm = nn.Identity()  # nn.RMSNorm(self.dims_embed[-1])
         self.dropout = nn.Dropout(0.2)
-        self.pos_embed = nn.Parameter(torch.zeros(1, 9, self.cf.ae_global_dim_embed))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, 9, self.cf.ae_global_dim_embed, dtype=module_dtype)
+        )
         dim_aux = self.cf.ae_global_dim_embed
 
         for ith, dim in enumerate(self.dims_embed[:-1]):
@@ -874,6 +888,7 @@ class TargetPredictionEngine(nn.Module):
                         with_self_attn=False,
                         with_adanorm=False,
                         with_mlp=False,
+                        dtype=module_dtype,
                         attention_kwargs=attention_kwargs,
                     )
                 )
@@ -886,6 +901,7 @@ class TargetPredictionEngine(nn.Module):
                         attention_kwargs=attention_kwargs,
                         with_adanorm=True,
                         dropout_rate=0.1,
+                        dtype=module_dtype,
                     )
                 )
             elif self.cf.decoder_type == "CrossAttentionConditioning":
@@ -899,6 +915,7 @@ class TargetPredictionEngine(nn.Module):
                         with_adanorm=False,
                         with_mlp=True,
                         dropout_rate=0.1,
+                        dtype=module_dtype,
                         attention_kwargs=attention_kwargs,
                     )
                 )
@@ -913,6 +930,7 @@ class TargetPredictionEngine(nn.Module):
                         with_adanorm=True,
                         with_mlp=True,
                         dropout_rate=0.1,
+                        dtype=module_dtype,
                         attention_kwargs=attention_kwargs,
                     )
                 )
@@ -929,6 +947,7 @@ class TargetPredictionEngine(nn.Module):
                         tr_dim_head_proj=tr_dim_head_proj,
                         tr_mlp_hidden_factor=tr_mlp_hidden_factor,
                         mlp_norm_eps=self.cf.mlp_norm_eps,
+                        dtype=module_dtype,
                     )
                 )
             else:
@@ -1021,7 +1040,8 @@ class LatentPredictionHeadTransformer(nn.Module):
         self.blocks = nn.ModuleList()
 
         # first map to intermediate_dim to introduce a bottleneck
-        self.blocks.append(nn.Linear(in_dim, intermediate_dim, bias=False))
+        module_dtype = get_dtype(self.global_cf.mixed_precision_dtype)
+        self.blocks.append(nn.Linear(in_dim, intermediate_dim, bias=False, dtype=module_dtype))
 
         for _ in range(num_blocks):
             self.blocks.append(
@@ -1054,7 +1074,7 @@ class LatentPredictionHeadTransformer(nn.Module):
             )
 
         # finally map from intermediate_dim to the out_dim
-        self.blocks.append(nn.Linear(intermediate_dim, out_dim, bias=False))
+        self.blocks.append(nn.Linear(intermediate_dim, out_dim, bias=False, dtype=module_dtype))
 
     def forward(self, x: LatentState):
         # we concatenate the patch and class tokens to process them together
@@ -1086,7 +1106,15 @@ class LatentPredictionHeadIdentity(nn.Module):
 
 
 class LatentPredictionHeadMLP(nn.Module):
-    def __init__(self, name, in_dim: int, loss_conf, use_class_token: bool, use_patch_token: bool):
+    def __init__(
+        self,
+        name,
+        in_dim: int,
+        loss_conf,
+        use_class_token: bool,
+        use_patch_token: bool,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         super().__init__()
 
         self.name = name
@@ -1101,7 +1129,7 @@ class LatentPredictionHeadMLP(nn.Module):
         self.use_patch_token = use_patch_token
 
         # Create an MLP block
-        self.blocks = MLP(in_dim, out_dim, num_layers, hidden_factor)
+        self.blocks = MLP(in_dim, out_dim, num_layers, hidden_factor, dtype=dtype)
 
     def forward(self, x: LatentState):
         outputs = []
@@ -1114,10 +1142,17 @@ class LatentPredictionHeadMLP(nn.Module):
 
 
 class EfficientBilinear(torch.nn.Module):
-    def __init__(self, in_dim_lhs, in_dim_rhs, out, bias=False):
+    def __init__(
+        self,
+        in_dim_lhs,
+        in_dim_rhs,
+        out,
+        bias=False,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         super().__init__()
-        self.weight = nn.Parameter(torch.randn(out, in_dim_lhs, in_dim_rhs))
-        self.bias = nn.Parameter(torch.zeros(out)) if bias else 0.0
+        self.weight = nn.Parameter(torch.randn(out, in_dim_lhs, in_dim_rhs, dtype=dtype))
+        self.bias = nn.Parameter(torch.zeros(out, dtype=dtype)) if bias else 0.0
         self.total_in = in_dim_lhs * in_dim_rhs
 
     def forward(self, x_lhs, x_rhs):
@@ -1132,12 +1167,19 @@ class EfficientBilinear(torch.nn.Module):
 
 
 class BilinearDecoder(nn.Module):
-    def __init__(self, stream_name, coord_dim, latent_dim, out_dim):
+    def __init__(
+        self,
+        stream_name,
+        coord_dim,
+        latent_dim,
+        out_dim,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         super().__init__()
 
         self.name = f"BilinearDecoder_{stream_name}"
         self.latent_dim = latent_dim
-        self.bilin = EfficientBilinear(coord_dim, latent_dim, out_dim)
+        self.bilin = EfficientBilinear(coord_dim, latent_dim, out_dim, dtype=dtype)
 
     def forward(self, coords_md, latent_nd, tcs_lens_n1):
         """

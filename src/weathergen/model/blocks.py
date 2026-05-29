@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 
+import torch
 import torch.nn as nn
 
 from weathergen.model.attention import (
@@ -25,10 +26,11 @@ class SelfAttentionBlock(nn.Module):
     layer norm with a FFN.
     """
 
-    def __init__(self, dim, dim_aux, with_adanorm, num_heads, dropout_rate, **kwargs):
+    def __init__(self, dim, dim_aux, with_adanorm, num_heads, dropout_rate, dtype, **kwargs):
         super().__init__()
 
         self.with_adanorm = with_adanorm
+        attention_dtype = kwargs["attention_kwargs"]["attention_dtype"]
 
         self.mhsa = MultiSelfAttentionHeadVarlen(
             dim_embed=dim,
@@ -37,9 +39,15 @@ class SelfAttentionBlock(nn.Module):
             **kwargs["attention_kwargs"],
         )
         if self.with_adanorm:
-            self.mhsa_block = AdaLayerNormLayer(dim, dim_aux, self.mhsa, dropout_rate)
+            self.mhsa_block = AdaLayerNormLayer(
+                dim, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
+            )
         else:
-            self.ln_sa = nn.LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_sa = nn.LayerNorm(
+                dim,
+                eps=kwargs["attention_kwargs"]["norm_eps"],
+                dtype=attention_dtype,
+            )
             self.mhsa_block = lambda x, _, **kwargs: self.mhsa(self.ln_sa(x), **kwargs) + x
 
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -50,12 +58,13 @@ class SelfAttentionBlock(nn.Module):
             dropout_rate=0.1,
             nonlin=approx_gelu,
             with_residual=False,
+            dtype=dtype,
         )
         if self.with_adanorm:
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
-            self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate)
+            self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate, dtype=dtype)
         else:
-            self.ln_mlp = nn.LayerNorm(norm_eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_mlp = nn.LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"], dtype=dtype)
             self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x), None, **kwargs) + x
 
         self.initialise_weights()
@@ -98,6 +107,7 @@ class CrossAttentionBlock(nn.Module):
         with_mlp,
         num_heads,
         dropout_rate,
+        dtype,
         **kwargs,
     ):
         super().__init__()
@@ -105,6 +115,7 @@ class CrossAttentionBlock(nn.Module):
         self.with_adanorm = with_adanorm
         self.with_self_attn = with_self_attn
         self.with_mlp = with_self_attn
+        attention_dtype = kwargs["attention_kwargs"]["attention_dtype"]
 
         if with_self_attn:
             self.mhsa = MultiSelfAttentionHeadVarlen(
@@ -114,9 +125,15 @@ class CrossAttentionBlock(nn.Module):
                 **kwargs["attention_kwargs"],
             )
             if self.with_adanorm:
-                self.mhsa_block = AdaLayerNormLayer(dim_q, dim_aux, self.mhsa, dropout_rate)
+                self.mhsa_block = AdaLayerNormLayer(
+                    dim_q, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
+                )
             else:
-                self.ln_sa = nn.LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+                self.ln_sa = nn.LayerNorm(
+                    dim_q,
+                    eps=kwargs["attention_kwargs"]["norm_eps"],
+                    dtype=attention_dtype,
+                )
                 self.mhsa_block = lambda x, _, **kwargs: self.mhsa(self.ln_sa(x), **kwargs) + x
 
         self.cross_attn = MultiCrossAttentionHeadVarlen(
@@ -127,9 +144,15 @@ class CrossAttentionBlock(nn.Module):
             **kwargs["attention_kwargs"],
         )
         if self.with_adanorm:
-            self.cross_attn_block = AdaLayerNormLayer(dim_q, dim_aux, self.cross_attn, dropout_rate)
+            self.cross_attn_block = AdaLayerNormLayer(
+                dim_q, dim_aux, self.cross_attn, dropout_rate, dtype=attention_dtype
+            )
         else:
-            self.ln_ca = nn.LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_ca = nn.LayerNorm(
+                dim_q,
+                eps=kwargs["attention_kwargs"]["norm_eps"],
+                dtype=attention_dtype,
+            )
             self.cross_attn_block = (
                 lambda x, _, **kwargs: self.cross_attn(self.ln_ca(x), **kwargs) + x
             )
@@ -142,12 +165,19 @@ class CrossAttentionBlock(nn.Module):
                 hidden_factor=4,
                 nonlin=approx_gelu,
                 with_residual=False,
+                dtype=dtype,
             )
             if self.with_adanorm:
                 self.mlp_fn = lambda x, **kwargs: self.mlp(x)
-                self.mlp_block = AdaLayerNormLayer(dim_q, dim_aux, self.mlp_fn, dropout_rate)
+                self.mlp_block = AdaLayerNormLayer(
+                    dim_q, dim_aux, self.mlp_fn, dropout_rate, dtype=dtype
+                )
             else:
-                self.ln_mlp = nn.LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
+                self.ln_mlp = nn.LayerNorm(
+                    dim_q,
+                    eps=kwargs["attention_kwargs"]["norm_eps"],
+                    dtype=dtype,
+                )
                 self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x)) + x
         else:
             self.mlp_block = lambda x, _, **kwargs: x
@@ -191,6 +221,7 @@ class OriginalPredictionBlock(nn.Module):
         tr_mlp_hidden_factor,
         tro_type,
         mlp_norm_eps=1e-6,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
 
@@ -249,6 +280,7 @@ class OriginalPredictionBlock(nn.Module):
                 norm_type=self.cf.norm_type,
                 dim_aux=(dim_aux if self.cf.pred_mlp_adaln else None),
                 norm_eps=self.cf.mlp_norm_eps,
+                dtype=dtype,
             )
         )
 
