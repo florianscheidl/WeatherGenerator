@@ -888,7 +888,7 @@ class ProfilingTrainer(Trainer):
                 record_shapes=False,
                 profile_memory=False,
                 with_stack=True,
-                with_modules=False,
+                with_modules=True,
                 with_flops=False,
                 schedule=torch.profiler.schedule(
                     wait=cf.profiling.wait_iteration,
