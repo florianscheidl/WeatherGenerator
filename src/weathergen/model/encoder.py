@@ -9,7 +9,6 @@
 
 import torch
 from astropy_healpix import healpy
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
@@ -25,6 +24,7 @@ from weathergen.model.engines import (
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
+from weathergen.model.utils import maybe_checkpoint
 from weathergen.utils.utils import get_dtype
 
 
@@ -125,15 +125,15 @@ class EncoderModule(torch.nn.Module):
         Encoder forward
         """
 
-        stream_cell_tokens = checkpoint(
+        stream_cell_tokens = maybe_checkpoint(
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
-        tokens_global, posteriors = checkpoint(
+        tokens_global, posteriors = maybe_checkpoint(
             self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
         )
 
-        tokens_global = checkpoint(
+        tokens_global = maybe_checkpoint(
             self.ae_global_engine,
             tokens_global,
             coords=model_params.rope_coords,

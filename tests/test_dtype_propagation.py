@@ -1,5 +1,6 @@
 import sys
 import types
+from types import SimpleNamespace
 
 import torch
 from omegaconf import OmegaConf
@@ -13,8 +14,9 @@ if "flash_attn" not in sys.modules:
     flash_attn.flash_attn_func = _unused_flash_attn
     flash_attn.flash_attn_varlen_func = _unused_flash_attn
     sys.modules["flash_attn"] = flash_attn
-
+from weathergen.model.attention import MultiSelfAttentionHeadVarlen
 from weathergen.model.blocks import CrossAttentionBlock, SelfAttentionBlock
+from weathergen.model.norms import RMSNorm
 from weathergen.model.embeddings import StreamEmbedLinear, StreamEmbedTransformer
 from weathergen.model.engines import (
     BilinearDecoder,
@@ -24,6 +26,15 @@ from weathergen.model.engines import (
     Local2GlobalSumEngine,
     TargetPredictionEngine,
 )
+from weathergen.train.trainer import Trainer
+
+
+def _make_minimal_trainer(mixed_precision_dtype: str, with_mixed_precision: bool = True):
+    trainer = Trainer(train_logging=OmegaConf.create({}))
+    trainer.cf = OmegaConf.create({"with_mixed_precision": with_mixed_precision})
+    trainer.mixed_precision_dtype = getattr(torch, {"fp16": "float16", "bf16": "bfloat16"}[mixed_precision_dtype])
+    trainer.optimizer = SimpleNamespace(step=lambda: None)
+    return trainer
 
 
 def _first_linear(module):
@@ -31,6 +42,49 @@ def _first_linear(module):
         if isinstance(submodule, torch.nn.Linear):
             return submodule
     raise AssertionError("No Linear module found")
+
+
+def test_bf16_training_does_not_use_grad_scaler():
+    trainer = _make_minimal_trainer("bf16")
+    trainer.use_grad_scaler = trainer.cf.with_mixed_precision and trainer.mixed_precision_dtype == torch.float16
+    trainer.grad_scaler = torch.amp.GradScaler("cuda") if trainer.use_grad_scaler else None
+
+    assert trainer.use_grad_scaler is False
+    assert trainer.grad_scaler is None
+
+
+
+def test_fp16_training_uses_grad_scaler():
+    trainer = _make_minimal_trainer("fp16")
+    trainer.use_grad_scaler = trainer.cf.with_mixed_precision and trainer.mixed_precision_dtype == torch.float16
+    trainer.grad_scaler = torch.amp.GradScaler("cuda") if trainer.use_grad_scaler else None
+
+    assert trainer.use_grad_scaler is True
+    assert trainer.grad_scaler is not None
+
+
+
+def test_backward_and_step_helpers_work_without_grad_scaler():
+    trainer = _make_minimal_trainer("bf16")
+    trainer.grad_scaler = None
+    x = torch.tensor(2.0, requires_grad=True)
+    loss = x.square()
+
+    trainer._backward_loss(loss)
+    trainer._unscale_optimizer_if_needed()
+    trainer._step_optimizer()
+
+    assert x.grad is not None
+
+
+
+def test_rmsnorm_preserves_requested_dtype_in_forward():
+    module = RMSNorm(8, dtype=torch.float16)
+    x = torch.randn(4, 8, dtype=torch.float16)
+
+    out = module(x)
+
+    assert out.dtype == torch.float16
 
 
 def _minimal_decoder_cfg(decoder_type: str = "CrossAttentionConditioning"):

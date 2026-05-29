@@ -29,7 +29,7 @@ from weathergen.model.attention import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
-from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
+from weathergen.model.utils import apply_fct_to_blocks, freeze_weights, set_inline_checkpointing
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
 
@@ -120,6 +120,8 @@ def init_model_and_shard(
                         section="embed engine",
                         **fsdp_kwargs,
                     )
+
+        set_inline_checkpointing(model, enabled=False)
 
         for module_name, module in model.encoder.ae_local_engine.ae_local_blocks.named_modules():
             if isinstance(module, modules_to_shard):

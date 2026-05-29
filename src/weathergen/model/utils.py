@@ -13,6 +13,7 @@ import re
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,17 @@ def apply_fct_to_blocks(model, blocks, fct):
         # avoid the whole model element which has name ''
         if (re.fullmatch(blocks, name) is not None) and (name != ""):
             fct(module)
+
+
+def set_inline_checkpointing(model: nn.Module, enabled: bool) -> None:
+    for module in model.modules():
+        module._weathergen_use_inline_checkpoint = enabled
+
+
+def maybe_checkpoint(module, *args, use_reentrant: bool = False, **kwargs):
+    if not getattr(module, "_weathergen_use_inline_checkpoint", True):
+        return module(*args, **kwargs)
+    return checkpoint(module, *args, use_reentrant=use_reentrant, **kwargs)
 
 
 class ActivationFactory:

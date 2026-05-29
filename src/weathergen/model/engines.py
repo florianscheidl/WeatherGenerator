@@ -13,7 +13,6 @@ import math
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.model.attention import (
@@ -29,7 +28,8 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
-from weathergen.model.utils import ActivationFactory
+from weathergen.model.norms import RMSNorm
+from weathergen.model.utils import ActivationFactory, maybe_checkpoint
 from weathergen.utils.utils import get_dtype
 
 MAX_NUMBER_TOKENS_LOCAL_PER_CELL = 64
@@ -538,7 +538,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
     def forward(self, tokens, coords=None):
         aux_info = None
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+            tokens = maybe_checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
 
@@ -633,9 +633,9 @@ class ForecastingEngine(torch.nn.Module):
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
-                tokens = checkpoint(block, tokens, use_reentrant=False)
+                tokens = maybe_checkpoint(block, tokens, use_reentrant=False)
             else:
-                tokens = checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
+                tokens = maybe_checkpoint(block, tokens, coords, aux_info, use_reentrant=False)
         return tokens
 
 
@@ -793,9 +793,9 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = maybe_checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
             else:
-                tc_tokens = checkpoint(
+                tc_tokens = maybe_checkpoint(
                     block,
                     tc_tokens,
                     tokens_stream,
@@ -963,7 +963,7 @@ class TargetPredictionEngine(nn.Module):
         )
         for layer in self.tte:
             if isinstance(layer, OriginalPredictionBlock):
-                output = checkpoint(
+                output = maybe_checkpoint(
                     layer,
                     latent=latent.flatten(0, 1),
                     output=output,
@@ -973,7 +973,7 @@ class TargetPredictionEngine(nn.Module):
                     use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
-                output = checkpoint(
+                output = maybe_checkpoint(
                     layer,
                     x=output,
                     x_kv=latent.flatten(0, 1),
@@ -983,7 +983,7 @@ class TargetPredictionEngine(nn.Module):
                     use_reentrant=False,
                 )
             else:
-                output = checkpoint(
+                output = maybe_checkpoint(
                     layer,
                     x=output,
                     x_lens=output_lens,
@@ -1090,7 +1090,7 @@ class LatentPredictionHeadTransformer(nn.Module):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 patch_class_tokens = block(patch_class_tokens)
             else:
-                patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+                patch_class_tokens = maybe_checkpoint(block, patch_class_tokens, use_reentrant=False)
         return patch_class_tokens
 
 
