@@ -48,7 +48,8 @@ class LayerNorm(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dims = tuple(range(-len(self.normalized_shape), 0))
         var, mean = torch.var_mean(x, dim=dims, keepdim=True, correction=0)
-        x = (x - mean) * torch.rsqrt(var + self.eps)
+        eps = torch.as_tensor(self.eps, dtype=var.dtype, device=var.device)
+        x = (x - mean) * torch.rsqrt(var + eps)
         if self.weight is not None:
             x = x * self.weight
         if self.bias is not None:
@@ -88,7 +89,8 @@ class RMSNorm(torch.nn.Module):
 
         """
         var, _ = torch.var_mean(x.pow(2), dim=-1, keepdim=True, correction=0)
-        return x * torch.rsqrt(var + self.eps)
+        eps = torch.as_tensor(self.eps, dtype=var.dtype, device=var.device)
+        return x * torch.rsqrt(var + eps)
 
     def forward(self, x):
         """
