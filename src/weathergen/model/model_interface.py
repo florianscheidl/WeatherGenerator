@@ -97,26 +97,33 @@ def init_model_and_shard(
             for module in stream_embed_list.modules():
                 if isinstance(module, modules_to_shard):
                     fully_shard(module, **fsdp_kwargs)
+                    print(f"Sharding module {module} in embed engine")
+                        
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in ae local engine")
 
         for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in ae local-global engine")
 
         for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in ae global engine")
 
         for module in model.forecast_engine.fe_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in forecast engine")
 
         for module in model.latent_heads.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in latent heads")
 
         full_precision_fsdp_kwargs = {
             "mp_policy": (
@@ -132,9 +139,11 @@ def init_model_and_shard(
         for module in model.target_token_engines.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
+                print(f"Sharding module {module} in target token engines")
 
     if with_ddp and with_fsdp:
         fully_shard(model)
+        print("Sharding full model with FSDP")
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
