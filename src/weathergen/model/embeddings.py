@@ -60,7 +60,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
 
-        norm = LayerNorm if norm_type == "LayerNorm" else RMSNorm
+        norm = RMSNorm
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
