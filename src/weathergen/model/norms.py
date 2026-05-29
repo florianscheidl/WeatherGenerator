@@ -76,6 +76,9 @@ class RMSNorm(torch.nn.Module):
         self.normalized_shape = (dim,)
         self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
 
+    def reset_parameters(self):
+        nn.init.ones_(self.weight)
+
     def _norm(self, x):
         """
         Apply the RMSNorm normalization to the input tensor.
