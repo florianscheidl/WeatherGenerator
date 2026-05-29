@@ -788,7 +788,7 @@ class Model(torch.nn.Module):
         tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
         # TODO: precompute in model_params?
         tokens_nbors_lens = torch.full(
-            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
+            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int64, device=tokens_nbors.device
         )
         tokens_nbors_lens[0] = 0
 
