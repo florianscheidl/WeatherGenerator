@@ -32,7 +32,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         num_heads,
         dropout_rate=0.0,
         with_flash=True,
-        norm_type="LayerNorm",
+        norm_type="RMSNorm",
         unembed_mode="full",
         stream_name="stream_embed",
         dtype: torch.dtype = torch.bfloat16,

@@ -73,6 +73,7 @@ class RMSNorm(torch.nn.Module):
         """
         super().__init__()
         self.eps = eps
+        self.normalized_shape = (dim,)
         self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def _norm(self, x):
@@ -118,7 +119,7 @@ class AdaLayerNorm(torch.nn.Module):
         self.embed_aux.append(torch.nn.SiLU())
         self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x, dtype=dtype))
 
-        self.norm = LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine, dtype=dtype)
+        self.norm = RMSNorm(dim_embed_x, norm_eps, dtype=dtype)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
@@ -172,7 +173,7 @@ class AdaLayerNormLayer(torch.nn.Module):
             nn.SiLU(), nn.Linear(dim_aux, 3 * dim, bias=True, dtype=dtype)
         )
 
-        self.ln = LayerNorm(dim, elementwise_affine=False, eps=norm_eps, dtype=dtype)
+        self.ln = RMSNorm(dim, norm_eps, dtype=dtype)
         self.layer = layer
 
         # Initialize weights to zero for modulation and gating layers

@@ -39,7 +39,7 @@ class MLP(torch.nn.Module):
         dropout_rate=0.0,
         nonlin=torch.nn.GELU,
         with_residual=False,
-        norm_type="LayerNorm",
+        norm_type="RMSNorm",
         dim_aux=None,
         norm_eps=1e-5,
         name: str | None = None,
