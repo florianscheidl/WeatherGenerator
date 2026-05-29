@@ -123,20 +123,24 @@ class EmbeddingEngine(torch.nn.Module):
             # actual scatter operation and apply per cell positional encoding
             tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
 
-        pe_idxs = self.get_pe_idxs_vectorized(batch)
+        pe_idxs = self.get_pe_idxs_vectorized(batch, num_tokens)
         tokens_all = tokens_all + pe_embed[pe_idxs]
 
         return tokens_all
 
-    def get_pe_idxs_vectorized(self, batch):
+    def get_pe_idxs_vectorized(self, batch, num_tokens):
         """
         Compute per cell indices into positional encoding
         """
 
         tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).sum(0).flatten()
-        rows = torch.arange(tok_counts.max(), device=tok_counts.device).unsqueeze(0)
-        rows = rows.expand(tok_counts.shape[0], -1)
-        pe_idxs = rows[rows < tok_counts.unsqueeze(1)]
+        # For each cell with count n, emit 0,1,...,n-1. Built directly via
+        # repeat_interleave (with CPU-known output_size=num_tokens) so there's no
+        # boolean mask / nonzero sync.
+        group_starts = torch.repeat_interleave(
+            tok_counts.cumsum(0) - tok_counts, tok_counts, output_size=num_tokens
+        )
+        pe_idxs = torch.arange(num_tokens, device=tok_counts.device) - group_starts
 
         return pe_idxs
 
