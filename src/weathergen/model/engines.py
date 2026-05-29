@@ -117,7 +117,7 @@ class EmbeddingEngine(torch.nn.Module):
             tokens_all = torch.cat(x_embeds)
 
         else:
-            scatter_idxs = self.get_scatter_idxs_vectorized(batch)
+            scatter_idxs = self.get_scatter_idxs_vectorized(batch, num_tokens)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
             # if the assert is hit, MAX_NUMBER_TOKENS_LOCAL_PER_CELL needs to be increased
@@ -173,7 +173,7 @@ class EmbeddingEngine(torch.nn.Module):
 
         return scatter_idxs
 
-    def get_scatter_idxs_vectorized(self, batch):
+    def get_scatter_idxs_vectorized(self, batch, num_tokens):
         """
         Compute reordering index so that tokens from different streams but same cell are
         continguous
@@ -191,12 +191,16 @@ class EmbeddingEngine(torch.nn.Module):
         offset = torch.cat([pad, tok_counts.cumsum(0)])[:-1]
         offset[:, 1:] += tok_counts.sum(0).cumsum(0)[:-1]
 
-        ranges = torch.arange(tok_counts.max(), device=dev).repeat((tok_counts.numel(), 1))
-        idxs = (offset.flatten() + ranges.transpose(1, 0)).transpose(1, 0)
-        # select idxs[i][:ranges[i]] for each i; vectorized version
-        col_indices = torch.arange(idxs.shape[1], device=dev).unsqueeze(0)
-        valid_mask = col_indices < tok_counts.flatten().unsqueeze(1)
-        scatter_idxs = idxs[valid_mask].to(torch.int64)
+        # num_tokens is already known CPU-side (computed in forward), so passing it as
+        # output_size= lets repeat_interleave skip its data-dependent shape sync.
+        counts_flat = tok_counts.flatten()
+        offsets_flat = offset.flatten()
+        base = torch.repeat_interleave(offsets_flat, counts_flat, output_size=num_tokens)
+        group_starts = torch.repeat_interleave(
+            counts_flat.cumsum(0) - counts_flat, counts_flat, output_size=num_tokens
+        )
+        local = torch.arange(num_tokens, device=dev) - group_starts
+        scatter_idxs = (base + local).to(torch.int64)
 
         return scatter_idxs
 
