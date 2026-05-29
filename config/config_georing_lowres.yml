@@ -74,7 +74,7 @@ rope_2D: False
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False
-with_fsdp: True
+with_fsdp: False
 attention_dtype: bf16
 mixed_precision_dtype: bf16
 mlp_norm_eps: 1e-5
@@ -89,7 +89,7 @@ latent_noise_deterministic_latents: True
 freeze_modules: ""
 load_chkpt: {}
 
-norm_type: "LayerNorm"
+norm_type: "RMSNorm"  # "LayerNorm", "RMSNorm", "ScaleNorm"
 qk_norm_type: null  # if null, defaults to norm_type
 
 #####################################
