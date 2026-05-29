@@ -131,7 +131,7 @@ def init_model_and_shard(
 
         for module in model.target_token_engines.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
+                fully_shard(module, **fsdp_kwargs)
 
     if with_ddp and with_fsdp:
         fully_shard(model)

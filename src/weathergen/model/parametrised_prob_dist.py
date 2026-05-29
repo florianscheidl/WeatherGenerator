@@ -89,6 +89,7 @@ class LatentInterpolator(nn.Module):
         use_additive_noise=False,
         deterministic=False,
         saturate_encodings=None,
+        dtype: torch.dtype = torch.bfloat16,
     ):
         super().__init__()
 
@@ -102,7 +103,7 @@ class LatentInterpolator(nn.Module):
             deterministic=deterministic, channel_dim=-1
         )
         self.mean_and_var = nn.Sequential(
-            nn.Linear(dim, 2 * dim, bias=False),
+            nn.Linear(dim, 2 * dim, bias=False, dtype=dtype),
             SaturateEncodings(saturate_encodings)
             if saturate_encodings is not None
             else nn.Identity(),
