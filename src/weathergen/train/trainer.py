@@ -887,7 +887,7 @@ class ProfilingTrainer(Trainer):
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=False,
                 profile_memory=False,
-                with_stack=False,
+                with_stack=True,
                 with_modules=False,
                 with_flops=False,
                 schedule=torch.profiler.schedule(
