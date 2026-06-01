@@ -85,11 +85,6 @@ class EmbeddingEngine(torch.nn.Module):
     def forward(self, batch, pe_embed):
         num_steps_input = batch.get_num_steps()
 
-        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
-        tokens_all = torch.empty(
-            (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
-        )
-
         # iterate over all streams
         x_embeds = []
         for stream_name in self.stream_names:
@@ -102,7 +97,7 @@ class EmbeddingEngine(torch.nn.Module):
             if all(s is None for s in sdata):
                 continue
 
-            sdata = torch.cat(sdata).to(tokens_all.dtype)
+            sdata = torch.cat(sdata).to(self.dtype)
             # skip empty stream
             if sdata.numel() == 0:
                 continue
@@ -112,16 +107,20 @@ class EmbeddingEngine(torch.nn.Module):
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
+        tokens_cat = torch.cat(x_embeds)
+        num_tokens = tokens_cat.shape[0]
+
         if batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
-            tokens_all = torch.cat(x_embeds)
+            tokens_all = tokens_cat
 
         else:
+            tokens_all = torch.empty_like(tokens_cat)
             scatter_idxs = self.get_scatter_idxs_vectorized(batch, num_tokens)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
             # actual scatter operation and apply per cell positional encoding
-            tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
+            tokens_all.scatter_(0, scatter_idxs, tokens_cat)
 
         pe_idxs = self.get_pe_idxs_vectorized(batch, num_tokens)
         tokens_all = tokens_all + pe_embed[pe_idxs]
