@@ -36,20 +36,6 @@ from weathergen.utils.utils import get_dtype
 logger = logging.getLogger(__name__)
 
 
-def _module_dtype_summary(module: torch.nn.Module) -> str:
-    param_dtypes = sorted({str(param.dtype).replace("torch.", "") for param in module.parameters(recurse=False)})
-    buffer_dtypes = sorted({str(buf.dtype).replace("torch.", "") for buf in module.buffers(recurse=False)})
-    return f"params={param_dtypes or ['-']} buffers={buffer_dtypes or ['-']}"
-
-
-def _fully_shard_with_diagnostics(module: torch.nn.Module, module_path: str, section: str, **fsdp_kwargs):
-    print(
-        f"[FSDP] fully_shard section={section} path={module_path} class={module.__class__.__name__} "
-        f"{_module_dtype_summary(module)}"
-    )
-    fully_shard(module, **fsdp_kwargs)
-
-
 # same as in config: student_teacher, forecasting, masking
 type TrainingMode = str
 
@@ -114,105 +100,32 @@ def init_model_and_shard(
             MultiSelfAttentionHeadVarlen,
         )
 
-        for stream_name, stream_embed_list in model.encoder.embed_engine.embeds.items():
-            for module_name, module in stream_embed_list.named_modules():
-                if isinstance(module, modules_to_shard):
-                    module_path = (
-                        f"model.encoder.embed_engine.embeds[{stream_name}]"
-                        + (f".{module_name}" if module_name else "")
-                    )
-                    _fully_shard_with_diagnostics(
-                        module,
-                        module_path=module_path,
-                        section="embed engine",
-                        **fsdp_kwargs,
-                    )
-
-        set_inline_checkpointing(model, enabled=False)
-
-        for module_name, module in model.encoder.ae_local_engine.ae_local_blocks.named_modules():
+        for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.encoder.ae_local_engine.ae_local_blocks" + (
-                    f".{module_name}" if module_name else ""
-                )
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="ae local engine",
-                    **fsdp_kwargs,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
-        for module_name, module in model.encoder.ae_local_global_engine.ae_adapter.named_modules():
+        for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.encoder.ae_local_global_engine.ae_adapter" + (
-                    f".{module_name}" if module_name else ""
-                )
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="ae local-global engine",
-                    **fsdp_kwargs,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
         for module_name, module in model.encoder.ae_global_engine.ae_global_blocks.named_modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.encoder.ae_global_engine.ae_global_blocks" + (
-                    f".{module_name}" if module_name else ""
-                )
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="ae global engine",
-                    **fsdp_kwargs,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
         for module_name, module in model.forecast_engine.fe_blocks.named_modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.forecast_engine.fe_blocks" + (
-                    f".{module_name}" if module_name else ""
-                )
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="forecast engine",
-                    **fsdp_kwargs,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
         for module_name, module in model.latent_heads.named_modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.latent_heads" + (f".{module_name}" if module_name else "")
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="latent heads",
-                    **fsdp_kwargs,
-                )
-
-        full_precision_fsdp_kwargs = {
-            "mp_policy": (
-                MixedPrecisionPolicy(
-                    param_dtype=torch.float32,
-                    reduce_dtype=torch.float32,
-                )
-                if cf.with_mixed_precision
-                else None
-            ),
-        }
+                fully_shard(module, **fsdp_kwargs)
 
         for module_name, module in model.target_token_engines.named_modules():
             if isinstance(module, modules_to_shard):
-                module_path = "model.target_token_engines" + (
-                    f".{module_name}" if module_name else ""
-                )
-                _fully_shard_with_diagnostics(
-                    module,
-                    module_path=module_path,
-                    section="target token engines",
-                    **fsdp_kwargs,
-                )
+                fully_shard(module, **fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        _fully_shard_with_diagnostics(model, module_path="model", section="root")
+        fully_shard(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
