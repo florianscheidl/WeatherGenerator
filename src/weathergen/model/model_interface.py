@@ -13,6 +13,7 @@ import itertools
 import logging
 
 import torch
+from torch.distributed._composable.checkpoint_activation import checkpoint as composable_checkpoint
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -40,6 +41,22 @@ logger = logging.getLogger(__name__)
 type TrainingMode = str
 
 
+def _iter_modules_for_checkpoint_activation(root_module, modules_to_wrap):
+    """Yield leaf modules that should use composable activation checkpointing."""
+    for module in root_module.modules():
+        if not isinstance(module, modules_to_wrap):
+            continue
+        if any(isinstance(child, modules_to_wrap) for child in module.children()):
+            continue
+        yield module
+
+
+def _apply_composable_activation_checkpointing(root_module, modules_to_wrap, debug=False):
+    """Apply composable activation checkpointing before FSDP sharding."""
+    for module in _iter_modules_for_checkpoint_activation(root_module, modules_to_wrap):
+        composable_checkpoint(module, debug=debug)
+
+
 def init_model_and_shard(
     cf,
     dataset,
@@ -63,11 +80,6 @@ def init_model_and_shard(
         model.encoder.q_cells.requires_grad = False
 
     if with_ddp and not with_fsdp:
-        # DDP + activation checkpointing can hit "Expected to mark a variable ready only once"
-        # when the same parameters participate in multiple non-reentrant checkpointed segments in a
-        # single iteration (e.g. shared prediction heads across output steps/streams). Disable inline
-        # checkpointing for plain DDP and use static_graph to make the parameter usage contract
-        # explicit.
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -75,7 +87,6 @@ def init_model_and_shard(
             find_unused_parameters=cf.get("ddp_find_unused_parameters", True),
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
-            static_graph=cf.get("ddp_static_graph", True),
         )
 
     elif with_ddp and with_fsdp:
@@ -98,6 +109,39 @@ def init_model_and_shard(
             MultiCrossAttentionHeadVarlenSlicedQ,
             MultiSelfAttentionHeadVarlen,
         )
+        checkpoint_debug = cf.get("activation_checkpoint_debug", False)
+
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_local_engine.ae_local_blocks,
+            modules_to_shard,
+            debug=checkpoint_debug,
+        )
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_local_global_engine.ae_adapter,
+            modules_to_shard,
+            debug=checkpoint_debug,
+        )
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_global_engine.ae_global_blocks,
+            modules_to_shard,
+            debug=checkpoint_debug,
+        )
+        if model.forecast_engine is not None:
+            _apply_composable_activation_checkpointing(
+                model.forecast_engine.fe_blocks,
+                modules_to_shard,
+                debug=checkpoint_debug,
+            )
+        _apply_composable_activation_checkpointing(
+            model.latent_heads,
+            modules_to_shard,
+            debug=checkpoint_debug,
+        )
+        _apply_composable_activation_checkpointing(
+            model.target_token_engines,
+            modules_to_shard,
+            debug=checkpoint_debug,
+        )
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
@@ -107,15 +151,15 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
-        for module_name, module in model.encoder.ae_global_engine.ae_global_blocks.named_modules():
+        for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
-        for module_name, module in model.forecast_engine.fe_blocks.named_modules():
+        for module in model.forecast_engine.fe_blocks.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
-        for module_name, module in model.latent_heads.named_modules():
+        for module in model.latent_heads.modules():
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
