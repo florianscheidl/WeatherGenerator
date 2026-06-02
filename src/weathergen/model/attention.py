@@ -607,10 +607,6 @@ class MultiSelfAttentionHead(torch.nn.Module):
         dropout_rate = self.dropout_rate if self.training else 0.0
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        if qs.dtype != self.dtype or ks.dtype != self.dtype or vs.dtype != self.dtype:
-            print(
-                f"[ATTN-DTYPE] {self.__class__.__name__} qs={qs.dtype} ks={ks.dtype} vs={vs.dtype} expected={self.dtype}"
-            )
         outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
