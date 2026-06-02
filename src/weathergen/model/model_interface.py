@@ -68,7 +68,7 @@ def init_model_and_shard(
         # single iteration (e.g. shared prediction heads across output steps/streams). Disable inline
         # checkpointing for plain DDP and use static_graph to make the parameter usage contract
         # explicit.
-        set_inline_checkpointing(model, enabled=False)
+        # set_inline_checkpointing(model, enabled=False)
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
