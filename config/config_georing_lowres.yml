@@ -89,7 +89,7 @@ latent_noise_deterministic_latents: True
 freeze_modules: ""
 load_chkpt: {}
 
-norm_type: "LayerNorm"
+norm_type: "RMSNorm"  # "LayerNorm", "RMSNorm", "ScaleNorm"
 qk_norm_type: null  # if null, defaults to norm_type
 
 #####################################
@@ -122,8 +122,8 @@ general:
 
 # logging frequency in the training loop (in number of batches)
 train_logging:
-  terminal: 16
-  metrics: 16
+  terminal: 1
+  metrics: 1
   checkpoint: 256
   log_grad_norms: False
 
