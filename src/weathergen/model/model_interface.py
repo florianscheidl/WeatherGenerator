@@ -79,7 +79,49 @@ def init_model_and_shard(
     if "q_cells" in cf.freeze_modules:
         model.encoder.q_cells.requires_grad = False
 
+    modules_to_checkpoint = (
+        MLP,
+        MultiSelfAttentionHeadLocal,
+        MultiSelfAttentionHead,
+        MultiCrossAttentionHeadVarlen,
+        MultiCrossAttentionHeadVarlenSlicedQ,
+        MultiSelfAttentionHeadVarlen,
+    )
+
     if with_ddp and not with_fsdp:
+        checkpoint_debug = cf.get("activation_checkpoint_debug", False)
+        if cf.get("ddp_activation_checkpointing", True):
+            # In plain DDP, checkpoint only non-shared transformer-style blocks.
+            # Avoid checkpointing decoder/prediction heads (`target_token_engines`/`pred_heads`) because
+            # shared heads may participate multiple times per iteration and trigger
+            # "Expected to mark a variable ready only once".
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_local_engine.ae_local_blocks,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+            )
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_local_global_engine.ae_adapter,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+            )
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_global_engine.ae_global_blocks,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+            )
+            if model.forecast_engine is not None:
+                _apply_composable_activation_checkpointing(
+                    model.forecast_engine.fe_blocks,
+                    modules_to_checkpoint,
+                    debug=checkpoint_debug,
+                )
+            _apply_composable_activation_checkpointing(
+                model.latent_heads,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+            )
+
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -87,6 +129,7 @@ def init_model_and_shard(
             find_unused_parameters=cf.get("ddp_find_unused_parameters", True),
             gradient_as_bucket_view=True,
             bucket_cap_mb=512,
+            static_graph=cf.get("ddp_static_graph", True),
         )
 
     elif with_ddp and with_fsdp:
@@ -101,70 +144,63 @@ def init_model_and_shard(
                 else None
             ),
         }
-        modules_to_shard = (
-            MLP,
-            MultiSelfAttentionHeadLocal,
-            MultiSelfAttentionHead,
-            MultiCrossAttentionHeadVarlen,
-            MultiCrossAttentionHeadVarlenSlicedQ,
-            MultiSelfAttentionHeadVarlen,
-        )
         checkpoint_debug = cf.get("activation_checkpoint_debug", False)
 
         _apply_composable_activation_checkpointing(
             model.encoder.ae_local_engine.ae_local_blocks,
-            modules_to_shard,
+            modules_to_checkpoint,
             debug=checkpoint_debug,
         )
         _apply_composable_activation_checkpointing(
             model.encoder.ae_local_global_engine.ae_adapter,
-            modules_to_shard,
+            modules_to_checkpoint,
             debug=checkpoint_debug,
         )
         _apply_composable_activation_checkpointing(
             model.encoder.ae_global_engine.ae_global_blocks,
-            modules_to_shard,
+            modules_to_checkpoint,
             debug=checkpoint_debug,
         )
         if model.forecast_engine is not None:
             _apply_composable_activation_checkpointing(
                 model.forecast_engine.fe_blocks,
-                modules_to_shard,
+                modules_to_checkpoint,
                 debug=checkpoint_debug,
             )
         _apply_composable_activation_checkpointing(
             model.latent_heads,
-            modules_to_shard,
+            modules_to_checkpoint,
             debug=checkpoint_debug,
         )
         _apply_composable_activation_checkpointing(
             model.target_token_engines,
-            modules_to_shard,
+            modules_to_checkpoint,
             debug=checkpoint_debug,
         )
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
-            if isinstance(module, modules_to_shard):
+            if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
 
         for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
-            if isinstance(module, modules_to_shard):
+            if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
 
         for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
-            if isinstance(module, modules_to_shard):
+            if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
 
-        for module in model.forecast_engine.fe_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        if model.forecast_engine is not None:
+            for module in model.forecast_engine.fe_blocks.modules():
+                if isinstance(module, modules_to_checkpoint):
+                    fully_shard(module, **fsdp_kwargs)
 
         for module in model.latent_heads.modules():
-            if isinstance(module, modules_to_shard):
+            if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
 
         for module_name, module in model.target_token_engines.named_modules():
-            if isinstance(module, modules_to_shard):
+            if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
 
     if with_ddp and with_fsdp:
