@@ -242,7 +242,7 @@ class LocalAssimilationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens_c, cell_lens_c, use_reentrant):
+    def forward(self, tokens_c, cell_lens_c):
         for block in self.ae_local_blocks:
             tokens_c = block(tokens_c, cell_lens_c)
         return tokens_c
@@ -454,7 +454,7 @@ class QueryAggregationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens, batch_lens, use_reentrant, coords=None):
+    def forward(self, tokens, batch_lens, coords=None):
         for block in self.ae_aggregation_blocks:
             aux_info = None
             if isinstance(block, MultiSelfAttentionHeadVarlen):
@@ -798,7 +798,6 @@ class TargetPredictionEngineClassic(nn.Module):
                     tcs_lens,
                     tokens_lens,
                     tcs_aux,
-                    use_reentrant=False,
                 )
         return tc_tokens
 
@@ -965,7 +964,6 @@ class TargetPredictionEngine(nn.Module):
                     coords=coordinates,
                     latent_lens=latent_lens,
                     output_lens=output_lens,
-                    use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
                 output = layer(
@@ -974,14 +972,12 @@ class TargetPredictionEngine(nn.Module):
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
-                    use_reentrant=False,
                 )
             else:
                 output = layer(
                     x=output,
                     x_lens=output_lens,
                     aux=latent[:, 0],
-                    use_reentrant=False,
                 )
         output = (
             self.final_norm(output)
