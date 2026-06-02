@@ -29,7 +29,7 @@ from weathergen.model.attention import (
 )
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
-from weathergen.model.utils import apply_fct_to_blocks, freeze_weights, set_inline_checkpointing
+from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype
 
@@ -68,7 +68,6 @@ def init_model_and_shard(
         # single iteration (e.g. shared prediction heads across output steps/streams). Disable inline
         # checkpointing for plain DDP and use static_graph to make the parameter usage contract
         # explicit.
-        set_inline_checkpointing(model, enabled=False)
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
