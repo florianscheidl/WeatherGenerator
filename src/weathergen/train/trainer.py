@@ -484,7 +484,7 @@ class Trainer(TrainerBase):
             batch.to_device(self.device)
 
             with torch.autocast(
-                device_type=f"cuda:{cf.local_rank}",
+                device_type=f"cuda",
                 dtype=self.mixed_precision_dtype,
                 enabled=cf.with_mixed_precision,
             ):
@@ -631,12 +631,6 @@ class Trainer(TrainerBase):
 
                     batch.to_device(self.device)
 
-                    # evaluate model
-                    # with torch.autocast(
-                    #     device_type=f"cuda:{cf.local_rank}",
-                    #     dtype=self.mixed_precision_dtype,
-                    #     enabled=cf.with_mixed_precision,
-                    # ):
                     if self.ema_model is None:
                         preds = self.model(
                             self.model_params,
@@ -941,7 +935,7 @@ class ProfilingTrainer(Trainer):
                 batch.to_device(self.device)
 
                 with torch.autocast(
-                    device_type=f"cuda:{cf.local_rank}",
+                    device_type=f"cuda",
                     dtype=self.mixed_precision_dtype,
                     enabled=cf.with_mixed_precision,
                 ):
