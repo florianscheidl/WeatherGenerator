@@ -96,6 +96,11 @@ def init_model_and_shard(
             # shared heads may participate multiple times per iteration and trigger
             # "Expected to mark a variable ready only once".
             _apply_composable_activation_checkpointing(
+                model.encoder.embed_engine.embeds.values(),
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+            )
+            _apply_composable_activation_checkpointing(
                 model.encoder.ae_local_engine.ae_local_blocks,
                 modules_to_checkpoint,
                 debug=checkpoint_debug,
@@ -146,6 +151,11 @@ def init_model_and_shard(
         }
         checkpoint_debug = cf.get("activation_checkpoint_debug", False)
 
+        _apply_composable_activation_checkpointing(
+            model.encoder.embed_engine.embeds.values(),
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+        )
         _apply_composable_activation_checkpointing(
             model.encoder.ae_local_engine.ae_local_blocks,
             modules_to_checkpoint,
