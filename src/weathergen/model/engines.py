@@ -531,8 +531,9 @@ class GlobalAssimilationEngine(torch.nn.Module):
                 )
             )
         if self.cf.get("ae_global_trailing_layer_norm", False):
+            norm_class = LayerNorm if self.cf.norm_type == "LayerNorm" else RMSNorm
             self.ae_global_blocks.append(
-                RMSNorm(self.cf.ae_global_dim_embed, dtype=get_dtype(self.cf.mixed_precision_dtype))
+                norm_class(self.cf.ae_global_dim_embed, dtype=get_dtype(self.cf.mixed_precision_dtype))
             )
 
     def forward(self, tokens, coords=None):
@@ -610,8 +611,9 @@ class ForecastingEngine(torch.nn.Module):
                 )
                 # Optionally, add LayerNorm after i-th layer
                 if i in self.cf.get("fe_layer_norm_after_blocks", []):
+                    norm_class = LayerNorm if self.cf.norm_type == "LayerNorm" else RMSNorm
                     self.fe_blocks.append(
-                        RMSNorm(self.cf.ae_global_dim_embed, dtype=get_dtype(self.cf.mixed_precision_dtype))
+                        norm_class(self.cf.ae_global_dim_embed, dtype=get_dtype(self.cf.mixed_precision_dtype))
                     )
 
         def init_weights_final(m):
@@ -862,8 +864,9 @@ class TargetPredictionEngine(nn.Module):
         }
         self.tte = nn.ModuleList()
         module_dtype = get_dtype(self.cf.mixed_precision_dtype)
-        self.output_in_norm = RMSNorm(self.dims_embed[0], dtype=module_dtype)
-        self.latent_in_norm = RMSNorm(self.cf.ae_global_dim_embed, dtype=module_dtype)
+        norm_class = LayerNorm if self.cf.norm_type == "LayerNorm" else RMSNorm
+        self.output_in_norm = norm_class(self.dims_embed[0], dtype=module_dtype)
+        self.latent_in_norm = norm_class(self.cf.ae_global_dim_embed, dtype=module_dtype)
         self.final_norm = nn.Identity()  # nn.RMSNorm(self.dims_embed[-1])
         self.dropout = nn.Dropout(0.2)
         self.pos_embed = nn.Parameter(

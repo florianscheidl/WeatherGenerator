@@ -16,8 +16,13 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.layers import MLP
-from weathergen.model.norms import AdaLayerNormLayer, RMSNorm
+from weathergen.model.norms import AdaLayerNormLayer, LayerNorm, RMSNorm
 from weathergen.utils.utils import get_dtype
+
+
+def get_norm_class(norm_type: str):
+    """Factory function to select norm class based on config value."""
+    return LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
 
 class SelfAttentionBlock(nn.Module):
@@ -43,7 +48,8 @@ class SelfAttentionBlock(nn.Module):
                 dim, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
             )
         else:
-            self.ln_sa = RMSNorm(
+            norm_class = get_norm_class(kwargs["attention_kwargs"]["norm_type"])
+            self.ln_sa = norm_class(
                 dim,
                 eps=kwargs["attention_kwargs"]["norm_eps"],
                 dtype=attention_dtype,
@@ -64,7 +70,8 @@ class SelfAttentionBlock(nn.Module):
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
             self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate, dtype=dtype)
         else:
-            self.ln_mlp = RMSNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"], dtype=dtype)
+            norm_class = get_norm_class(kwargs["attention_kwargs"]["norm_type"])
+            self.ln_mlp = norm_class(dim, eps=kwargs["attention_kwargs"]["norm_eps"], dtype=dtype)
             self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x), None, **kwargs) + x
 
         self.initialise_weights()
@@ -116,6 +123,7 @@ class CrossAttentionBlock(nn.Module):
         self.with_self_attn = with_self_attn
         self.with_mlp = with_self_attn
         attention_dtype = kwargs["attention_kwargs"]["attention_dtype"]
+        norm_class = get_norm_class(kwargs["attention_kwargs"]["norm_type"])
 
         if with_self_attn:
             self.mhsa = MultiSelfAttentionHeadVarlen(
@@ -129,7 +137,7 @@ class CrossAttentionBlock(nn.Module):
                     dim_q, dim_aux, self.mhsa, dropout_rate, dtype=attention_dtype
                 )
             else:
-                self.ln_sa = RMSNorm(
+                self.ln_sa = norm_class(
                     dim_q,
                     eps=kwargs["attention_kwargs"]["norm_eps"],
                     dtype=attention_dtype,

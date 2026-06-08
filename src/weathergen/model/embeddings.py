@@ -13,8 +13,8 @@ from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
 from weathergen.model.layers import MLP
+from functools import partial
 
-# from weathergen.model.mlp import MLP
 from weathergen.model.norms import LayerNorm, RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
@@ -60,7 +60,11 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
 
-        norm = RMSNorm
+        # Norm selection based on norm_type
+        if norm_type == "LayerNorm":
+            norm = partial(LayerNorm, dtype=dtype)
+        else:
+            norm = partial(RMSNorm, dtype=dtype)
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
@@ -71,6 +75,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
                     with_flash=with_flash,
+                    norm_type=norm_type,
                     attention_dtype=dtype,
                 )
             )
@@ -81,6 +86,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     hidden_factor=2,
                     dropout_rate=dropout_rate,
                     with_residual=True,
+                    norm_type=norm_type,
                     dtype=dtype,
                 )
             )
@@ -89,7 +95,7 @@ class StreamEmbedTransformer(torch.nn.Module):
             self.embed = torch.nn.Linear(self.dim_in, self.dim_embed, dtype=dtype)
 
             if self.unembed_mode == "full":
-                self.ln_final = norm(num_channels * self.dim_embed, eps=1e-03, dtype=dtype)
+                self.ln_final = norm(num_channels * self.dim_embed, eps=1e-03)
                 self.unembed = torch.nn.Linear(
                     num_channels * self.dim_embed,
                     self.num_tokens * self.dim_out,
@@ -109,7 +115,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     # ]
                 )
                 self.ln_final = torch.nn.ModuleList(
-                    [norm(dim_embed, eps=1e-6, dtype=dtype) for _ in range(num_channels)]
+                    [norm(dim_embed, eps=1e-6) for _ in range(num_channels)]
                 )
 
             else:
@@ -129,7 +135,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                 self.num_tokens * (self.dim_out // token_size),
                 dtype=dtype
             )
-            self.ln_final = norm(dim_out, eps=1e-6, dtype=dtype)
+            self.ln_final = norm(dim_out, eps=1e-6)
 
             # TODO: factorization when sqrt is not int
             dim1 = int(np.sqrt(dim_out))

@@ -10,6 +10,7 @@
 
 import torch
 import torch.nn as nn
+from functools import partial
 
 from weathergen.model.norms import AdaLayerNorm, LayerNorm, RMSNorm
 
@@ -60,13 +61,17 @@ class MLP(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList()
 
-        norm = RMSNorm
+        # Norm selection based on norm_type
+        if norm_type == "LayerNorm":
+            norm = partial(LayerNorm, dtype=dtype)
+        else:
+            norm = partial(RMSNorm, dtype=dtype)
 
         if pre_layer_norm:
             self.layers.append(
-                norm(dim_in, eps=norm_eps, dtype=dtype)
+                norm(dim_in, eps=norm_eps)
                 if dim_aux is None
-                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps, dtype=dtype)
+                else AdaLayerNorm(dim_in, dim_aux, norm_type=norm_type, norm_eps=norm_eps, dtype=dtype)
             )
 
         self.layers.append(torch.nn.Linear(dim_in, dim_hidden, dtype=dtype))
