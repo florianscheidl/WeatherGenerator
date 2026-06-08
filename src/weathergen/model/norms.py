@@ -46,10 +46,11 @@ class LayerNorm(torch.nn.Module):
             nn.init.zeros_(self.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = torch.ops.aten.rms_norm(
+        out = torch.ops.aten.layer_norm(
             x,
             list(self.normalized_shape),
             self.weight,
+            self.bias,
             self.eps,
         )
         if self.bias is not None:
