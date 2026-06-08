@@ -273,15 +273,7 @@ def wrap_module_forward_with_profiling(model, prefix=""):
         def make_profiled_forward(mod_name, orig_forward):
             def profiled_forward(*args, **kwargs):
                 with record_function(f"nn.Module: {mod_name}"):
-                    out = orig_forward(*args, **kwargs)
-                    if mod_name.endswith("attention") or "attention" in mod_name.lower():
-                        def _dtype(v):
-                            return getattr(v, "dtype", type(v).__name__)
-                        if isinstance(out, tuple):
-                            print(f"[PROFILE-DTYPE] {mod_name} out={[ _dtype(v) for v in out ]}")
-                        else:
-                            print(f"[PROFILE-DTYPE] {mod_name} out={_dtype(out)}")
-                    return out
+                    return orig_forward(*args, **kwargs)
 
             return profiled_forward
 
