@@ -60,7 +60,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             norm = RMSNorm
 
         if dim_aux is not None:
-            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
+            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_type=norm_type, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
         self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
@@ -244,7 +244,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
             norm = RMSNorm
 
         if dim_aux is not None:
-            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
+            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_type=norm_type, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
         self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)
@@ -309,9 +309,9 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         dim_embed_kv,
         num_heads,
         dim_head_proj=None,
+        with_residual=False,
+        with_qk_lnorm=False,
         dropout_rate=0.0,
-        with_residual=True,
-        with_qk_lnorm=True,
         with_flash=True,
         norm_type="LayerNorm",
         qk_norm_type=None,
@@ -336,7 +336,9 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         self.dim_head_proj = dim_embed_q // num_heads if dim_head_proj is None else dim_head_proj
 
         if dim_aux is not None:
-            self.lnorm_in_q = AdaLayerNorm(dim_embed_q, dim_aux, norm_eps=norm_eps)
+            self.lnorm_in_q = AdaLayerNorm(
+                dim_embed_q, dim_aux, norm_type=norm_type, norm_eps=norm_eps
+            )
         else:
             self.lnorm_in_q = norm(dim_embed_q, eps=norm_eps)
         self.lnorm_in_kv = norm(dim_embed_kv, eps=norm_eps)
@@ -443,7 +445,9 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         self.dim_head_proj = dim_embed_q // num_heads if dim_head_proj is None else dim_head_proj
 
         if dim_aux is not None:
-            self.lnorm_in_q = AdaLayerNorm(dim_embed_q, dim_aux, norm_eps=norm_eps)
+            self.lnorm_in_q = AdaLayerNorm(
+                dim_embed_q, dim_aux, norm_type=norm_type, norm_eps=norm_eps
+            )
         else:
             self.lnorm_in_q = norm(dim_embed_q, eps=norm_eps)
         self.lnorm_in_kv = norm(dim_embed_kv, eps=norm_eps)
@@ -560,7 +564,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
             norm = RMSNorm
 
         if dim_aux is not None:
-            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
+            self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_type=norm_type, norm_eps=norm_eps)
         else:
             self.lnorm = norm(dim_embed, eps=norm_eps)
         self.proj_heads_q = torch.nn.Linear(dim_embed, num_heads * self.dim_head_proj, bias=False)

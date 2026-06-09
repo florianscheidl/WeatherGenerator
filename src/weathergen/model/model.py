@@ -359,6 +359,7 @@ class Model(torch.nn.Module):
                 loss_cfg,
                 use_class_token=use_class_token,
                 use_patch_token=use_patch_token,
+                norm_type=global_cfg.norm_type,
             )
         elif loss_cfg["head"].lower() == "transformer":
             return LatentPredictionHeadTransformer(
@@ -452,6 +453,7 @@ class Model(torch.nn.Module):
                             hidden_factor=8,
                             with_residual=False,
                             dropout_rate=dropout_rate,
+                            norm_type=cf.norm_type,
                             norm_eps=self.cf.mlp_norm_eps,
                             name=f"embed_target_coords_{stream_name}",
                         )

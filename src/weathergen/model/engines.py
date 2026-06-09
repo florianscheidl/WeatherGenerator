@@ -1069,7 +1069,15 @@ class LatentPredictionHeadIdentity(nn.Module):
 
 
 class LatentPredictionHeadMLP(nn.Module):
-    def __init__(self, name, in_dim: int, loss_conf, use_class_token: bool, use_patch_token: bool):
+    def __init__(
+        self,
+        name,
+        in_dim: int,
+        loss_conf,
+        use_class_token: bool,
+        use_patch_token: bool,
+        norm_type: str = "LayerNorm",
+    ):
         super().__init__()
 
         self.name = name
@@ -1084,7 +1092,13 @@ class LatentPredictionHeadMLP(nn.Module):
         self.use_patch_token = use_patch_token
 
         # Create an MLP block
-        self.blocks = MLP(in_dim, out_dim, num_layers, hidden_factor)
+        self.blocks = MLP(
+            in_dim,
+            out_dim,
+            num_layers,
+            hidden_factor,
+            norm_type=norm_type,
+        )
 
     def forward(self, x: LatentState):
         outputs = []
