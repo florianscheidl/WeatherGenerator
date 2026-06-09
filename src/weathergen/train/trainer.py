@@ -460,7 +460,9 @@ class Trainer(TrainerBase):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()
 
-            batch.to_device(self.device)
+            # STAGED MEMORY OPTIMIZATION:
+            # Move source to GPU first, run forward pass
+            batch.source_to_device(self.device)
 
             with torch.autocast(
                 device_type=f"cuda:{cf.local_rank}",
@@ -471,6 +473,9 @@ class Trainer(TrainerBase):
                     self.model_params,
                     batch.get_source_samples(),
                 )
+
+                # Now move target to GPU for target computation
+                batch.target_to_device(self.device)
 
                 targets_and_auxs = {}
                 for loss_name, target_aux in self.target_and_aux_calculators.items():
@@ -508,6 +513,11 @@ class Trainer(TrainerBase):
             # backward pass
             self.optimizer.zero_grad()
             self.grad_scaler.scale(loss).backward()
+
+            # RELEASE BATCH TENSORS AFTER BACKWARD to free GPU memory
+            # Source and target raw data are no longer needed after backward
+            batch.release_source()
+            batch.release_target()
 
             # gradient clipping
             self.grad_scaler.unscale_(self.optimizer)
@@ -609,7 +619,8 @@ class Trainer(TrainerBase):
                         # pin memory for faster CPU-GPU transfer
                         batch = batch.pin_memory()
 
-                    batch.to_device(self.device)
+                    # STAGED MEMORY OPTIMIZATION for validation
+                    batch.source_to_device(self.device)
 
                     # evaluate model
                     with torch.autocast(
@@ -627,6 +638,9 @@ class Trainer(TrainerBase):
                                 self.model_params,
                                 batch.get_source_samples(),
                             )
+
+                        # Move target to GPU for target computation
+                        batch.target_to_device(self.device)
 
                         targets_and_auxs = {}
                         for loss_name, target_aux in self.target_and_aux_calculators_val.items():
@@ -664,6 +678,10 @@ class Trainer(TrainerBase):
                             preds,
                             targets_and_auxs,
                         )
+
+                    # RELEASE batch tensors AFTER write_output to free GPU memory
+                    batch.release_source()
+                    batch.release_target()
 
                     pbar.update(batch_size)
 

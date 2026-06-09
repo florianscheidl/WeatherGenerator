@@ -311,14 +311,74 @@ class ModelBatch:
 
     def to_device(self, device):  # -> ModelBatch
         """
-        Move batch to device
+        Move batch to device (both source and target)
         """
-
         self.source_samples.to_device(device)
         self.target_samples.to_device(device)
-
         self.device = device
+        return self
 
+    def source_to_device(self, device):
+        """
+        Move only source samples to device.
+        Use this for staged memory optimization: move source first, run forward,
+        then move target separately.
+        """
+        self.source_samples.to_device(device)
+        self.device = device
+        return self
+
+    def target_to_device(self, device):
+        """
+        Move only target samples to device.
+        Call this after source_to_device() and forward pass.
+        """
+        self.target_samples.to_device(device)
+        self.device = device
+        return self
+
+    def release_source(self):
+        """
+        Release source sample tensors to free GPU memory.
+        Call this after backward pass if source data is no longer needed.
+        """
+        # Replace tensors with None to release GPU memory
+        for sample in self.source_samples.samples:
+            if hasattr(sample, "streams_data") and isinstance(sample.streams_data, dict):
+                for stream_data in sample.streams_data.values():
+                    if stream_data is not None:
+                        # Clear tensor lists
+                        for attr in ["source_tokens_cells", "source_tokens_lens",
+                                   "source_idxs_embed", "source_idxs_embed_pe"]:
+                            if hasattr(stream_data, attr):
+                                setattr(stream_data, attr, [None] * len(getattr(stream_data, attr)))
+                        # Clear source_raw
+                        if hasattr(stream_data, "source_raw"):
+                            stream_data.source_raw = [None] * len(stream_data.source_raw)
+            if hasattr(sample, "meta_info") and isinstance(sample.meta_info, dict):
+                for meta in sample.meta_info.values():
+                    if isinstance(meta, SampleMetaData) and meta.mask is not None:
+                        meta.mask = None
+        return self
+
+    def release_target(self):
+        """
+        Release target sample tensors to free GPU memory.
+        Call this after backward pass if target data is no longer needed.
+        """
+        for sample in self.target_samples.samples:
+            if hasattr(sample, "streams_data") and isinstance(sample.streams_data, dict):
+                for stream_data in sample.streams_data.values():
+                    if stream_data is not None:
+                        # Clear tensor lists
+                        for attr in ["target_tokens", "target_coords", "target_coords_lens",
+                                   "idxs_inv", "target_coords_raw"]:
+                            if hasattr(stream_data, attr):
+                                setattr(stream_data, attr, [None] * len(getattr(stream_data, attr)))
+            if hasattr(sample, "meta_info") and isinstance(sample.meta_info, dict):
+                for meta in sample.meta_info.values():
+                    if isinstance(meta, SampleMetaData) and meta.mask is not None:
+                        meta.mask = None
         return self
 
     def add_source_stream(
