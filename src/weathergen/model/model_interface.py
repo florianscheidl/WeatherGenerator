@@ -260,25 +260,25 @@ def init_model_and_shard(
             fsdp_kwargs,
         )
 
-        full_precision_fsdp_kwargs = {
-            "mp_policy": (
-                MixedPrecisionPolicy(
-                    param_dtype=torch.float32,
-                    reduce_dtype=torch.float32,
-                )
-                if cf.with_mixed_precision
-                else None
-            ),
-        }
+        # full_precision_fsdp_kwargs = {
+        #     "mp_policy": (
+        #         MixedPrecisionPolicy(
+        #             param_dtype=torch.float32,
+        #             reduce_dtype=torch.float32,
+        #         )
+        #         if cf.with_mixed_precision
+        #         else None
+        #     ),
+        # }
 
         _apply_fsdp_to_leaf_modules(
             model.target_token_engines,
             modules_to_checkpoint,
-            full_precision_fsdp_kwargs,
+            fsdp_kwargs,
         )
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        fully_shard(model, **fsdp_kwargs)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
