@@ -98,8 +98,20 @@ def init_model_and_shard(
     if "q_cells" in cf.freeze_modules:
         model.encoder.q_cells.requires_grad = False
 
+    # Modules to apply activation checkpointing to (includes container modules)
     modules_to_checkpoint = (
         StreamEmbedTransformer,
+        MLP,
+        MultiSelfAttentionHeadLocal,
+        MultiSelfAttentionHead,
+        MultiCrossAttentionHeadVarlen,
+        MultiCrossAttentionHeadVarlenSlicedQ,
+        MultiSelfAttentionHeadVarlen,
+    )
+
+    # Modules to apply FSDP sharding to (leaf modules with parameters only)
+    # Note: StreamEmbedTransformer is checkpointed but NOT sharded (it's a container)
+    modules_to_shard = (
         MLP,
         MultiSelfAttentionHeadLocal,
         MultiSelfAttentionHead,
@@ -149,6 +161,13 @@ def init_model_and_shard(
                 )
             _apply_composable_activation_checkpointing(
                 model.latent_heads,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            # Also checkpoint container modules (like StreamEmbedTransformer) without sharding
+            _apply_composable_activation_checkpointing(
+                model.encoder.embed_engine.embeds,
                 modules_to_checkpoint,
                 debug=checkpoint_debug,
                 already_checkpointed=checkpointed_ids,
@@ -222,10 +241,17 @@ def init_model_and_shard(
             debug=checkpoint_debug,
             already_checkpointed=checkpointed_ids,
         )
+        # Also checkpoint container modules (like StreamEmbedTransformer) without sharding
+        _apply_composable_activation_checkpointing(
+            model.encoder.embed_engine.embeds,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
 
         _apply_fsdp_to_leaf_modules(
             model.encoder.embed_engine.embeds,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
         for embed in model.encoder.embed_engine.embeds.values():
@@ -233,32 +259,32 @@ def init_model_and_shard(
 
         _apply_fsdp_to_leaf_modules(
             model.encoder.ae_local_engine.ae_local_blocks,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
 
         _apply_fsdp_to_leaf_modules(
             model.encoder.ae_local_global_engine.ae_adapter,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
 
         _apply_fsdp_to_leaf_modules(
             model.encoder.ae_global_engine.ae_global_blocks,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
 
         if model.forecast_engine is not None:
             _apply_fsdp_to_leaf_modules(
                 model.forecast_engine.fe_blocks,
-                modules_to_checkpoint,
+                modules_to_shard,
                 fsdp_kwargs,
             )
 
         _apply_fsdp_to_leaf_modules(
             model.latent_heads,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
 
@@ -275,7 +301,7 @@ def init_model_and_shard(
 
         _apply_fsdp_to_leaf_modules(
             model.target_token_engines,
-            modules_to_checkpoint,
+            modules_to_shard,
             fsdp_kwargs,
         )
 
