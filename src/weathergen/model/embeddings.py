@@ -13,8 +13,6 @@ from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
 from weathergen.model.layers import MLP
-
-# from weathergen.model.mlp import MLP
 from weathergen.model.norms import RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
@@ -140,10 +138,10 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        x = peh(self.embed(x_in.transpose(-2, -1)))
 
         for layer in self.layers:
-            x = checkpoint(layer, x, use_reentrant=False)
+            x = layer(x)
 
         # read out
         if self.unembed_mode == "full":
@@ -179,7 +177,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         # final normalize and dropout
         out = self.dropout_final(self.ln_final(out))
 
-        return out.to(torch.float16)
+        return out
 
     def forward(self, x_in):
         if self.mode == "channels":
@@ -200,6 +198,6 @@ class StreamEmbedLinear(torch.nn.Module):
         self.layer = torch.nn.Linear(dim_in, dim_out)
 
     def forward(self, x):
-        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
+        x = self.layer(x.flatten(-2, -1)).unsqueeze(0)
 
         return x
