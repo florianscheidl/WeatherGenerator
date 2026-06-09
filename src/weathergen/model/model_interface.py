@@ -202,6 +202,10 @@ def init_model_and_shard(
             debug=checkpoint_debug,
         )
 
+        for module in model.encoder.embed_engine.embeds.values():
+            if isinstance(module, modules_to_checkpoint):
+                fully_shard(module, **fsdp_kwargs)
+
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_checkpoint):
                 fully_shard(module, **fsdp_kwargs)
