@@ -936,7 +936,10 @@ class ProfilingTrainer(Trainer):
             for bidx, batch in enumerate(islice(dataset_iter, max_profile_steps)):
                 if cf.data_loading.get("memory_pinning", False):
                     batch = batch.pin_memory()
-                batch.to_device(self.device)
+
+                # STAGED MEMORY OPTIMIZATION:
+                # Move source to GPU first, run forward pass
+                batch.source_to_device(self.device)
 
                 with torch.autocast(
                     device_type=f"cuda:{cf.local_rank}",
@@ -947,6 +950,9 @@ class ProfilingTrainer(Trainer):
                         self.model_params,
                         batch.get_source_samples(),
                     )
+
+                    # Now move target to GPU for target computation
+                    batch.target_to_device(self.device)
 
                     targets_and_auxs = {}
                     for loss_name, target_aux in self.target_and_aux_calculators.items():
@@ -975,6 +981,10 @@ class ProfilingTrainer(Trainer):
 
                 self.optimizer.zero_grad()
                 self.grad_scaler.scale(loss).backward()
+
+                # RELEASE BATCH TENSORS AFTER BACKWARD to free GPU memory
+                batch.release_source()
+                batch.release_target()
 
                 self.grad_scaler.unscale_(self.optimizer)
                 total_norm = torch.nn.utils.clip_grad_norm_(
