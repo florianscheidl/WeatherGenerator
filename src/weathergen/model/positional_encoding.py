@@ -17,8 +17,10 @@ import torch
 def positional_encoding_harmonic(x):
     """space time harmonic positional encoding
 
-    This function is designed to be used with torch.utils.checkpoint to avoid storing
-    the large positional encoding tensor in activation memory during the forward pass.
+    This function computes PE without storing intermediates in the computation graph.
+    The PE itself has no learnable parameters, so gradients don't need to flow through it.
+    Using torch.no_grad() ensures the large 'pe' tensor (200MB+) is freed immediately
+    after the addition, rather than being held until backward pass.
     """
 
     dim_embed = x.shape[-1]
@@ -27,16 +29,19 @@ def positional_encoding_harmonic(x):
 
     len_token_seq = x.shape[-2]
 
-    # Compute PE - when called via checkpoint, these intermediates are not stored
-    pe = torch.zeros(len_token_seq, dim_embed, device=dev, dtype=dtype)
-    position = torch.arange(0, len_token_seq, device=dev, dtype=dtype).unsqueeze(1)
-    div = torch.exp(
-        torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) * -(math.log(10000) / dim_embed)
-    )
+    # Compute PE outside the computation graph - intermediates are freed immediately
+    with torch.no_grad():
+        pe = torch.zeros(len_token_seq, dim_embed, device=dev, dtype=dtype)
+        position = torch.arange(0, len_token_seq, device=dev, dtype=dtype).unsqueeze(1)
+        div = torch.exp(
+            torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) * -(math.log(10000) / dim_embed)
+        )
 
-    pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
-    pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
+        pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
+        pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
 
+    # Add PE to x - only x is tracked, pe is not (no_grad context)
+    # The result requires grad because x requires grad, but pe intermediates are freed
     x = x + pe
 
     return x

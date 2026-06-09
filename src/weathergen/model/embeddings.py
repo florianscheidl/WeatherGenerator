@@ -9,7 +9,6 @@
 
 import numpy as np
 import torch
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
 from weathergen.model.layers import MLP
@@ -137,13 +136,9 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.dropout_final = torch.nn.Dropout(0.1)
 
     def forward_channels(self, x_in):
-        # Use checkpoint to avoid storing PE intermediates in activation memory
-        # PE is recomputed during backward pass instead of stored
-        x = checkpoint(
-            positional_encoding_harmonic,
-            self.embed(x_in.transpose(-2, -1)),
-            use_reentrant=False,
-        )
+        # Direct call - positional_encoding_harmonic uses torch.no_grad() internally
+        # so the large PE tensor is freed immediately after addition
+        x = positional_encoding_harmonic(self.embed(x_in.transpose(-2, -1)))
 
         for layer in self.layers:
             x = layer(x)
@@ -168,12 +163,8 @@ class StreamEmbedTransformer(torch.nn.Module):
         return out
 
     def forward_columns(self, x_in):
-        # Use checkpoint to avoid storing PE intermediates in activation memory
-        x = checkpoint(
-            positional_encoding_harmonic,
-            self.embed(x_in),
-            use_reentrant=False,
-        )
+        # Direct call - positional_encoding_harmonic uses torch.no_grad() internally
+        x = positional_encoding_harmonic(self.embed(x_in))
 
         for layer in self.layers:
             x = layer(x)
