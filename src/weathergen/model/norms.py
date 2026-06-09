@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16):
+    def __init__(self, dim: int, eps: float = 1e-6, **kwargs):
         """
         Initialize the RMSNorm normalization layer.
 
@@ -32,7 +32,7 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.normalized_shape = (dim,)
-        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
+        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=kwargs.get("dtype")))
 
     def reset_parameters(self):
         nn.init.ones_(self.weight)
@@ -70,20 +70,20 @@ class AdaLayerNorm(torch.nn.Module):
     """
 
     def __init__(
-        self, dim_embed_x, dim_aux, norm_type="RMSNorm", norm_elementwise_affine: bool = False, norm_eps: float = 1e-5, dtype: torch.dtype = torch.bfloat16
+        self, dim_embed_x, dim_aux, norm_type="RMSNorm", norm_elementwise_affine: bool = False, norm_eps: float = 1e-5, **kwargs
     ):
         super().__init__()
 
         # simple 2-layer MLP for embedding auxiliary information
         self.embed_aux = torch.nn.ModuleList()
-        self.embed_aux.append(torch.nn.Linear(dim_aux, 4 * dim_aux, dtype=dtype))
+        self.embed_aux.append(torch.nn.Linear(dim_aux, 4 * dim_aux, dtype=kwargs.get("dtype")))
         self.embed_aux.append(torch.nn.SiLU())
-        self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x, dtype=dtype))
+        self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x, dtype=kwargs.get("dtype")))
 
         if norm_type == "LayerNorm":
-            self.norm = LayerNorm(dim_embed_x, eps=norm_eps, elementwise_affine=norm_elementwise_affine, dtype=dtype)
+            self.norm = nn.modules.LayerNorm(dim_embed_x, eps=norm_eps, elementwise_affine=norm_elementwise_affine, dtype=kwargs.get("dtype"))
         else:
-            self.norm = RMSNorm(dim_embed_x, norm_eps, dtype=dtype)
+            self.norm = RMSNorm(dim_embed_x, eps=norm_eps, dtype=kwargs.get("dtype"))
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
