@@ -18,6 +18,7 @@ import astropy_healpix.healpy
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
@@ -43,7 +44,8 @@ from weathergen.utils.utils import get_dtype, is_stream_forcing
 
 logger = logging.getLogger(__name__)
 
-type StreamName = str
+# Type alias for stream names (Python 3.9 compatible)
+StreamName = str  # type: ignore
 
 
 def _build_norm(dim: int, norm_type: str, norm_eps: float):
@@ -782,8 +784,19 @@ class Model(torch.nn.Module):
         # get 1-ring neighborhood for prediction
         batch_size = len(batch)
         s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
+        
+        # Use checkpoint to avoid storing the large tokens_nbors tensor
+        def gather_neighbors(tokens_reshaped, idxs_flat):
+            """Helper function to gather neighbors - can be checkpointed"""
+            return tokens_reshaped.flatten(0, 1)[idxs_flat].flatten(0, 1)
+        
         idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).flatten(0, 1)
-        tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
+        tokens_nbors = checkpoint(
+            gather_neighbors,
+            tokens.reshape(s),
+            idxs.flatten(),
+            use_reentrant=False,
+        )
         # TODO: precompute in model_params?
         tokens_nbors_lens = torch.full(
             (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
