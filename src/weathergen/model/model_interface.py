@@ -28,6 +28,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.embeddings import StreamEmbedTransformer
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 # same as in config: student_teacher, forecasting, masking
-type TrainingMode = str
+TrainingMode = str  # type: ignore
 
 
 def _iter_leaf_modules_by_type(root_module, modules_to_wrap):
@@ -98,6 +99,7 @@ def init_model_and_shard(
         model.encoder.q_cells.requires_grad = False
 
     modules_to_checkpoint = (
+        StreamEmbedTransformer,
         MLP,
         MultiSelfAttentionHeadLocal,
         MultiSelfAttentionHead,
