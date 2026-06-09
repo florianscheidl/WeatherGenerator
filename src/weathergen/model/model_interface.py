@@ -166,7 +166,7 @@ def init_model_and_shard(
         checkpoint_debug = cf.get("activation_checkpoint_debug", False)
 
         _apply_composable_activation_checkpointing(
-            model.encoder.embed_engine.embeds.values(),
+            model.encoder.embed_engine.embeds,
             modules_to_checkpoint,
             debug=checkpoint_debug,
         )
