@@ -53,8 +53,22 @@ def _iter_modules_for_checkpoint_activation(root_module, modules_to_wrap):
 
 def _apply_composable_activation_checkpointing(root_module, modules_to_wrap, debug=False):
     """Apply composable activation checkpointing before FSDP sharding."""
-    for module in _iter_modules_for_checkpoint_activation(root_module, modules_to_wrap):
-        composable_checkpoint(module, debug=debug)
+    # Handle ModuleDict specially - iterate over its values
+    if isinstance(root_module, torch.nn.ModuleDict):
+        for module in root_module.values():
+            if isinstance(module, modules_to_wrap):
+                composable_checkpoint(module, debug=debug)
+            else:
+                # Recursively check nested modules
+                for submodule in module.modules():
+                    if not isinstance(submodule, modules_to_wrap):
+                        continue
+                    if any(isinstance(child, modules_to_wrap) for child in submodule.children()):
+                        continue
+                    composable_checkpoint(submodule, debug=debug)
+    else:
+        for module in _iter_modules_for_checkpoint_activation(root_module, modules_to_wrap):
+            composable_checkpoint(module, debug=debug)
 
 
 def init_model_and_shard(
@@ -96,7 +110,7 @@ def init_model_and_shard(
             # shared heads may participate multiple times per iteration and trigger
             # "Expected to mark a variable ready only once".
             _apply_composable_activation_checkpointing(
-                model.encoder.embed_engine.embeds.values(),
+                model.encoder.embed_engine.embeds,
                 modules_to_checkpoint,
                 debug=checkpoint_debug,
             )
