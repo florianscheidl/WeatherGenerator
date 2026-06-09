@@ -22,14 +22,19 @@ def positional_encoding_harmonic(x):
     dtype = x.dtype
 
     len_token_seq = x.shape[-2]
-    pe = torch.zeros(len_token_seq, dim_embed, device=dev, dtype=dtype)
-    position = torch.arange(0, len_token_seq, device=dev, dtype=dtype).unsqueeze(1)
-    div = torch.exp(
-        torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) * -(math.log(10000) / dim_embed)
-    )
 
-    pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
-    pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
+    # Compute PE without storing in computation graph to avoid activation memory overhead
+    with torch.no_grad():
+        pe = torch.zeros(len_token_seq, dim_embed, device=dev, dtype=dtype)
+        position = torch.arange(0, len_token_seq, device=dev, dtype=dtype).unsqueeze(1)
+        div = torch.exp(
+            torch.arange(0, dim_embed, 2, device=dev, dtype=dtype) * -(math.log(10000) / dim_embed)
+        )
+
+        pe[:, 0::2] = torch.sin(position * div[: pe[:, 0::2].shape[1]])
+        pe[:, 1::2] = torch.cos(position * div[: pe[:, 1::2].shape[1]])
+
+    # Add PE - the result is in the graph, but pe itself is not
     x = x + pe
 
     return x
