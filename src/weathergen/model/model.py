@@ -36,7 +36,6 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.norms import RMSNorm
 from weathergen.model.utils import get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_forcing
@@ -44,13 +43,6 @@ from weathergen.utils.utils import get_dtype, is_stream_forcing
 logger = logging.getLogger(__name__)
 
 type StreamName = str
-
-
-def _build_norm(dim: int, norm_type: str, norm_eps: float, dtype=None):
-    if norm_type == "LayerNorm":
-        return nn.LayerNorm(dim, eps=norm_eps)
-    kwargs = {"dtype": dtype} if dtype is not None else {}
-    return RMSNorm(dim, eps=norm_eps, **kwargs)
 
 
 class ModelOutput:
@@ -557,13 +549,7 @@ class Model(torch.nn.Module):
 
         # Latent heads for losses
         self.latent_heads = nn.ModuleDict()
-        mp_dtype = get_dtype(cf.mixed_precision_dtype)
-        self.latent_pre_norm = _build_norm(
-            cf.ae_global_dim_embed,
-            cf.norm_type,
-            cf.norm_eps,
-            dtype=mp_dtype,
-        )
+        self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
 
         ssl_losses_cfgs = [
             v
@@ -574,12 +560,7 @@ class Model(torch.nn.Module):
         # TODO: support multiple LossLatentSSLStudentTeacher terms
         assert len(ssl_losses_cfgs) <= 1, "To be implemented."
         for ssl_target_losses in ssl_losses_cfgs:
-            self.latent_pre_norm = _build_norm(
-                cf.ae_global_dim_embed,
-                cf.norm_type,
-                cf.norm_eps,
-                dtype=mp_dtype,
-            )
+            self.latent_pre_norm = nn.LayerNorm(cf.ae_global_dim_embed)
             for loss, loss_conf in ssl_target_losses.loss_fcts.items():
                 if loss == "iBOT":
                     self.latent_heads[loss] = self._create_latent_pred_head(
