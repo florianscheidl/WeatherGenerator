@@ -29,6 +29,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.positional_encoding import positional_encoding_harmonic
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
 from weathergen.utils.distributed import is_root
@@ -203,9 +204,6 @@ def init_model_and_shard(
         )
 
         for embed in model.encoder.embed_engine.embeds.values():
-            for module in embed.modules():
-                if isinstance(module, modules_to_checkpoint):
-                    fully_shard(module, **fsdp_kwargs)
             fully_shard(embed, **fsdp_kwargs)
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
