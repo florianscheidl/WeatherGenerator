@@ -9,7 +9,6 @@
 
 
 import torch.nn as nn
-import torch
 
 from weathergen.model.attention import (
     MultiCrossAttentionHeadVarlen,
@@ -43,7 +42,6 @@ class SelfAttentionBlock(nn.Module):
             self.ln_sa = nn.LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"])
             self.mhsa_block = lambda x, _, **kwargs: self.mhsa(self.ln_sa(x), **kwargs) + x
 
-        attention_dtype = kwargs["attention_kwargs"].get("attention_dtype", torch.bfloat16)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         self.mlp = MLP(
             dim_in=dim,
@@ -52,9 +50,6 @@ class SelfAttentionBlock(nn.Module):
             dropout_rate=0.1,
             nonlin=approx_gelu,
             with_residual=False,
-            norm_type=kwargs["attention_kwargs"]["norm_type"],
-            norm_eps=kwargs["attention_kwargs"]["norm_eps"],
-            dtype=attention_dtype,
         )
         if self.with_adanorm:
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
@@ -140,7 +135,6 @@ class CrossAttentionBlock(nn.Module):
             )
 
         if self.with_mlp:
-            attention_dtype = kwargs["attention_kwargs"].get("attention_dtype", torch.bfloat16)
             approx_gelu = lambda: nn.GELU(approximate="tanh")
             self.mlp = MLP(
                 dim_in=dim_q,
@@ -148,9 +142,6 @@ class CrossAttentionBlock(nn.Module):
                 hidden_factor=4,
                 nonlin=approx_gelu,
                 with_residual=False,
-                norm_type=kwargs["attention_kwargs"]["norm_type"],
-                norm_eps=kwargs["attention_kwargs"]["norm_eps"],
-                dtype=attention_dtype,
             )
             if self.with_adanorm:
                 self.mlp_fn = lambda x, **kwargs: self.mlp(x)
@@ -258,7 +249,6 @@ class OriginalPredictionBlock(nn.Module):
                 norm_type=self.cf.norm_type,
                 dim_aux=(dim_aux if self.cf.pred_mlp_adaln else None),
                 norm_eps=self.cf.mlp_norm_eps,
-                dtype=get_dtype(self.cf.attention_dtype),
             )
         )
 

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype | None = None):
+    def __init__(self, dim: int, eps: float = 1e-6):
         """
         Initialize the RMSNorm normalization layer.
 
@@ -23,17 +23,15 @@ class RMSNorm(torch.nn.Module):
             dim (int): The dimension of the input tensor.
             eps (float, optional): A small value added to the denominator for numerical stability.
                 Default is 1e-6.
-            dtype (torch.dtype, optional): Data type for the weight parameter. If None, defaults
-                to torch.float32.
 
         Attributes:
             eps (float): A small value added to the denominator for numerical stability.
-            weight (nn.Parameter): Learnable scaling parameter.
+            weight (nn.Parameter): Learnable scaling parameter (float32 for FSDP compatibility).
 
         """
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
+        self.weight = torch.nn.Parameter(torch.ones(dim))  # float32, matches other params
 
     def _norm(self, x):
         """
@@ -60,7 +58,9 @@ class RMSNorm(torch.nn.Module):
 
         """
         output = self._norm(x)
-        return output * self.weight
+        # Cast weight to input dtype for computation (keeps everything in same dtype).
+        # Weight stays float32 as a parameter (FSDP compatibility), cast at runtime.
+        return output * self.weight.to(dtype=x.dtype)
 
 
 class AdaLayerNorm(torch.nn.Module):

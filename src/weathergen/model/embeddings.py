@@ -7,8 +7,6 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-from functools import partial
-
 import numpy as np
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -19,11 +17,6 @@ from weathergen.model.layers import MLP
 # from weathergen.model.mlp import MLP
 from weathergen.model.norms import RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
-
-
-def _make_rmsnorm(dtype):
-    """Factory for RMSNorm with the correct dtype for weight initialization."""
-    return partial(RMSNorm, dtype=dtype)
 
 
 class StreamEmbedTransformer(torch.nn.Module):
@@ -42,7 +35,6 @@ class StreamEmbedTransformer(torch.nn.Module):
         norm_type="LayerNorm",
         unembed_mode="full",
         stream_name="stream_embed",
-        attention_dtype=torch.bfloat16,
     ):
         """Constructor
 
@@ -67,7 +59,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.num_heads = num_heads
         self.unembed_mode = unembed_mode
 
-        norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else _make_rmsnorm(attention_dtype)
+        norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
 
         self.layers = torch.nn.ModuleList()
         for _ in range(self.num_blocks):
