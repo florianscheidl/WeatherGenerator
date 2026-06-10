@@ -43,6 +43,7 @@ class MLP(torch.nn.Module):
         dim_aux=None,
         norm_eps=1e-5,
         name: str | None = None,
+        dtype: torch.dtype | None = None,
     ):
         """Constructor"""
 
@@ -59,14 +60,14 @@ class MLP(torch.nn.Module):
 
         self.layers = torch.nn.ModuleList()
 
-        norm = torch.nn.LayerNorm if norm_type == "LayerNorm" else RMSNorm
-
         if pre_layer_norm:
-            self.layers.append(
-                norm(dim_in, eps=norm_eps)
-                if dim_aux is None
-                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps)
-            )
+            if dim_aux is None:
+                if norm_type == "LayerNorm":
+                    self.layers.append(torch.nn.LayerNorm(dim_in, eps=norm_eps))
+                else:
+                    self.layers.append(RMSNorm(dim_in, eps=norm_eps, dtype=dtype))
+            else:
+                self.layers.append(AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps))
 
         self.layers.append(torch.nn.Linear(dim_in, dim_hidden))
         self.layers.append(nonlin())

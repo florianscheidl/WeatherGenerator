@@ -15,14 +15,16 @@ import torch.nn.functional as F
 
 # from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    def __init__(self, dim: int, eps: float = 1e-6, dtype: torch.dtype | None = None):
         """
         Initialize the RMSNorm normalization layer.
 
         Args:
             dim (int): The dimension of the input tensor.
             eps (float, optional): A small value added to the denominator for numerical stability.
-            Default is 1e-6.
+                Default is 1e-6.
+            dtype (torch.dtype, optional): Data type for the weight parameter. If None, defaults
+                to torch.float32.
 
         Attributes:
             eps (float): A small value added to the denominator for numerical stability.
@@ -31,7 +33,7 @@ class RMSNorm(torch.nn.Module):
         """
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
+        self.weight = torch.nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def _norm(self, x):
         """

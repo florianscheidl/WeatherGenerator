@@ -16,6 +16,12 @@ from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 from weathergen.model.norms import AdaLayerNorm, RMSNorm
 from weathergen.model.positional_encoding import rotary_pos_emb_2d
 
+
+def _make_rmsnorm(dtype):
+    """Factory for RMSNorm with the correct dtype for weight initialization."""
+    return partial(RMSNorm, dtype=dtype)
+
+
 """
 Attention blocks used by WeatherGenerator.
 
@@ -57,7 +63,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         if norm_type == "LayerNorm":
             norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            norm = RMSNorm
+            norm = _make_rmsnorm(attention_dtype)
 
         if dim_aux is not None:
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
@@ -75,7 +81,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
@@ -241,7 +247,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         if norm_type == "LayerNorm":
             norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            norm = RMSNorm
+            norm = _make_rmsnorm(attention_dtype)
 
         if dim_aux is not None:
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
@@ -259,7 +265,7 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
@@ -358,7 +364,7 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
@@ -471,7 +477,7 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
@@ -557,7 +563,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         if norm_type == "LayerNorm":
             norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            norm = RMSNorm
+            norm = _make_rmsnorm(attention_dtype)
 
         if dim_aux is not None:
             self.lnorm = AdaLayerNorm(dim_embed, dim_aux, norm_eps=norm_eps)
@@ -575,7 +581,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
@@ -667,7 +673,7 @@ class MultiCrossAttentionHead(torch.nn.Module):
         if qk_norm_type == "LayerNorm":
             qk_norm = partial(torch.nn.LayerNorm, elementwise_affine=False, eps=norm_eps)
         else:
-            qk_norm = RMSNorm
+            qk_norm = _make_rmsnorm(attention_dtype)
         lnorm = qk_norm if with_qk_lnorm else torch.nn.Identity
         self.lnorm_q = lnorm(self.dim_head_proj, eps=norm_eps)
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
