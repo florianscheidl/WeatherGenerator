@@ -55,7 +55,7 @@ class SelfAttentionBlock(nn.Module):
             self.mlp_fn = lambda x, **kwargs: self.mlp(x)
             self.mlp_block = AdaLayerNormLayer(dim, dim_aux, self.mlp_fn, dropout_rate)
         else:
-            self.ln_mlp = nn.LayerNorm(norm_eps=kwargs["attention_kwargs"]["norm_eps"])
+            self.ln_mlp = nn.LayerNorm(dim, eps=kwargs["attention_kwargs"]["norm_eps"])
             self.mlp_block = lambda x, _, **kwargs: self.mlp(self.ln_mlp(x), None, **kwargs) + x
 
         self.initialise_weights()

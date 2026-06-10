@@ -85,11 +85,6 @@ class EmbeddingEngine(torch.nn.Module):
     def forward(self, batch, pe_embed):
         num_steps_input = batch.get_num_steps()
 
-        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
-        tokens_all = torch.empty(
-            (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
-        )
-
         # iterate over all streams
         x_embeds = []
         for stream_name in self.stream_names:
@@ -102,7 +97,7 @@ class EmbeddingEngine(torch.nn.Module):
             if all(s is None for s in sdata):
                 continue
 
-            sdata = torch.cat(sdata).to(tokens_all.dtype)
+            sdata = torch.cat(sdata).to(self.dtype)
             # skip empty stream
             if sdata.numel() == 0:
                 continue
@@ -112,35 +107,39 @@ class EmbeddingEngine(torch.nn.Module):
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
+        tokens_cat = torch.cat(x_embeds)
+        num_tokens = tokens_cat.shape[0]
+
         if batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
-            tokens_all = torch.cat(x_embeds)
+            tokens_all = tokens_cat
 
         else:
-            scatter_idxs = self.get_scatter_idxs_vectorized(batch)
+            tokens_all = torch.empty_like(tokens_cat)
+            scatter_idxs = self.get_scatter_idxs_vectorized(batch, num_tokens)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
-            # if the assert is hit, MAX_NUMBER_TOKENS_LOCAL_PER_CELL needs to be increased
-            assert (
-                batch.tokens_lens.flatten(0, 2).sum(0).max() < MAX_NUMBER_TOKENS_LOCAL_PER_CELL
-            ), "max number of tokens per cell for positional encoding exceeded"
             # actual scatter operation and apply per cell positional encoding
-            tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
+            tokens_all.scatter_(0, scatter_idxs, tokens_cat)
 
-        pe_idxs = self.get_pe_idxs_vectorized(batch)
+        pe_idxs = self.get_pe_idxs_vectorized(batch, num_tokens)
         tokens_all = tokens_all + pe_embed[pe_idxs]
 
         return tokens_all
 
-    def get_pe_idxs_vectorized(self, batch):
+    def get_pe_idxs_vectorized(self, batch, num_tokens):
         """
         Compute per cell indices into positional encoding
         """
 
         tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).sum(0).flatten()
-        rows = torch.arange(tok_counts.max(), device=tok_counts.device).unsqueeze(0)
-        rows = rows.expand(tok_counts.shape[0], -1)
-        pe_idxs = rows[rows < tok_counts.unsqueeze(1)]
+        # For each cell with count n, emit 0,1,...,n-1. Built directly via
+        # repeat_interleave (with CPU-known output_size=num_tokens) so there's no
+        # boolean mask / nonzero sync.
+        group_starts = torch.repeat_interleave(
+            tok_counts.cumsum(0) - tok_counts, tok_counts, output_size=num_tokens
+        )
+        pe_idxs = torch.arange(num_tokens, device=tok_counts.device) - group_starts
 
         return pe_idxs
 
@@ -173,7 +172,7 @@ class EmbeddingEngine(torch.nn.Module):
 
         return scatter_idxs
 
-    def get_scatter_idxs_vectorized(self, batch):
+    def get_scatter_idxs_vectorized(self, batch, num_tokens):
         """
         Compute reordering index so that tokens from different streams but same cell are
         continguous
@@ -191,12 +190,16 @@ class EmbeddingEngine(torch.nn.Module):
         offset = torch.cat([pad, tok_counts.cumsum(0)])[:-1]
         offset[:, 1:] += tok_counts.sum(0).cumsum(0)[:-1]
 
-        ranges = torch.arange(tok_counts.max(), device=dev).repeat((tok_counts.numel(), 1))
-        idxs = (offset.flatten() + ranges.transpose(1, 0)).transpose(1, 0)
-        # select idxs[i][:ranges[i]] for each i; vectorized version
-        col_indices = torch.arange(idxs.shape[1], device=dev).unsqueeze(0)
-        valid_mask = col_indices < tok_counts.flatten().unsqueeze(1)
-        scatter_idxs = idxs[valid_mask].to(torch.int64)
+        # num_tokens is already known CPU-side (computed in forward), so passing it as
+        # output_size= lets repeat_interleave skip its data-dependent shape sync.
+        counts_flat = tok_counts.flatten()
+        offsets_flat = offset.flatten()
+        base = torch.repeat_interleave(offsets_flat, counts_flat, output_size=num_tokens)
+        group_starts = torch.repeat_interleave(
+            counts_flat.cumsum(0) - counts_flat, counts_flat, output_size=num_tokens
+        )
+        local = torch.arange(num_tokens, device=dev) - group_starts
+        scatter_idxs = (base + local).to(torch.int64)
 
         return scatter_idxs
 
