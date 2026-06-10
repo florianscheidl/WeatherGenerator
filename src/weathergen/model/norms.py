@@ -31,11 +31,7 @@ class RMSNorm(torch.nn.Module):
         """
         super().__init__()
         self.eps = eps
-        self.normalized_shape = (dim,)
         self.weight = torch.nn.Parameter(torch.ones(dim))
-
-    def reset_parameters(self):
-        nn.init.ones_(self.weight)
 
     def _norm(self, x):
         """
@@ -48,7 +44,7 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
 
         """
-        return torch.ops.aten.rms_norm(x, [x.shape[-1]], None, self.eps)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         """
@@ -61,7 +57,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        return torch.ops.aten.rms_norm(x, [self.weight.shape[0]], self.weight, self.eps)
+        output = self._norm(x)
+        return output * self.weight
 
 
 class AdaLayerNorm(torch.nn.Module):
