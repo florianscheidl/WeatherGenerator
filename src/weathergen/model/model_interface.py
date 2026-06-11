@@ -100,13 +100,16 @@ def init_model_and_shard(
             MultiSelfAttentionHeadVarlen,
         )
 
+        # reshard_after_forward=False keeps outputs replicated across ranks during
+        # the backward recompute pass, reducing all-gather overhead at checkpoint
+        # boundaries between ae_local_engine and ae_local_global_engine (cross-attention).
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
 
         for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
 
         for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
             if isinstance(module, modules_to_shard):

@@ -157,7 +157,13 @@ class EncoderModule(torch.nn.Module):
         """
         Apply the local assimilation engine and then the
         local-to-global adapter using a chunking in the number of tokens
-        to work around to bug in flash attention, the computations is performed in chunks
+        to work around to bug in flash attention, the computations is performed in chunks.
+
+        Each chunk iteration is wrapped in a checkpoint() so that peak memory is
+        bounded to a single chunk: after chunk i's backward completes, its activations
+        are freed before chunk i+1 recomputes. Without this, all chunk activations
+        would accumulate for the full backward pass of the enclosing checkpoint
+        on assimilate_local.
         """
 
         # combined cell lens for all tokens in batch across all input steps
@@ -168,9 +174,12 @@ class EncoderModule(torch.nn.Module):
         tokens_global_unmasked = []
         posteriors = []
 
-        for i in range(cell_lens.shape[0] // clen):
+        num_chunks = cell_lens.shape[0] // clen
+        num_steps = tokens.shape[0] // (cell_lens.shape[0] // clen) if num_chunks > 0 else 1
+
+        for i in range(num_chunks):
             # make sure we properly catch all elements in last chunk
-            i_end = (i + 1) * clen if i < (cell_lens.shape[0] // clen) - 1 else cell_lens.shape[0]
+            i_end = (i + 1) * clen if i < num_chunks - 1 else cell_lens.shape[0]
             l0, l1 = (
                 (0 if i == 0 else cell_lens[: i * clen].cumsum(0)[-1]),
                 cell_lens[:i_end].cumsum(0)[-1],
@@ -187,27 +196,41 @@ class EncoderModule(torch.nn.Module):
             cell_lens_cur = torch.cat([zero_pad, cell_lens[i * clen : i_end]])
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
-            # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
-
-            toks, posteriors_c = self.interpolate_latents(toks)
-            posteriors += [posteriors_c]
-
             # create mask for global tokens, without first element (used for padding)
             mask = cell_lens_cur[1:].to(torch.bool)
-            toks_global_unmasked = toks_global[mask]
-            q_cells_lens_unmasked = torch.cat([zero_pad, q_cells_lens_cur[1:][mask]])
-            cell_lens_unmasked = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
+            toks_global_unmasked_cur = toks_global[mask]
+            q_cells_lens_unmasked_cur = torch.cat([zero_pad, q_cells_lens_cur[1:][mask]])
+            cell_lens_unmasked_cur = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
 
-            # local to global adapter engine
-            toks_global_unmasked = self.ae_local_global_engine(
-                toks,
-                toks_global_unmasked,
-                q_cells_lens_unmasked,
-                cell_lens_unmasked,
+            # Wrap each chunk iteration in a checkpoint so memory is freed per chunk.
+            # define_forward captures all needed values as closure; checkpoint() is
+            # PyTorch's non-reentrant activation checkpointing (use_reentrant=True by
+            # default — explicit=False opts into the safer "create_graph" path that
+            # supports gradient computation through the checkpoint).
+            def define_forward(
+                toks=toks,
+                cell_lens_cur=cell_lens_cur,
+                toks_global_unmasked_cur=toks_global_unmasked_cur,
+                q_cells_lens_unmasked_cur=q_cells_lens_unmasked_cur,
+                cell_lens_unmasked_cur=cell_lens_unmasked_cur,
+            ):
+                # local assimilation model
+                toks = self.ae_local_engine(toks, cell_lens_cur)
+                toks, posteriors_c = self.interpolate_latents(toks)
+                # local to global adapter engine
+                toks_global_out = self.ae_local_global_engine(
+                    toks,
+                    toks_global_unmasked_cur,
+                    q_cells_lens_unmasked_cur,
+                    cell_lens_unmasked_cur,
+                )
+                return toks_global_out, posteriors_c
+
+            toks_global_unmasked_cur, posteriors_c = checkpoint(
+                define_forward, use_reentrant=False
             )
-
-            tokens_global_unmasked += [toks_global_unmasked]
+            posteriors += [posteriors_c]
+            tokens_global_unmasked += [toks_global_unmasked_cur]
 
         if len(tokens_global_unmasked) == 0:
             assert False, "Not yet implemented"
