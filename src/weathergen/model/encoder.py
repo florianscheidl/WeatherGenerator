@@ -126,7 +126,9 @@ class EncoderModule(torch.nn.Module):
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
-        tokens_global, posteriors = self.assimilate_local(model_params, stream_cell_tokens, batch)
+        tokens_global, posteriors = checkpoint(
+            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
+        )
 
         tokens_global = checkpoint(
             self.ae_global_engine,
@@ -186,7 +188,7 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = checkpoint(self.ae_local_engine, toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
@@ -198,13 +200,11 @@ class EncoderModule(torch.nn.Module):
             cell_lens_unmasked = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
 
             # local to global adapter engine
-            toks_global_unmasked = checkpoint(
-                self.ae_local_global_engine,
+            toks_global_unmasked = self.ae_local_global_engine(
                 toks,
                 toks_global_unmasked,
                 q_cells_lens_unmasked,
                 cell_lens_unmasked,
-                use_reentrant=False,
             )
 
             tokens_global_unmasked += [toks_global_unmasked]
@@ -311,13 +311,11 @@ class EncoderModule(torch.nn.Module):
         )
 
         # apply aggregation engine on unmasked tokens
-        tokens_global_unmasked = checkpoint(
-            self.aggregation_engine_unmasked,
+        tokens_global_unmasked = self.aggregation_engine_unmasked(
             tokens_global_unmasked,
             tokens_global_register_class,
             batch.tokens_lens,
             rope_cell_coords=model_params.rope_cell_coords,
-            use_reentrant=False,
         )
 
         # final processing
