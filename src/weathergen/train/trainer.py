@@ -362,9 +362,7 @@ class Trainer(TrainerBase):
         )
 
         if self.cf.general.istep > 0 and is_root():
-            str = f"Continuing run with learning rate: {self.lr_scheduler.get_lr()}"
-            if is_root():
-                logger.info(str)
+            logger.info(f"Continuing run with learning rate: {self.lr_scheduler.get_lr()}")
 
         # Instantiate loss calculator modules to compute losses
         self.loss_calculator = LossCalculator(cf, self.training_cfg, TRAIN, device=self.device)
@@ -396,7 +394,10 @@ class Trainer(TrainerBase):
         self.validate_before_training()
 
         for mini_epoch in range(mini_epoch_base, self.training_cfg.num_mini_epochs):
-            logger.info(f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: train.")
+            if is_root():
+                logger.info(
+                    f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: train."
+                )
 
             self.train(mini_epoch)
 
@@ -404,14 +405,16 @@ class Trainer(TrainerBase):
                 # Skip validation.
                 break
 
-            logger.info(
-                f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: validate."
-            )
+            if is_root():
+                logger.info(
+                    f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: validate."
+                )
             self.validate(mini_epoch, self.validation_cfg, self.batch_size_validation_per_gpu)
 
-            logger.info(
-                f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: save_model."
-            )
+            if is_root():
+                logger.info(
+                    f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: save_model."
+                )
             self.save_model(mini_epoch)
 
         # Log the final model only when profiling is not enabled.
@@ -615,10 +618,6 @@ class Trainer(TrainerBase):
                 total=len(self.data_loader_validation), disable=self.cf.with_ddp
             ) as pbar:
                 for bidx, batch in enumerate(dataset_val_iter):
-                    if cf.data_loading.get("memory_pinning", False):
-                        # pin memory for faster CPU-GPU transfer
-                        batch = batch.pin_memory()
-
                     # STAGED MEMORY OPTIMIZATION for validation
                     batch.source_to_device(self.device)
 
@@ -865,8 +864,9 @@ class Trainer(TrainerBase):
 
                 for key, value in losses_all.items():
                     if key.endswith("avg"):
+                        val = np.nan if np.isnan(value).all() else f"{np.nanmean(value):0.4E}"
                         logger.info(
-                            f"{key} : {np.nanmean(value):0.4E} \t",
+                            f"{key} : {val} \t",
                         )
                 logger.info("\n")
 
