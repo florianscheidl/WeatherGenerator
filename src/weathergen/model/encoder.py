@@ -122,19 +122,13 @@ class EncoderModule(torch.nn.Module):
         Encoder forward
         """
 
-        stream_cell_tokens = checkpoint(
-            self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
-        )
+        stream_cell_tokens = self.embed_engine(batch, model_params.pe_embed)
 
-        tokens_global, posteriors = checkpoint(
-            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
-        )
+        tokens_global, posteriors = self.assimilate_local(model_params, stream_cell_tokens, batch)
 
-        tokens_global = checkpoint(
-            self.ae_global_engine,
+        tokens_global = self.ae_global_engine(
             tokens_global,
             coords=model_params.rope_coords,
-            use_reentrant=False,
         )
 
         return tokens_global, posteriors
@@ -188,7 +182,7 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(toks, cell_lens_cur)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
@@ -267,7 +261,7 @@ class EncoderModule(torch.nn.Module):
         batch_lens = batch_lens + (self.num_class_tokens + self.num_register_tokens)
         batch_lens_patched = torch.cat([zero_pad, batch_lens], dim=0)
         tokens_global_unmasked = self.ae_aggregation_engine(
-            tokens_global_unmasked, batch_lens_patched, use_reentrant=False, coords=packed_coords
+            tokens_global_unmasked, batch_lens_patched, coords=packed_coords
         )
 
         return tokens_global_unmasked

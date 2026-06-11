@@ -13,6 +13,7 @@ import itertools
 import logging
 
 import torch
+from torch.distributed._composable.checkpoint_activation import checkpoint as composable_checkpoint
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -27,6 +28,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.embeddings import StreamEmbedTransformer
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import apply_fct_to_blocks, freeze_weights
@@ -37,7 +39,41 @@ logger = logging.getLogger(__name__)
 
 
 # same as in config: student_teacher, forecasting, masking
-type TrainingMode = str
+TrainingMode = str  # type: ignore
+
+
+def _iter_leaf_modules_by_type(root_module, modules_to_wrap):
+    """Yield leaf modules of selected types from a module or module container."""
+    roots = root_module.values() if isinstance(root_module, torch.nn.ModuleDict) else [root_module]
+    for root in roots:
+        for module in root.modules():
+            if not isinstance(module, modules_to_wrap):
+                continue
+            if any(isinstance(child, modules_to_wrap) for child in module.children()):
+                continue
+            yield module
+
+
+def _apply_composable_activation_checkpointing(
+    root_module,
+    modules_to_wrap,
+    debug=False,
+    already_checkpointed=None,
+):
+    """Apply composable activation checkpointing before FSDP sharding."""
+    already_checkpointed = already_checkpointed if already_checkpointed is not None else set()
+    for module in _iter_leaf_modules_by_type(root_module, modules_to_wrap):
+        mid = id(module)
+        if mid in already_checkpointed:
+            continue
+        composable_checkpoint(module, debug=debug)
+        already_checkpointed.add(mid)
+
+
+def _apply_fsdp_to_leaf_modules(root_module, modules_to_wrap, fsdp_kwargs):
+    """Apply FSDP to the same leaf module groups used for activation checkpointing."""
+    for module in _iter_leaf_modules_by_type(root_module, modules_to_wrap):
+        fully_shard(module, **fsdp_kwargs)
 
 
 def init_model_and_shard(
@@ -62,13 +98,81 @@ def init_model_and_shard(
     if "q_cells" in cf.freeze_modules:
         model.encoder.q_cells.requires_grad = False
 
+    # Modules to apply activation checkpointing to (includes container modules)
+    modules_to_checkpoint = (
+        StreamEmbedTransformer,
+        MLP,
+        MultiSelfAttentionHeadLocal,
+        MultiSelfAttentionHead,
+        MultiCrossAttentionHeadVarlen,
+        MultiCrossAttentionHeadVarlenSlicedQ,
+        MultiSelfAttentionHeadVarlen,
+    )
+
+    # Modules to apply FSDP sharding to (leaf modules with parameters only)
+    # Note: StreamEmbedTransformer is checkpointed but NOT sharded (it's a container)
+    modules_to_shard = (
+        MLP,
+        MultiSelfAttentionHeadLocal,
+        MultiSelfAttentionHead,
+        MultiCrossAttentionHeadVarlen,
+        MultiCrossAttentionHeadVarlenSlicedQ,
+        MultiSelfAttentionHeadVarlen,
+    )
+
     if with_ddp and not with_fsdp:
-        # DDP + activation checkpointing can hit "Expected to mark a variable ready only once"
-        # when the same parameters participate in multiple non-reentrant checkpointed segments in a
-        # single iteration (e.g. shared prediction heads across output steps/streams). Disable inline
-        # checkpointing for plain DDP and use static_graph to make the parameter usage contract
-        # explicit.
-        # set_inline_checkpointing(model, enabled=False)
+        checkpoint_debug = cf.get("activation_checkpoint_debug", False)
+        checkpointed_ids = set()
+        if cf.get("ddp_activation_checkpointing", True):
+            # In plain DDP, checkpoint only non-shared transformer-style blocks.
+            # Avoid checkpointing decoder/prediction heads (`target_token_engines`/`pred_heads`) because
+            # shared heads may participate multiple times per iteration and trigger
+            # "Expected to mark a variable ready only once".
+            _apply_composable_activation_checkpointing(
+                model.encoder.embed_engine.embeds,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_local_engine.ae_local_blocks,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_local_global_engine.ae_adapter,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            _apply_composable_activation_checkpointing(
+                model.encoder.ae_global_engine.ae_global_blocks,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            if model.forecast_engine is not None:
+                _apply_composable_activation_checkpointing(
+                    model.forecast_engine.fe_blocks,
+                    modules_to_checkpoint,
+                    debug=checkpoint_debug,
+                    already_checkpointed=checkpointed_ids,
+                )
+            _apply_composable_activation_checkpointing(
+                model.latent_heads,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+            # Also checkpoint container modules (like StreamEmbedTransformer) without sharding
+            _apply_composable_activation_checkpointing(
+                model.encoder.embed_engine.embeds,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+
         # create DDP model if running without FSDP
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -91,37 +195,98 @@ def init_model_and_shard(
                 else None
             ),
         }
-        modules_to_shard = (
-            MLP,
-            MultiSelfAttentionHeadLocal,
-            MultiSelfAttentionHead,
-            MultiCrossAttentionHeadVarlen,
-            MultiCrossAttentionHeadVarlenSlicedQ,
-            MultiSelfAttentionHeadVarlen,
+        checkpoint_debug = cf.get("activation_checkpoint_debug", False)
+        checkpointed_ids = set()
+
+        _apply_composable_activation_checkpointing(
+            model.encoder.embed_engine.embeds,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_local_engine.ae_local_blocks,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_local_global_engine.ae_adapter,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        _apply_composable_activation_checkpointing(
+            model.encoder.ae_global_engine.ae_global_blocks,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        if model.forecast_engine is not None:
+            _apply_composable_activation_checkpointing(
+                model.forecast_engine.fe_blocks,
+                modules_to_checkpoint,
+                debug=checkpoint_debug,
+                already_checkpointed=checkpointed_ids,
+            )
+        _apply_composable_activation_checkpointing(
+            model.latent_heads,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        _apply_composable_activation_checkpointing(
+            model.target_token_engines,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
+        )
+        # Also checkpoint container modules (like StreamEmbedTransformer) without sharding
+        _apply_composable_activation_checkpointing(
+            model.encoder.embed_engine.embeds,
+            modules_to_checkpoint,
+            debug=checkpoint_debug,
+            already_checkpointed=checkpointed_ids,
         )
 
-        for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        _apply_fsdp_to_leaf_modules(
+            model.encoder.embed_engine.embeds,
+            modules_to_shard,
+            fsdp_kwargs,
+        )
+        for embed in model.encoder.embed_engine.embeds.values():
+            fully_shard(embed, **fsdp_kwargs)
 
-        for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        _apply_fsdp_to_leaf_modules(
+            model.encoder.ae_local_engine.ae_local_blocks,
+            modules_to_shard,
+            fsdp_kwargs,
+        )
 
-        for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        _apply_fsdp_to_leaf_modules(
+            model.encoder.ae_local_global_engine.ae_adapter,
+            modules_to_shard,
+            fsdp_kwargs,
+        )
 
-        for module in model.forecast_engine.fe_blocks.modules():
-            if isinstance(module, modules_to_shard):
-                # reshard_after_forward=False keeps FE parameters unsharded
-                # during the multi-step rollout loop.
-                # Needed for pushforward trick.
-                fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
+        _apply_fsdp_to_leaf_modules(
+            model.encoder.ae_global_engine.ae_global_blocks,
+            modules_to_shard,
+            fsdp_kwargs,
+        )
 
-        for module in model.latent_heads.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+        if model.forecast_engine is not None:
+            _apply_fsdp_to_leaf_modules(
+                model.forecast_engine.fe_blocks,
+                modules_to_shard,
+                fsdp_kwargs,
+            )
+
+        _apply_fsdp_to_leaf_modules(
+            model.latent_heads,
+            modules_to_shard,
+            fsdp_kwargs,
+        )
 
         full_precision_fsdp_kwargs = {
             "mp_policy": (
@@ -134,9 +299,11 @@ def init_model_and_shard(
             ),
         }
 
-        for module in model.target_token_engines.modules():
-            if isinstance(module, modules_to_shard):
-                fully_shard(module, **full_precision_fsdp_kwargs)
+        _apply_fsdp_to_leaf_modules(
+            model.target_token_engines,
+            modules_to_shard,
+            full_precision_fsdp_kwargs,
+        )
 
     if with_ddp and with_fsdp:
         fully_shard(model)
@@ -148,9 +315,9 @@ def init_model_and_shard(
         # functions in the embedding engine as forward functions. Thus, yielding a crash
         # because the input tensors are not converted to DTensors. This seems to primarily
         # occur during validation.
-        for embed in model.encoder.embed_engine.embeds.values():
-            torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_channels")
-            torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_columns")
+        # for embed in model.encoder.embed_engine.embeds.values():
+        #     torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_channels")
+        #     torch.distributed.fsdp.register_fsdp_forward_method(embed, "forward_columns")
 
     # complete initalization and load model if inference/continuing a run
     if run_id_contd is not None:

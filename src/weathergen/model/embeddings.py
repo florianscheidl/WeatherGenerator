@@ -137,13 +137,10 @@ class StreamEmbedTransformer(torch.nn.Module):
         self.dropout_final = torch.nn.Dropout(0.1)
 
     def forward_channels(self, x_in):
-        peh = positional_encoding_harmonic
-
-        # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        x = positional_encoding_harmonic(self.embed(x_in.transpose(-2, -1)))
 
         for layer in self.layers:
-            x = checkpoint(layer, x, use_reentrant=False)
+            x = layer(x)
 
         # read out
         if self.unembed_mode == "full":
@@ -165,7 +162,6 @@ class StreamEmbedTransformer(torch.nn.Module):
         return out
 
     def forward_columns(self, x_in):
-        # embed provided input data
         x = positional_encoding_harmonic(self.embed(x_in))
 
         for layer in self.layers:
@@ -200,6 +196,6 @@ class StreamEmbedLinear(torch.nn.Module):
         self.layer = torch.nn.Linear(dim_in, dim_out)
 
     def forward(self, x):
-        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
+        x = self.layer(x.flatten(-2, -1)).unsqueeze(0)
 
         return x
