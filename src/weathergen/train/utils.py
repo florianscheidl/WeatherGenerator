@@ -254,30 +254,54 @@ def trace_handler(cfg: dict | OmegaConf, prof: torch.profiler.profile) -> None:
         logger.info("[profiler] Memory distribution timeline skipped on aarch64")
 
 
+class _ProfiledModule(torch.nn.Module):
+    """
+    Wraps a module with a torch.profiler.record_function context without replacing
+    its forward method. This is critical for FSDP2 compatibility: FSDP2 installs a
+    DTensor-propagation shim on nn.Module.forward; monkey-patching module.forward
+    (as the previous implementation did) replaces that shim with a plain function,
+    causing "got mixed torch.Tensor and DTensor" errors in sharded Linear layers.
+
+    With this wrapper, FSDP2 dispatches DTensors through _ProfiledModule.forward,
+    and the wrapper passes them through to the inner module unchanged.
+    """
+
+    _is_profiled_module = True  # marker to skip during recursion
+
+    def __init__(self, module: torch.nn.Module, profile_name: str):
+        super().__init__()
+        self._inner = module
+        self._profile_name = profile_name
+
+    def forward(self, *args, **kwargs):
+        with record_function(self._profile_name):
+            return self._inner(*args, **kwargs)
+
+
 def wrap_module_forward_with_profiling(model, prefix=""):
     """
-    Recursively wrap all nn.Module forward methods with profiling context
+    Recursively wrap all custom nn.Module forward methods with profiling context.
+    Uses _ProfiledModule wrappers instead of monkey-patching .forward so that
+    FSDP2's DTensor dispatch shim (installed via fully_shard) is preserved.
     """
     for name, module in model.named_children():
         module_name = f"{prefix}.{name}" if prefix else name
 
-        # Skip standard PyTorch modules (they're already traced)
-        if type(module).__module__.startswith("torch.nn.modules"):
+        # Skip standard PyTorch modules (they're already traced).
+        # Also skip modules that are already _ProfiledModule wrappers to avoid
+        # double-wrapping in recursive calls.
+        if (
+            type(module).__module__.startswith("torch.nn.modules")
+            or getattr(module, "_is_profiled_module", False)
+        ):
             # Still recurse into children
             wrap_module_forward_with_profiling(module, module_name)
             continue
 
-        # Wrap custom modules
-        original_forward = module.forward
+        # Replace the module in its parent with a ProfiledModule wrapper.
+        # setattr on the parent container properly updates PyTorch's module registry.
+        setattr(model, name, _ProfiledModule(module, f"nn.Module: {module_name}"))
 
-        def make_profiled_forward(mod_name, orig_forward):
-            def profiled_forward(*args, **kwargs):
-                with record_function(f"nn.Module: {mod_name}"):
-                    return orig_forward(*args, **kwargs)
-
-            return profiled_forward
-
-        module.forward = make_profiled_forward(module_name, original_forward)
-
-        # Recurse into children
+        # Recurse into the (now-wrapped) module's children.
+        # The _is_profiled_module marker above prevents re-wrapping the inner module.
         wrap_module_forward_with_profiling(module, module_name)
