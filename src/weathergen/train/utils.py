@@ -254,54 +254,59 @@ def trace_handler(cfg: dict | OmegaConf, prof: torch.profiler.profile) -> None:
         logger.info("[profiler] Memory distribution timeline skipped on aarch64")
 
 
-class _ProfiledModule(torch.nn.Module):
-    """
-    Wraps a module with a torch.profiler.record_function context without replacing
-    its forward method. This is critical for FSDP2 compatibility: FSDP2 installs a
-    DTensor-propagation shim on nn.Module.forward; monkey-patching module.forward
-    (as the previous implementation did) replaces that shim with a plain function,
-    causing "got mixed torch.Tensor and DTensor" errors in sharded Linear layers.
-
-    With this wrapper, FSDP2 dispatches DTensors through _ProfiledModule.forward,
-    and the wrapper passes them through to the inner module unchanged.
-    """
-
-    _is_profiled_module = True  # marker to skip during recursion
-
-    def __init__(self, module: torch.nn.Module, profile_name: str):
-        super().__init__()
-        self._inner = module
-        self._profile_name = profile_name
-
-    def forward(self, *args, **kwargs):
-        with record_function(self._profile_name):
-            return self._inner(*args, **kwargs)
-
-
 def wrap_module_forward_with_profiling(model, prefix=""):
     """
     Recursively wrap all custom nn.Module forward methods with profiling context.
-    Uses _ProfiledModule wrappers instead of monkey-patching .forward so that
-    FSDP2's DTensor dispatch shim (installed via fully_shard) is preserved.
+
+    IMPORTANT — FSDP2 compatibility:
+    After fully_shard() is applied, each module's forward is wrapped by an FSDP2
+    dispatch shim that converts args to DTensors. Simply assigning
+    ``module.forward = profiled_func`` breaks this because:
+
+      (a) The shim caches a reference to the original forward at class-definition
+          time (before any monkey-patch runs), so the shim still calls the original.
+
+      (b) Replacing the module via setattr() removes it from its parent container,
+          which can cause FSDP2 to lose track of the module and reset its
+          DTensor-parameter state back to plain tensors.
+
+    This function works around both issues:
+
+      1. Monkey-patch ``module.forward`` in-place so the module stays in the
+         parent tree and FSDP2 keeps its weight DTensors alive.
+
+      2. Call ``torch.distributed.fsdp.register_fsdp_forward_method(module, "forward")``
+         after the patch. This tells FSDP2 to invoke the *registered* method name
+         ("forward") at runtime, which resolves to the already-patched callable —
+         bypassing the stale cached reference inside the original shim.
     """
+    import torch.distributed.fsdp
+
     for name, module in model.named_children():
         module_name = f"{prefix}.{name}" if prefix else name
 
-        # Skip standard PyTorch modules (they're already traced).
-        # Also skip modules that are already _ProfiledModule wrappers to avoid
-        # double-wrapping in recursive calls.
-        if (
-            type(module).__module__.startswith("torch.nn.modules")
-            or getattr(module, "_is_profiled_module", False)
-        ):
-            # Still recurse into children
+        # Skip standard PyTorch modules (they're already traced via
+        # PyTorch's own profiler integration).
+        if type(module).__module__.startswith("torch.nn.modules"):
             wrap_module_forward_with_profiling(module, module_name)
             continue
 
-        # Replace the module in its parent with a ProfiledModule wrapper.
-        # setattr on the parent container properly updates PyTorch's module registry.
-        setattr(model, name, _ProfiledModule(module, f"nn.Module: {module_name}"))
+        # Monkey-patch forward in-place. The module stays in its parent container
+        # so FSDP2 does NOT lose track of its DTensor weights.
+        original_forward = module.forward
 
-        # Recurse into the (now-wrapped) module's children.
-        # The _is_profiled_module marker above prevents re-wrapping the inner module.
+        def make_profiled_forward(mod_name, orig_forward):
+            def profiled_forward(*args, **kwargs):
+                with record_function(f"nn.Module: {mod_name}"):
+                    return orig_forward(*args, **kwargs)
+
+            return profiled_forward
+
+        module.forward = make_profiled_forward(module_name, original_forward)
+
+        # Re-register "forward" with FSDP2 so it resolves to the patched callable
+        # instead of the stale reference baked into the original shim.
+        torch.distributed.fsdp.register_fsdp_forward_method(module, "forward")
+
+        # Recurse into children (the patched module is still the same object in the tree)
         wrap_module_forward_with_profiling(module, module_name)
