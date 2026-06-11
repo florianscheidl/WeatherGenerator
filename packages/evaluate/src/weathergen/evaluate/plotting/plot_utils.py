@@ -136,6 +136,13 @@ def clean_label(s: str) -> str:
     return re.sub(r"[_\-]+", " ", s).strip()
 
 
+def filter_set(items: list, allowed: set | None) -> list:
+    """Return *items* filtered to *allowed*, or all items if *allowed* is ``None``."""
+    if allowed is None:
+        return items
+    return [x for x in items if x in allowed]
+
+
 class DefaultMarkerSize:
     """
     Utility class for managing default configuration values, such as marker sizes
@@ -373,7 +380,7 @@ def plot_metric_region(
                 colors.append(runs[run_id].get("color", None))
 
             if selected_data:
-                _logger.info(f"Creating plot for {metric} - {region} - {stream} - {ch}.")
+                _logger.info(f"Creating line plot for {metric} - {region} - {stream} - {ch}.")
 
                 name = create_filename(
                     prefix=[metric, region], middle=sorted(set(run_ids)), suffix=[stream, ch]
@@ -495,18 +502,17 @@ def ratio_plot_metric_region(
             colors.append(run_data.get("color", None))
 
         if len(selected_data) > 0:
-            _logger.info(f"Creating Ratio plot for {metric} - {stream}")
+            _logger.info(f"Creating ratio plot for {metric} - {stream}")
 
             name = create_filename(
                 prefix=[metric, region], middle=sorted(set(run_ids)), suffix=[stream]
             )
             plotter.ratio_plot(
-                selected_data,
-                run_ids,
-                labels,
-                tag=name,
-                x_dim="channel",
+                data=selected_data,
+                run_ids=run_ids,
+                labels=labels,
                 y_dim=metric,
+                tag=name,
                 print_summary=print_summary,
                 colors=colors,
             )
@@ -519,7 +525,7 @@ def heat_maps_metric_region(
     scores_dict: dict,
     plotter: object,
 ) -> None:
-    """Plot ratio data for all streams and channels for a given metric and region.
+    """Plot heat map data for all streams and channels for a given metric and region.
 
     Parameters
     ----------
@@ -556,7 +562,7 @@ def heat_maps_metric_region(
             run_ids.append(run_id)
 
         if len(selected_data) > 0:
-            _logger.info(f"Creating Heat maps for {metric} - {stream}")
+            _logger.info(f"Creating heat maps for {metric} - {stream}")
             name = create_filename(
                 prefix=[metric, region], middle=sorted(set(run_ids)), suffix=[stream]
             )
@@ -760,6 +766,80 @@ def quantile_plot_metric_region(
                         f"Q-Q data not available for {metric} - {region} - {stream} - {ch}. "
                         f"Skipping plot generation."
                     )
+
+
+def _extract_psd_attrs(data_ch: xr.DataArray, fstep: int, ch: str) -> list[dict] | None:
+    """Extract PSD curve data from DataArray attrs for a given fstep/channel.
+
+    Returns a single-element list of dicts ready for the plotter, or None if keys are missing.
+    """
+    attrs = data_ch.attrs
+    fp = f"fstep_{fstep}/"
+
+    for prefix in (f"{fp}{ch}/", fp):
+        if f"{prefix}frequencies" in attrs and f"{prefix}psd_target" in attrs:
+            return [
+                {
+                    "frequencies": np.array(attrs[f"{prefix}frequencies"]),
+                    "psd_target": np.array(attrs[f"{prefix}psd_target"]),
+                    "psd_prediction": np.array(attrs[f"{prefix}psd_prediction"]),
+                    "psd_method": attrs.get(f"{fp}psd_method", attrs.get("psd_method", "sht")),
+                }
+            ]
+    return None
+
+
+def psd_plot_metric_region(
+    metric: str,
+    region: str,
+    runs: dict,
+    scores_dict: dict,
+    plotter: object,
+) -> None:
+    """Create PSD plots for all streams and channels for a given metric and region.
+
+    PSD curves (frequencies, target PSD, prediction PSD) are stored in
+    ``score.attrs`` by ``Scores.calc_psd`` and read back here.
+    """
+    streams_set = collect_streams(runs)
+    channels_set = collect_channels(scores_dict, metric, region, runs)
+
+    for stream in streams_set:
+        for ch in channels_set:
+            for run_id, data in scores_dict[metric][region].get(stream, {}).items():
+                if ch not in np.atleast_1d(data.channel.values):
+                    continue
+
+                data_ch = data.sel(channel=ch) if "channel" in data.dims else data
+                if data_ch.isnull().all():
+                    continue
+
+                attr_fsteps = data_ch.attrs.get("attr_fsteps", [])
+                if not attr_fsteps:
+                    _logger.warning(f"PSD attrs missing for {run_id}/{stream}/{ch}. Skipping.")
+                    continue
+
+                label = runs[run_id].get("label", run_id)
+
+                for fstep in attr_fsteps:
+                    psd_datasets = _extract_psd_attrs(data_ch, fstep, ch)
+                    if psd_datasets is None:
+                        continue
+
+                    method_tag = psd_datasets[0].get("psd_method", "sht")
+                    name = create_filename(
+                        prefix=[metric, method_tag, region],
+                        middle=[run_id],
+                        suffix=[stream, ch, f"fstep{fstep}"],
+                    )
+                    plotter.psd_plot(
+                        psd_datasets,
+                        [label],
+                        tag=name,
+                        variable=ch,
+                        forecast_step=str(fstep),
+                    )
+    _logger.info(f"PSD plots saved successfully into: {plotter.out_plot_dir_psd}")
 
 
 def create_filename(
