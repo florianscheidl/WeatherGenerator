@@ -633,7 +633,10 @@ class ForecastingEngine(torch.nn.Module):
 
         aux_info = None
         for _b_idx, block in enumerate(self.fe_blocks):
-            tokens = block(tokens, coords, aux_info)
+            if isinstance(block, torch.nn.modules.normalization.LayerNorm):
+                tokens = block(tokens)
+            else:
+                tokens = block(tokens, coords, aux_info)
         return tokens
 
 
