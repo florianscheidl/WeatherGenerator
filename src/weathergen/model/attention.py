@@ -84,9 +84,6 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
 
         assert with_flash, "Only flash attention supported at the moment"
 
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
-
     def forward(self, x, x_lens, ada_ln_aux=None, coords=None):
         if self.with_residual:
             x_in = x
@@ -181,9 +178,6 @@ class MultiSelfAttentionHeadVarlenFlex(torch.nn.Module):
 
         assert with_flash, "Only flash attention supported at the moment"
 
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
-
         def att(qs, ks, vs, x_mask):
             def sparsity_mask(score, b, h, q_idx, kv_idx):
                 return (q_idx // 16) == (kv_idx % 16)
@@ -272,9 +266,6 @@ class MultiSelfAttentionHeadLocal(torch.nn.Module):
 
         self.dtype = attention_dtype
         assert with_flash, "Only flash attention supported."
-
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
 
         # define block mask
         def mask_block_local(batch, head, idx_q, idx_kv):
@@ -374,9 +365,6 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
 
         self.dtype = attention_dtype
         assert with_flash, "Only flash attention supported at the moment"
-
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
 
     def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
         if self.with_residual:
@@ -490,9 +478,6 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
 
         self.dtype = attention_dtype
         assert with_flash, "Only flash attention supported at the moment"
-
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
 
     def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
         if self.with_residual:
@@ -690,9 +675,6 @@ class MultiCrossAttentionHead(torch.nn.Module):
         self.dtype = attention_dtype
         self.att = torch.nn.functional.scaled_dot_product_attention
         self.softmax = torch.nn.Softmax(dim=-1)
-
-        # Compile the full attention path before any FSDP / checkpoint wrapping.
-        self.forward = torch.compile(self.forward, dynamic=False)
 
     #########################################
     def forward(self, x_q, x_kv):
