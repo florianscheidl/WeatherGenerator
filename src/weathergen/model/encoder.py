@@ -126,9 +126,7 @@ class EncoderModule(torch.nn.Module):
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
-        tokens_global, posteriors = checkpoint(
-            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
-        )
+        tokens_global, posteriors = self.assimilate_local(model_params, stream_cell_tokens, batch)
 
         tokens_global = checkpoint(
             self.ae_global_engine,
