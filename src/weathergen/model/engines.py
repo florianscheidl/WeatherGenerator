@@ -10,6 +10,8 @@
 import dataclasses
 import math
 
+import astropy_healpix.healpy
+import numpy as np
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
@@ -944,26 +946,32 @@ class TargetPredictionEngine(nn.Module):
         )
         for layer in self.tte:
             if isinstance(layer, OriginalPredictionBlock):
-                output = layer(
-                    latent=latent.flatten(0, 1),
-                    output=output,
-                    coords=coordinates,
-                    latent_lens=latent_lens,
-                    output_lens=output_lens,
+                output = checkpoint(
+                    layer,
+                    latent.flatten(0, 1),
+                    output,
+                    coordinates,
+                    latent_lens,
+                    output_lens,
+                    use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
-                output = layer(
+                output = checkpoint(
+                    layer,
                     x=output,
                     x_kv=latent.flatten(0, 1),
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
+                    use_reentrant=False,
                 )
             else:
-                output = layer(
+                output = checkpoint(
+                    layer,
                     x=output,
                     x_lens=output_lens,
                     aux=latent[:, 0],
+                    use_reentrant=False,
                 )
         output = (
             self.final_norm(output)

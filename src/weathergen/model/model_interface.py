@@ -235,12 +235,12 @@ def init_model_and_shard(
             debug=checkpoint_debug,
             already_checkpointed=checkpointed_ids,
         )
-        _apply_composable_activation_checkpointing(
-            model.target_token_engines,
-            modules_to_checkpoint,
-            debug=checkpoint_debug,
-            already_checkpointed=checkpointed_ids,
-        )
+        # Skip composable checkpointing for target_token_engines (decoders).
+        # These use full_precision_fsdp_kwargs and have large attention operations.
+        # Keeping them without composable checkpointing ensures narrow unsharding windows:
+        # FSDP unshards → forward → re-shards immediately, rather than holding unsharded
+        # params until backward completes.
+
         # Also checkpoint container modules (like StreamEmbedTransformer) without sharding
         _apply_composable_activation_checkpointing(
             model.encoder.embed_engine.embeds,
