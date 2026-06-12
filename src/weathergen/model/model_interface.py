@@ -130,6 +130,7 @@ def init_model_and_shard(
         model.encoder.q_cells.requires_grad = False
 
     tp_mesh = _build_tp_mesh() if with_ddp and with_fsdp else None
+    fsdp_mesh = tp_mesh["dp"] if tp_mesh is not None else None
     _parallelize_local_tp(model, tp_mesh)
 
     if with_ddp and not with_fsdp:
@@ -172,26 +173,26 @@ def init_model_and_shard(
 
         for module in model.encoder.ae_local_engine.ae_local_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, mesh=fsdp_mesh, **fsdp_kwargs)
 
         for module in model.encoder.ae_local_global_engine.ae_adapter.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, mesh=fsdp_mesh, **fsdp_kwargs)
 
         for module in model.encoder.ae_global_engine.ae_global_blocks.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, mesh=fsdp_mesh, **fsdp_kwargs)
 
         for module in model.forecast_engine.fe_blocks.modules():
             if isinstance(module, modules_to_shard):
                 # reshard_after_forward=False keeps FE parameters unsharded
                 # during the multi-step rollout loop.
                 # Needed for pushforward trick.
-                fully_shard(module, reshard_after_forward=False, **fsdp_kwargs)
+                fully_shard(module, mesh=fsdp_mesh, reshard_after_forward=False, **fsdp_kwargs)
 
         for module in model.latent_heads.modules():
             if isinstance(module, modules_to_shard):
-                fully_shard(module, **fsdp_kwargs)
+                fully_shard(module, mesh=fsdp_mesh, **fsdp_kwargs)
 
         full_precision_fsdp_kwargs = {
             "mp_policy": (
@@ -209,7 +210,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        fully_shard(model, mesh=fsdp_mesh)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
