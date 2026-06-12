@@ -13,11 +13,13 @@ import itertools
 import logging
 
 import torch
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
 from torch.distributed.tensor import distribute_tensor
+from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 
 from weathergen.common.config import Config, get_path_model, merge_configs
 from weathergen.model.attention import (
@@ -37,7 +39,72 @@ logger = logging.getLogger(__name__)
 
 
 # same as in config: student_teacher, forecasting, masking
-type TrainingMode = str
+TrainingMode = str
+
+
+def _build_tp_mesh():
+    """Build a 2D (dp, tp) mesh when the world size can support TP.
+
+    For the branch-testing phase we keep the TP degree small and deterministic:
+    use tp=2 when possible, otherwise leave TP disabled.
+    """
+
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        return None
+
+    world_size = torch.distributed.get_world_size()
+    if world_size < 2 or world_size % 2 != 0:
+        return None
+
+    tp_size = 2
+    dp_size = world_size // tp_size
+    return init_device_mesh("cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp"))
+
+
+def _parallelize_local_tp(model, tp_mesh):
+    """Apply TP to the encoder-local assimilation stack only."""
+
+    if tp_mesh is None:
+        return
+
+    tp_submesh = tp_mesh["tp"]
+
+    def tp_mlp(module: MLP):
+        linear_idx = [i for i, layer in enumerate(module.layers) if isinstance(layer, torch.nn.Linear)]
+        if not linear_idx:
+            return
+        for idx in linear_idx[:-1]:
+            parallelize_module(module.layers[idx], tp_submesh, ColwiseParallel())
+        parallelize_module(module.layers[linear_idx[-1]], tp_submesh, RowwiseParallel())
+
+    def tp_multi_self_attention(module: MultiSelfAttentionHeadVarlen):
+        parallelize_module(module.proj_heads_q, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_heads_k, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_heads_v, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_out, tp_submesh, RowwiseParallel())
+
+    def tp_multi_cross_attention(module: MultiCrossAttentionHeadVarlenSlicedQ):
+        for q_proj in module.proj_heads_q:
+            parallelize_module(q_proj, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_heads_k, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_heads_v, tp_submesh, ColwiseParallel())
+        parallelize_module(module.proj_out, tp_submesh, RowwiseParallel())
+
+    def tp_local_global_adapter(module):
+        if hasattr(module, "ae_adapter"):
+            for block in module.ae_adapter:
+                if isinstance(block, MLP):
+                    tp_mlp(block)
+                elif isinstance(block, MultiCrossAttentionHeadVarlenSlicedQ):
+                    tp_multi_cross_attention(block)
+
+    for block in model.encoder.ae_local_engine.ae_local_blocks:
+        if isinstance(block, MLP):
+            tp_mlp(block)
+        elif isinstance(block, MultiSelfAttentionHeadVarlen):
+            tp_multi_self_attention(block)
+
+    tp_local_global_adapter(model.encoder.ae_local_global_engine)
 
 
 def init_model_and_shard(
@@ -61,6 +128,9 @@ def init_model_and_shard(
     # TODO: this should be handled in the encoder to be close where q_cells is defined
     if "q_cells" in cf.freeze_modules:
         model.encoder.q_cells.requires_grad = False
+
+    tp_mesh = _build_tp_mesh() if with_ddp and with_fsdp else None
+    _parallelize_local_tp(model, tp_mesh)
 
     if with_ddp and not with_fsdp:
         # DDP + activation checkpointing can hit "Expected to mark a variable ready only once"
