@@ -10,7 +10,8 @@
 from functools import partial
 
 import torch
-from flash_attn import flash_attn_func, flash_attn_varlen_func
+# from flash_attn import flash_attn_func, flash_attn_varlen_func
+from flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from weathergen.model.norms import AdaLayerNorm, RMSNorm
@@ -115,7 +116,6 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             x_lens.max(),
             x_lens.max(),
             softcap=self.softcap,
-            dropout_p=dropout_rate,
         )
 
         out = self.proj_out(outs.flatten(-2, -1))
@@ -395,7 +395,7 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
                 x_q_lens.max(),
                 x_kv_lens.max(),
                 softcap=self.softcap,
-                dropout_p=dropout_rate,
+                # dropout_p=dropout_rate,
             )
         else:
             assert False
@@ -513,7 +513,7 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                     x_q_lens.max(),
                     x_kv_lens.max(),
                     softcap=self.softcap,
-                    dropout_p=dropout_rate,
+                    # dropout_p=dropout_rate,
                 )
             ]
 
@@ -608,7 +608,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         dropout_rate = self.dropout_rate if self.training else 0.0
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
+        outs = flash_attn_func(qs, ks, vs, softcap=self.softcap) #, dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
