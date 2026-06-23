@@ -68,7 +68,6 @@ class Trainer(TrainerBase):
         self.dataset_val: MultiStreamDataSampler | None = None
         self.device: torch.device = None
         self.ema_model = None
-        self.grad_scaler: torch.amp.GradScaler | None = None
         self.last_grad_norm = None
         self.loss_calculator: LossCalculator | None = None
         self.loss_calculator_val: LossCalculator | None = None
@@ -331,7 +330,6 @@ class Trainer(TrainerBase):
             betas=(beta1, beta2),
             eps=eps,
         )
-        self.grad_scaler = torch.amp.GradScaler("cuda")
 
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
 
@@ -492,10 +490,9 @@ class Trainer(TrainerBase):
 
                 # backward pass
                 self.optimizer.zero_grad()
-                self.grad_scaler.scale(loss).backward()
+                loss.backward()
 
                 # gradient clipping
-                self.grad_scaler.unscale_(self.optimizer)
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
                 )
@@ -508,8 +505,7 @@ class Trainer(TrainerBase):
                         self._log_instant_grad_norms(TRAIN)
 
                 # optimizer step
-                self.grad_scaler.step(self.optimizer)
-                self.grad_scaler.update()
+                self.optimizer.step()
 
                 # update learning rate
                 self.lr_scheduler.step()
