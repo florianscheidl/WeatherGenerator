@@ -329,6 +329,7 @@ class Trainer(TrainerBase):
             weight_decay=self.training_cfg.optimizer.weight_decay,
             betas=(beta1, beta2),
             eps=eps,
+            fused=True,
         )
 
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
