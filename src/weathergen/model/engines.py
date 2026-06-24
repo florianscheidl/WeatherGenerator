@@ -105,7 +105,7 @@ class EmbeddingEngine(torch.nn.Module):
                 continue
 
             # embedding from physical space to per patch latent representation
-            x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1)]
+            x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1).to(tokens_all.dtype)]
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
