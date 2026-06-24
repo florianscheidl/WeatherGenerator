@@ -46,6 +46,45 @@ def _pin_tensor_list(tensor_list: list) -> list:
     return [_pin_tensor(t) for t in tensor_list]
 
 
+# Tensor lists moved to device by to_device(); coalesced into one pinned buffer each at
+# pin_memory() time so the transfer is one async HtoD copy per list instead of one per element.
+_DEVICE_TENSOR_LISTS = (
+    "target_coords",
+    "target_coords_lens",
+    "target_tokens",
+    "source_tokens_cells",
+    "source_tokens_lens",
+    "source_idxs_embed",
+)
+
+
+def _coalesce_tensor_list(tensors: list):
+    """Flatten same-dtype tensors into one 1D buffer; returns (buffer, shapes, sizes).
+
+    Returns None when the list cannot be coalesced (empty, has None/non-tensors, mixed
+    dtypes, or no elements), in which case the caller falls back to per-element handling.
+    """
+    if not tensors or any(not isinstance(t, torch.Tensor) for t in tensors):
+        return None
+    dtype = tensors[0].dtype
+    if any(t.dtype != dtype for t in tensors):
+        return None
+    sizes = [t.numel() for t in tensors]
+    if sum(sizes) == 0:
+        return None
+    shapes = [tuple(t.shape) for t in tensors]
+    return torch.cat([t.reshape(-1) for t in tensors]), shapes, sizes
+
+
+def _split_coalesced(buffer: torch.Tensor, shapes: list, sizes: list) -> list:
+    """Inverse of _coalesce_tensor_list: split a 1D buffer into views of the original shapes."""
+    out, offset = [], 0
+    for shape, size in zip(shapes, sizes, strict=True):
+        out.append(buffer[offset : offset + size].reshape(shape))
+        offset += size
+    return out
+
+
 class StreamData:
     """
     StreamData object that encapsulates all data the model ingests for one batch item
@@ -114,25 +153,34 @@ class StreamData:
         self.source_idxs_embed_pe = [torch.tensor([]) for _ in range(self.input_steps)]
 
     def pin_memory(self):
-        """Pin all tensors in this StreamData object to CPU pinned memory"""
+        """Pin all tensors in this StreamData object to CPU pinned memory.
 
-        # Pin target tensors
-        self.target_coords = _pin_tensor_list(self.target_coords)
-        self.target_coords_lens = _pin_tensor_list(self.target_coords_lens)
-        self.target_tokens = _pin_tensor_list(self.target_tokens)
+        Lists moved to device are coalesced into one pinned buffer each (see
+        _DEVICE_TENSOR_LISTS); non-coalescable lists fall back to per-element pinning.
+        """
+
+        # Pin lists that stay on CPU / are not plain tensors
         self.idxs_inv = _pin_tensor_list(self.idxs_inv)
         self.target_coords_raw = _pin_tensor_list(self.target_coords_raw)
 
-        # Pin source tensors
-        self.source_tokens_cells = _pin_tensor_list(self.source_tokens_cells)
-        self.source_tokens_lens = _pin_tensor_list(self.source_tokens_lens)
-        self.source_idxs_embed = _pin_tensor_list(self.source_idxs_embed)
+        # Coalesce + pin the lists that get moved to device
+        self._coalesced = {}
+        for attr in _DEVICE_TENSOR_LISTS:
+            coalesced = _coalesce_tensor_list(getattr(self, attr))
+            if coalesced is None:
+                setattr(self, attr, _pin_tensor_list(getattr(self, attr)))
+            else:
+                buffer, shapes, sizes = coalesced
+                self._coalesced[attr] = (buffer.pin_memory(), shapes, sizes)
 
         return self
 
     def to_device(self, device: str) -> None:
         """
         Move data to GPU
+
+        Uses the coalesced pinned buffers from pin_memory() when present (one async copy per
+        list); otherwise falls back to per-element transfers.
 
         Parameters
         ----------
@@ -145,18 +193,24 @@ class StreamData:
         """
 
         dv = device
-        self.target_coords = [t.to(dv, non_blocking=True) for t in self.target_coords]
-        self.target_coords_lens = [t.to(dv, non_blocking=True) for t in self.target_coords_lens]
-        self.target_tokens = [t.to(dv, non_blocking=True) for t in self.target_tokens]
+        coalesced = getattr(self, "_coalesced", {})
+
+        def move(attr: str) -> None:
+            if attr in coalesced:
+                buffer, shapes, sizes = coalesced[attr]
+                setattr(self, attr, _split_coalesced(buffer.to(dv, non_blocking=True), shapes, sizes))
+            else:
+                setattr(self, attr, [t.to(dv, non_blocking=True) for t in getattr(self, attr)])
+
+        move("target_coords")
+        move("target_coords_lens")
+        move("target_tokens")
 
         # move to device if source data is present
         if not np.array([s is None for s in self.source_tokens_cells]).all():
-            self.source_tokens_cells = [
-                s.to(dv, non_blocking=True) for s in self.source_tokens_cells
-            ]
-            self.source_tokens_lens = [s.to(dv, non_blocking=True) for s in self.source_tokens_lens]
-
-            self.source_idxs_embed = [s.to(dv, non_blocking=True) for s in self.source_idxs_embed]
+            move("source_tokens_cells")
+            move("source_tokens_lens")
+            move("source_idxs_embed")
 
         return self
 
