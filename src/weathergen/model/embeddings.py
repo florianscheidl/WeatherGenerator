@@ -9,6 +9,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
@@ -135,6 +136,55 @@ class StreamEmbedTransformer(torch.nn.Module):
 
         self.dropout_final = torch.nn.Dropout(0.1)
 
+    def _stack_linear_params(self, layers: torch.nn.ModuleList):
+        weights = torch.stack([layer.weight for layer in layers], dim=0)
+        bias = None
+        if layers[0].bias is not None:
+            bias = torch.stack([layer.bias for layer in layers], dim=0)
+        return weights, bias
+
+    def _block_unembed_vmap(self, x):
+        """Apply per-channel normalization + Linear with vmap over the channel axis."""
+        x = x.movedim(1, 0)  # [C, B, T, D]
+        unembed_weight, unembed_bias = self._stack_linear_params(self.unembed)
+
+        ln0 = self.ln_final[0]
+        if isinstance(ln0, torch.nn.LayerNorm):
+            ln_weight = torch.stack([layer.weight for layer in self.ln_final], dim=0)
+            ln_bias = None
+            if ln0.bias is not None:
+                ln_bias = torch.stack([layer.bias for layer in self.ln_final], dim=0)
+
+            def _per_channel_forward(x_channel, ln_weight, ln_bias, ue_weight, ue_bias):
+                x_channel = F.layer_norm(
+                    x_channel,
+                    (x_channel.shape[-1],),
+                    ln_weight,
+                    ln_bias,
+                    ln0.eps,
+                )
+                return F.linear(x_channel, ue_weight, ue_bias)
+
+            out = torch.vmap(_per_channel_forward, in_dims=(0, 0, 0, 0, 0))(
+                x, ln_weight, ln_bias, unembed_weight, unembed_bias
+            )
+        else:
+            assert isinstance(ln0, RMSNorm)
+            ln_weight = torch.stack([layer.weight for layer in self.ln_final], dim=0)
+
+            def _per_channel_forward(x_channel, ln_weight, ue_weight, ue_bias):
+                x_channel = x_channel.float()
+                x_channel = x_channel * torch.rsqrt(x_channel.pow(2).mean(-1, keepdim=True) + ln0.eps)
+                x_channel = x_channel * ln_weight.view(1, 1, -1)
+                x_channel = x_channel.to(ue_weight.dtype)
+                return F.linear(x_channel, ue_weight, ue_bias)
+
+            out = torch.vmap(_per_channel_forward, in_dims=(0, 0, 0, 0))(
+                x, ln_weight, unembed_weight, unembed_bias
+            )
+
+        return out.movedim(0, 1)
+
     def forward_channels(self, x_in):
         peh = positional_encoding_harmonic
 
@@ -148,11 +198,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
-            out = [
-                ue(ln(x[:, i]))
-                for i, (ue, ln) in enumerate(zip(self.unembed, self.ln_final, strict=True))
-            ]
-            out = torch.stack(out, dim=1).flatten(-2, -1)
+            out = self._block_unembed_vmap(x).flatten(-2, -1)
         else:
             raise ValueError(f"Unknown unembed mode: {self.unembed_mode}")
 
