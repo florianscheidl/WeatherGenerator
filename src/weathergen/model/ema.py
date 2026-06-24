@@ -35,8 +35,6 @@ class EMAModel:
         self.src_params = dict(self.original_model.named_parameters())
         self._ema_update_params: list[torch.nn.Parameter] = []
         self._src_update_params: list[torch.nn.Parameter] = []
-        self._foreach_update_supported = hasattr(torch, "_foreach_mul_") and hasattr(torch, "_foreach_add_")
-
         self.reset()
 
     @torch.no_grad()
@@ -113,15 +111,10 @@ class EMAModel:
         self.batch_size = batch_size
         beta = self.get_current_beta(cur_step)
 
-        if self._foreach_update_supported:
-            # Batch the parameter update to cut Python overhead.
-            torch._foreach_mul_(self._ema_update_params, beta)
-            torch._foreach_add_(self._ema_update_params, self._src_update_params, alpha=1.0 - beta)
-        else:
-            # Fallback for tensor layouts / environments that do not support foreach ops.
-            for p_ema, p_src in zip(self._ema_update_params, self._src_update_params, strict=True):
-                p_ema.lerp_(p_src, 1.0 - beta)
 
+        torch._foreach_mul_(self._ema_update_params, beta)
+        torch._foreach_add_(self._ema_update_params, self._src_update_params, alpha=1.0 - beta)
+    
     @torch.no_grad()
     def forward_eval(self, *args, **kwargs):
         self.ema_model.eval()
