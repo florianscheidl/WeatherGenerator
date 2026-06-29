@@ -27,7 +27,9 @@ dependencies = [
  "anemoi-datasets",
  "weathergen-common",
  "weathergen-evaluate",
- "weathergen-readers-extra"
+ "weathergen-readers-extra",
+ "ninja>=1.13.0",
+ "pybind11>=3.0.4",
 ]
 
 
