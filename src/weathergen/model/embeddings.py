@@ -89,16 +89,24 @@ class StreamEmbedTransformer(torch.nn.Module):
 
         elif self.unembed_mode == "block":
             dim_out = (self.num_tokens * self.dim_out) // num_channels
+
+            # Build the per-channel submodules once, then cache their stacked
+            # weights/biases as registered tensors for the forward pass.
             unembed = torch.nn.ModuleList(
                 [torch.nn.Linear(dim_embed, dim_out) for _ in range(num_channels)]
             )
             ln_final = torch.nn.ModuleList(
                 [norm(dim_embed, eps=1e-6) for _ in range(num_channels)]
             )
-            self.ln_w = torch.stack([ln.weight for ln in ln_final])
-            self.ln_b = torch.stack([ln.bias for ln in ln_final])
-            self.w = torch.stack([ue.weight for ue in unembed])
-            self.ue_bias = torch.stack([ue.bias for ue in unembed])
+
+            self.ln_w = torch.nn.Parameter(torch.stack([ln.weight for ln in ln_final]))
+            if getattr(ln_final[0], "bias", None) is None:
+                self.register_buffer("ln_b", torch.zeros(num_channels, dim_embed))
+            else:
+                self.ln_b = torch.nn.Parameter(torch.stack([ln.bias for ln in ln_final]))
+
+            self.w = torch.nn.Parameter(torch.stack([ue.weight for ue in unembed]))
+            self.ue_bias = torch.nn.Parameter(torch.stack([ue.bias for ue in unembed]))
         else:
             raise ValueError(f"Unknown unembed mode: {unembed_mode}")
 
@@ -118,17 +126,12 @@ class StreamEmbedTransformer(torch.nn.Module):
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
             b, c, d = x.shape
-            x_normed = torch.nn.functional.layer_norm(
-                x.reshape(b * c, d), [d], weight=None, bias=None
-            )
-            x_normed = x_normed.reshape(b, c, d) * self.ln_w + self.ln_b
+            x_normed = torch.nn.functional.layer_norm(x, (d,), weight=None, bias=None)
 
-            out = torch.bmm(
-                x_normed.transpose(0, 1),
-                self.w.transpose(1, 2),
-            ).transpose(0, 1)
-
+            x_normed = x_normed * self.ln_w + self.ln_b
+            out = torch.einsum("bcd,cod->bco", x_normed, self.w)
             out = out.add(self.ue_bias).flatten(-2, -1).to(x.dtype)
+
         else:
             raise ValueError(f"Unknown unembed mode: {self.unembed_mode}")
 
