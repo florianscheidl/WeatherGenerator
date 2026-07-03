@@ -13,7 +13,6 @@ from torch.utils.checkpoint import checkpoint
 from weathergen.model.attention import MultiSelfAttentionHead
 from weathergen.model.layers import MLP
 
-# from weathergen.model.mlp import MLP
 from weathergen.model.norms import RMSNorm
 from weathergen.model.positional_encoding import positional_encoding_harmonic
 
