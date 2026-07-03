@@ -192,8 +192,6 @@ required-version = ">=0.10.0"
 # TODO: add macos and windows (CPU only, for running tests)
 environments = [
     "sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 # One can only have cpu or gpu.
@@ -252,7 +250,6 @@ flash-attn = [
 
 flash-attn-3 = [
   { url = "https://github.com/cathalobrien/get-flash-attn/releases/download/v0.1-alpha/flash_attn_3-3.0.0b1+cu12torch2.9cxx11abiFALSE-cp39-abi3-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
-  # There is no official support for flash-attn on macos
 ]
 
 torch = [
