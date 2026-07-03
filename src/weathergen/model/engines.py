@@ -81,11 +81,6 @@ class EmbeddingEngine(torch.nn.Module):
     def forward(self, batch, pe_embed):
         num_steps_input = batch.get_num_source_steps()
 
-        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
-        tokens_all = torch.empty(
-            (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
-        )
-
         # iterate over all streams
         x_embeds = []
         for stream_name in self.streams.keys():
@@ -98,7 +93,7 @@ class EmbeddingEngine(torch.nn.Module):
             if all(s is None for s in sdata):
                 continue
 
-            sdata = torch.cat(sdata).to(tokens_all.dtype)
+            sdata = torch.cat(sdata).to(self.dtype)
             # skip empty stream
             if sdata.numel() == 0:
                 continue
@@ -108,18 +103,15 @@ class EmbeddingEngine(torch.nn.Module):
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
-        # if the assert is hit, max_number_tokens_local_per_cell in config needs to be increased
-        max_tokens = self.cf.get("ae_local_max_tokens_per_cell", 64)
-        assert batch.tokens_lens.flatten(0, 2).sum(0).max() <= max_tokens, (
-            "max number of tokens per cell for positional encoding exceeded."
-        )
-        " Increase ae_local_max_tokens_per_cell in config."
-
         if batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
             tokens_all = torch.cat(x_embeds)
 
         else:
+            num_tokens = torch.sum(batch.tokens_lens).item()
+            tokens_all = torch.empty(
+                (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
+            )
             scatter_idxs = self.get_scatter_idxs_vectorized(batch)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
@@ -127,7 +119,15 @@ class EmbeddingEngine(torch.nn.Module):
             tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
 
         pe_idxs = self.get_pe_idxs_vectorized(batch)
-        tokens_all = tokens_all + pe_embed[pe_idxs]
+        try:
+            tokens_all = tokens_all + pe_embed[pe_idxs]
+        except IndexError as e:
+            max_tokens = self.cf.get("ae_local_max_tokens_per_cell", 64)
+            actual_max = batch.tokens_lens.flatten(0, 2).sum(0).max().item()
+            raise RuntimeError(
+                f"Token limit exceeded in EmbeddingEngine: {actual_max} > {max_tokens}. "
+                f"Increase ae_local_max_tokens_per_cell in config or check data."
+            ) from e
 
         return tokens_all
 
