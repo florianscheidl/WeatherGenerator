@@ -103,20 +103,21 @@ class EmbeddingEngine(torch.nn.Module):
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
+        # concatenated embeddings already have exactly num_tokens rows, so the scatter
+        # target can be sized from them directly (avoids a .item() sync barrier)
+        cat_embeds = torch.cat(x_embeds)
+
         if batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
-            tokens_all = torch.cat(x_embeds)
+            tokens_all = cat_embeds
 
         else:
-            num_tokens = torch.sum(batch.tokens_lens).item()
-            tokens_all = torch.empty(
-                (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
-            )
             scatter_idxs = self.get_scatter_idxs_vectorized(batch)
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
             # actual scatter operation and apply per cell positional encoding
-            tokens_all.scatter_(0, scatter_idxs, torch.cat(x_embeds))
+            tokens_all = torch.empty_like(cat_embeds)
+            tokens_all.scatter_(0, scatter_idxs, cat_embeds)
 
         pe_idxs = self.get_pe_idxs_vectorized(batch)
         try:
