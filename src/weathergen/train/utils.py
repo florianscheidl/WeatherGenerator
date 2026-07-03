@@ -281,3 +281,19 @@ def wrap_module_forward_with_profiling(model, prefix=""):
 
         # Recurse into children
         wrap_module_forward_with_profiling(module, module_name)
+
+
+class NoOpGradScaler:
+    """Drop-in replacement for torch.amp.GradScaler when gradient scaling is disabled."""
+
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        return None
+
+    def step(self, optimizer):
+        return optimizer.step()
+
+    def update(self):
+        return None
