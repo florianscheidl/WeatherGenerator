@@ -112,14 +112,14 @@ class EmbeddingEngine(torch.nn.Module):
             tokens_all = cat_embeds
 
         else:
-            scatter_idxs = self.get_scatter_idxs_vectorized(batch)
+            scatter_idxs = self.get_scatter_idxs_vectorized(batch, cat_embeds.shape[0])
             scatter_idxs = scatter_idxs.unsqueeze(1).repeat((1, self.cf.ae_local_dim_embed))
 
             # actual scatter operation and apply per cell positional encoding
             tokens_all = torch.empty_like(cat_embeds)
             tokens_all.scatter_(0, scatter_idxs, cat_embeds)
 
-        pe_idxs = self.get_pe_idxs_vectorized(batch)
+        pe_idxs = self.get_pe_idxs_vectorized(batch, cat_embeds.shape[0])
         try:
             tokens_all = tokens_all + pe_embed[pe_idxs]
         except IndexError as e:
@@ -132,15 +132,22 @@ class EmbeddingEngine(torch.nn.Module):
 
         return tokens_all
 
-    def get_pe_idxs_vectorized(self, batch):
+    def get_pe_idxs_vectorized(self, batch, num_tokens):
         """
         Compute per cell indices into positional encoding
+
+        num_tokens is the total token count, known on the host from tensor shape
+        metadata; with it all output shapes are static, so no device value is read
+        (boolean-mask indexing or a tensor-valued arange bound would force a sync).
         """
 
         tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).sum(0).flatten()
-        rows = torch.arange(tok_counts.max(), device=tok_counts.device).unsqueeze(0)
-        rows = rows.expand(tok_counts.shape[0], -1)
-        pe_idxs = rows[rows < tok_counts.unsqueeze(1)]
+        csum = tok_counts.cumsum(0)
+        token_idxs = torch.arange(num_tokens, device=tok_counts.device)
+        # per-token cell (segment) id; right=True skips empty cells
+        seg_idxs = torch.searchsorted(csum, token_idxs, right=True)
+        # position of each token within its cell
+        pe_idxs = token_idxs - (csum - tok_counts)[seg_idxs]
 
         return pe_idxs
 
@@ -173,12 +180,16 @@ class EmbeddingEngine(torch.nn.Module):
 
         return scatter_idxs
 
-    def get_scatter_idxs_vectorized(self, batch):
+    def get_scatter_idxs_vectorized(self, batch, num_tokens):
         """
         Compute reordering index so that tokens from different streams but same cell are
         continguous
 
         Vectorized version
+
+        num_tokens is the total token count, known on the host from tensor shape
+        metadata; with it all output shapes are static, so no device value is read
+        (boolean-mask indexing or a tensor-valued arange bound would force a sync).
         """
 
         dev = batch.get_device()
@@ -186,17 +197,18 @@ class EmbeddingEngine(torch.nn.Module):
         # flatten leasds to streams x tokens per cell (across all cells for input steps and samples)
         tok_counts = batch.tokens_lens.permute([2, 0, 1, 3]).flatten(1, -1)
 
-        # partial sums for per cell offsets
+        # partial sums for per cell offsets (destination base per (stream, cell) segment)
         pad = torch.zeros((1, tok_counts.shape[1]), dtype=torch.int64, device=dev)
         offset = torch.cat([pad, tok_counts.cumsum(0)])[:-1]
         offset[:, 1:] += tok_counts.sum(0).cumsum(0)[:-1]
 
-        ranges = torch.arange(tok_counts.max(), device=dev).repeat((tok_counts.numel(), 1))
-        idxs = (offset.flatten() + ranges.transpose(1, 0)).transpose(1, 0)
-        # select idxs[i][:ranges[i]] for each i; vectorized version
-        col_indices = torch.arange(idxs.shape[1], device=dev).unsqueeze(0)
-        valid_mask = col_indices < tok_counts.flatten().unsqueeze(1)
-        scatter_idxs = idxs[valid_mask].to(torch.int64)
+        # per-token segment id and position within its segment, in the stream-major
+        # source order of the concatenated embeddings
+        counts = tok_counts.flatten().to(torch.int64)
+        csum = counts.cumsum(0)
+        token_idxs = torch.arange(num_tokens, device=dev)
+        seg_idxs = torch.searchsorted(csum, token_idxs, right=True)
+        scatter_idxs = offset.flatten()[seg_idxs] + (token_idxs - (csum - counts)[seg_idxs])
 
         return scatter_idxs
 
