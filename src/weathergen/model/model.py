@@ -662,9 +662,14 @@ class Model(torch.nn.Module):
         Extract separate parts from global latent space representation and store in LatentState
         """
         toks_pn = tokens_post_norm
+        # slice instead of indexing with the (contiguous) python idx lists: a list index is
+        # wrapped as a CPU tensor and incurs a synchronizing pageable host-to-device copy
+        num_reg = self.num_register_tokens
         return LatentState(
-            register_tokens=toks_pn[:, self.register_token_idxs] if toks_pn is not None else None,
-            class_token=toks_pn[:, self.class_token_idxs] if tokens_post_norm is not None else None,
+            register_tokens=toks_pn[:, :num_reg] if toks_pn is not None else None,
+            class_token=(
+                toks_pn[:, num_reg : self.num_aux_tokens] if toks_pn is not None else None
+            ),
             patch_tokens=toks_pn[:, self.num_aux_tokens :] if toks_pn is not None else None,
             z_pre_norm=tokens,
         )

@@ -48,8 +48,9 @@ class LossLatentSSLStudentTeacher(LossModuleBase):
         }
 
     def compute_loss(self, preds, targets, metadata) -> LossValues:
-        # gradient loss
-        loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        # gradient loss; torch.zeros creates directly on device (torch.tensor(0.0,
+        # device=...) is a synchronizing pageable host-to-device copy)
+        loss = torch.zeros((), device=self.device, requires_grad=True)
 
         # initialize dictionaries for detailed loss tracking and standard deviation statistics
         # create tensor for each stream

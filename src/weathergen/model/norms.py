@@ -139,11 +139,14 @@ class AdaLayerNormLayer(torch.nn.Module):
         nn.init.zeros_(self.adaLN_modulation[-1].bias)
 
     def forward(self, x: torch.Tensor, c: torch.Tensor, x_lens, **kwargs) -> torch.Tensor:
-        # the -1 in torch.repeat_interleave(..) is because x_lens is designed for use with flash
-        # attention and thus has a spurious 0 at the beginning to satisfy the flash attention api
-        shift, scale, gate = self.adaLN_modulation(c)[torch.repeat_interleave(x_lens) - 1].chunk(
-            3, dim=1
-        )
+        # expand the per-sequence conditioning to per-token; equivalent to
+        # torch.repeat_interleave(x_lens) - 1, but with a static output shape taken from
+        # x (repeat_interleave's data-dependent output size would force a device sync);
+        # the -1 is because x_lens has a spurious 0 at the beginning to satisfy the
+        # flash attention api
+        token_idxs = torch.arange(x.shape[0], device=x.device)
+        seg_idxs = torch.searchsorted(x_lens.cumsum(0).to(token_idxs.dtype), token_idxs, right=True)
+        shift, scale, gate = self.adaLN_modulation(c)[seg_idxs - 1].chunk(3, dim=1)
         kwargs["x_lens"] = x_lens
         return (
             gate
