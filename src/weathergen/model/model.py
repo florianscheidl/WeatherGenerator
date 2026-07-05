@@ -774,7 +774,9 @@ class Model(torch.nn.Module):
         tokens_nbors_lens = torch.full(
             (s[0] * s[1] + 1,), fill_value=num_nbors, dtype=torch.int32, device=tokens_nbors.device
         )
-        tokens_nbors_lens[0] = 0
+        # in-place kernel; `lens[0] = 0` would wrap the scalar as a CPU tensor and incur a
+        # synchronizing pageable host-to-device copy
+        tokens_nbors_lens[:1].zero_()
 
         # pair with tokens from assimilation engine to obtain target tokens
         for stream_name in self.streams.keys():
