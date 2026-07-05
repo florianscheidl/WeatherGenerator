@@ -816,6 +816,12 @@ class Model(torch.nn.Module):
                     ]
                 )
                 tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
+                # host-side max (precomputed on CPU at data prep), passed as flash-attn
+                # max_seqlen to avoid a device sync from tcs_lens.max() in the readout
+                max_tcs_len = max(
+                    sample.streams_data[stream_name].target_coords_lens_max[step]
+                    for sample in batch.samples
+                )
 
                 if self.cf.decoder_type == "Linear":
                     pred = self.target_token_engines[stream_name](
@@ -831,6 +837,7 @@ class Model(torch.nn.Module):
                         output_lens=tcs_lens,
                         coordinates=t_coords,
                         max_latent_len=num_nbors,
+                        max_output_len=max_tcs_len,
                     )
 
                     # final prediction head to map back to physical space
