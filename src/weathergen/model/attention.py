@@ -101,6 +101,9 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
                 raise ValueError("coords must be provided when with_2d_rope=True")
             qs, ks = rotary_pos_emb_2d(qs, ks, coords, unsqueeze_dim=1)
 
+        # set dropout rate according to training/eval mode as required by flash_attn
+        dropout_rate = self.dropout_rate if self.training else 0.0
+
         cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs = flash_attn_varlen_func(
@@ -114,8 +117,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             softcap=self.softcap,
         )
 
-        # flash-attn 3 does not support attention dropout; regularize on the attended values instead
-        out = self.proj_out(self.dropout(outs.flatten(-2, -1)))
+        out = self.proj_out(outs.flatten(-2, -1))
 
         if self.with_residual:
             out = out + x_in
@@ -377,6 +379,9 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         ks = self.lnorm_k(self.proj_heads_k(x_kv).reshape(s)).to(self.dtype)
         vs = self.proj_heads_v(x_kv).reshape(s)
 
+        # set dropout rate according to training/eval mode as required by flash_attn
+        dropout_rate = self.dropout_rate if self.training else 0.0
+
         if x_kv_lens is not None:
             cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
@@ -393,8 +398,7 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         else:
             assert False
 
-        # flash-attn 3 does not support attention dropout; regularize on the attended values instead
-        outs = self.proj_out(self.dropout(outs.flatten(-2, -1)))
+        outs = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
             outs = x_q_in + outs
 
@@ -490,6 +494,9 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         ks = self.lnorm_k(self.proj_heads_k(x_kv).reshape(s)).to(self.dtype)
         vs = self.proj_heads_v(x_kv).reshape(s)
 
+        # set dropout rate according to training/eval mode as required by flash_attn
+        dropout_rate = self.dropout_rate if self.training else 0.0
+
         cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
         cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
         outs = []
@@ -507,8 +514,7 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                 )
             ]
 
-        # flash-attn 3 does not support attention dropout; regularize on the attended values instead
-        outs = self.proj_out(self.dropout(torch.stack(outs).transpose(1, 0).flatten(-2, -1)))
+        outs = self.proj_out(torch.stack(outs).transpose(1, 0).flatten(-2, -1))
         if self.with_residual:
             outs = x_q_in + outs.reshape(x_q_in.shape)
 
@@ -597,8 +603,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs = flash_attn_func(qs, ks, vs, softcap=self.softcap)
 
-        # flash-attn 3 does not support attention dropout; regularize on the attended values instead
-        out = self.proj_out(self.dropout(outs.flatten(-2, -1)))
+        out = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
             out = out + x_in
 
