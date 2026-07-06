@@ -161,7 +161,14 @@ class EncoderModule(torch.nn.Module):
 
         zero_pad = torch.zeros(1, device=tokens.device, dtype=torch.int32)
         cell_lens_cur = torch.cat([zero_pad, cell_lens])
-        q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
+
+        # q_cells_lens covers a single healpix grid while cell_lens spans
+        # batch samples x input steps, so tile it to match
+        num_cells_grid = q_cells_lens.shape[0] - 1
+        assert cell_lens.shape[0] % num_cells_grid == 0
+        q_cells_lens_cur = torch.cat(
+            [zero_pad, q_cells_lens[1:].repeat(cell_lens.shape[0] // num_cells_grid)]
+        )
 
         # local assimilation model on the full token set
         toks = self.ae_local_engine(tokens, cell_lens_cur, use_reentrant=False)
