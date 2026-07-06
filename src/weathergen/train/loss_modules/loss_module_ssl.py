@@ -48,9 +48,11 @@ class LossLatentSSLStudentTeacher(LossModuleBase):
         }
 
     def compute_loss(self, preds, targets, metadata) -> LossValues:
-        # gradient loss; torch.zeros creates directly on device (torch.tensor(0.0,
-        # device=...) is a synchronizing pageable host-to-device copy)
-        loss = torch.zeros((), device=self.device, requires_grad=True)
+        # collect the weighted per-loss-function terms and reduce once with stack().sum();
+        # a chained 0-dim accumulator starting from torch.zeros(()) would cost one
+        # cudaMemsetAsync plus one add kernel per term (torch.tensor(0.0, device=...)
+        # would even be a synchronizing pageable host-to-device copy)
+        loss_parts = []
 
         # initialize dictionaries for detailed loss tracking and standard deviation statistics
         # create tensor for each stream
@@ -71,8 +73,14 @@ class LossLatentSSLStudentTeacher(LossModuleBase):
             )
 
             loss_value = loss_fn(**preds_for_loss, **targets_for_loss, **extra_args).mean()
-            loss = loss + (weight * loss_value)
+            loss_parts.append(weight * loss_value)
             losses_all[name] = loss_value.item()
+
+        loss = (
+            torch.stack(loss_parts).sum()
+            if loss_parts
+            else torch.zeros((), device=self.device, requires_grad=True)
+        )
 
         return LossValues(loss=loss, losses_all=losses_all, stddev_all={})
 

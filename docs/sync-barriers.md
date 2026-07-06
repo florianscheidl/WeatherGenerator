@@ -20,16 +20,17 @@ Most barriers found in the original investigation have been eliminated:
 | Fix | Commit |
 |-----|--------|
 | EmbeddingEngine: size scatter target from tensor shape instead of `.item()` | `3a895bd9` |
-| EmbeddingEngine: replace per-step assert on GPU reduction with try/except | `e02d143e` |
+| EmbeddingEngine: replace per-step assert on GPU reduction with try/except | `e02d143e` (superseded by `0c6f90f7`: exact host-side check on `tokens_lens_cpu`) |
 | Varlen attention blocks accept host-side `max_*_len` ints; static bounds threaded from all encoder engines (local, adapter, aggregation) and readout kv side | `4a470033` |
 | Target readout q side: `target_coords_lens` max precomputed on CPU in the dataset workers | `31e6b01d` |
 | Encoder wrapper: host-side chunk offsets, split sizes, and index-based (instead of boolean-mask) selection/scatter, using a pinned CPU copy of `tokens_lens` | working tree (not yet committed) |
 | EmbeddingEngine index builders: shape-stable `searchsorted` formulation replaces boolean-mask compression (and the tensor-valued `arange` bound) | working tree (not yet committed) |
-| Model target loop: NaN guard on the coord embeddings (`if torch.isnan(tc_tokens).any()`) made opt-in via `pred_nan_check` (default off) | working tree (not yet committed) |
+| Model target loop: NaN guard on the coord embeddings (`if torch.isnan(tc_tokens).any()`) made configurable via `pred_nan_check` — default flipped back to **on** (`6ac052ef`) after the loss analysis showed a disabled guard silently voids whole optimizer steps via the GradScaler on NaN | working tree + `6ac052ef` |
 | `AdaLayerNormLayer`: per-token conditioning expansion via `searchsorted` instead of single-arg `torch.repeat_interleave(x_lens)` (data-dependent output size → sync at the top of every wrapped readout block, forward and checkpoint-recompute) | working tree (not yet committed) |
 | `predict_decoders`: `tokens_nbors_lens[0] = 0` (scalar setitem on a GPU tensor → pageable H2D copy + sync per forecast step, right before the first readout `NamedLinear`) replaced with in-place `[:1].zero_()` | working tree (not yet committed) |
 | `tokens_to_latent_state`: indexing with the python lists `register_token_idxs`/`class_token_idxs` (list → CPU index tensor → pageable H2D copy + sync, twice, after the readout at step 0) replaced with plain slices (the ranges are contiguous) | working tree (not yet committed) |
 | Loss calculation (`loss_module_physical.py`, `loss_module_ssl.py`): all `torch.tensor(scalar, device=...)` accumulators → `torch.zeros(())`; counters and per-channel nan-masking moved on-device; substep boolean masks → host-computed index tensors (pinned); per-stream channel weights cached on device; per-channel `w.item()` → one `tolist()` | working tree (not yet committed) |
+| Loss calculation, second pass: the `torch.zeros(())` accumulator/counter chains (one memset + one kernel per term, fwd and bwd) restructured into python lists reduced once per level with `torch.stack(...).sum()`; counters became one batched `(stack > 0).any()` per timestep; per-channel avg logging one stacked `nan_to_num().sum()` per (stream, loss fct). See `docs/sync-barriers-backward-pass.md`. | working tree (not yet committed) |
 
 **Still open** (conditional paths only):
 
@@ -151,15 +152,15 @@ Passes the static bound `num_healpix_cells + num_class_tokens + num_register_tok
 `if torch.isnan(tc_tokens).any():` before the target readout branched on a GPU reduction —
 a full device sync per stream, per forecast step (it shows up in traces immediately before
 the `tcs_lens` `torch.cat` preceding `TargetPredictionEngineClassic`). There is no sync-free
-way to keep a host-side branch, so the guard is now opt-in via `pred_nan_check: true`
-(default off).
+way to keep a host-side branch, so the guard is configurable via `pred_nan_check`.
 
-Context for that trade-off: the guard only fires once the coord-embedding weights are
-already NaN — i.e. training has already diverged — and merely lets the run continue with
-that stream's readout skipped. On fp16 runs `torch.amp.GradScaler` independently skips
-optimizer steps with non-finite gradients; bf16 runs (`NoOpGradScaler`) have no other NaN
-protection, so enable the flag there if limping past a diverged decoder matters more than
-the per-step sync.
+The default was initially off, then flipped back to **on** (`6ac052ef`): with the guard off,
+NaN coord embeddings flow into the loss, and on fp16 runs `torch.amp.GradScaler` then
+*silently skips the whole optimizer step* (and halves the loss scale) — the loss curve
+degrades with no visible error, which nullified the speedup in practice. With the guard on,
+only the affected stream is dropped and the step still trains. Disable it
+(`pred_nan_check: false`) only when chasing the last per-step sync on a run known to be
+NaN-free.
 
 ### 9. AdaLayerNormLayer (`norms.py`) — ✅ resolved (working tree)
 
@@ -179,14 +180,15 @@ training step right after the forward:
 
 - `torch.tensor(0.0, device=...)` accumulators at five nesting levels (per stream,
   timestep, correspondence, loss function) and `torch.tensor(sw, device=...)` for the
-  spoof weight — each a pageable H2D copy + sync (trigger 6/5). Replaced with
-  `torch.zeros((), device=...)` (device kernel) and a plain python float.
+  spoof weight — each a pageable H2D copy + sync (trigger 6/5). First replaced with
+  `torch.zeros((), device=...)` accumulators, then restructured entirely (see the second
+  pass below) — the spoof weight is a plain python float.
 - Host branches on device values: `1 if loss > 0.0 else 0`, `if loss_cur_w > 0.0`,
   `if ctr_... > 0`, `if loss == 0.0` — one bool sync each, per loop iteration. The whole
-  counter chain now stays on device (`ctr + (x > 0)`, `clamp(min=1)` divisions); the
-  loss==0 misconfiguration warning only runs during the first three steps.
+  counter chain now stays on device; the loss==0 misconfiguration warning only runs
+  during the first three steps.
 - Per-channel `v != 0.0` when filling the logging dict — a sync per channel per loss
-  function. Replaced with one `torch.where` per loss-function call; the avg aggregation
+  function. Replaced with one `masked_fill` per loss-function call; the avg aggregation
   handles the resulting on-device nan markers without host reads.
 - `mask_t = torch.tensor(t == target_times).to(device, non_blocking=True)` per substep —
   unpinned copy (sync) *and* the downstream `target[mask_t]` boolean indexing synced
@@ -196,6 +198,33 @@ training step right after the forward:
 - `torch.tensor(stream_info["target_channel_weights"]).to(device)` per stream per step —
   now cached on device at first use (the weights are static config).
 - `w.item()` per channel for EMA-weight logging — one batched `tolist()` per stream.
+
+**Second pass — stacked reductions (working tree).** The `torch.zeros(())`
+accumulator/counter design was itself a backward-pass problem: every `torch.zeros(())`
+is a `cudaMemsetAsync`, every chained update (`acc = acc + x`, `ctr + (x > 0)`,
+`clamp`, tensor-denominator division) a separate kernel with a stride-0 operand that
+TensorIterator cannot vectorize (`unrolled_elementwise_kernel`) — hundreds of tiny
+kernels per step, mirrored again in backward, clustering in traces around the
+prediction-head `Linear.backward` (full analysis and profile signatures:
+`docs/sync-barriers-backward-pass.md`). Restructured to collect terms in python lists
+and reduce once per level:
+
+- The per-stream loss is a *flat* `torch.stack(loss_parts).sum()` across timesteps and
+  correspondences — the nesting only ever mattered for the counters, not the sum.
+- The counter chain (`ctr_loss_fcts`/`ctr_batch`/`ctr_timesteps`) is exactly "any
+  non-spoof positive loss in this timestep", so it collapses to one batched
+  `(torch.stack(counted).detach() > 0.0).any()` per timestep and one
+  `stack(flags).sum().clamp(min=1)` per stream (same again across streams).
+- Same pattern at the substep level (`_loss_per_loss_function`) and in
+  `loss_module_ssl.py`; the per-channel "avg" logging reduces with one stacked
+  `nan_to_num().sum()` per (stream, loss function) instead of two kernels per entry.
+- No `torch.zeros(())` remains outside degenerate all-empty fallbacks; the whole loss
+  needs ~1 kernel per timestep plus ~6 per stream on top of the loss functions
+  themselves.
+
+Values *and* gradients verified equal to the chained-accumulator version over
+randomized nesting structures (spoofed targets, zero losses, empty levels). Float
+summation order changes (stacked vs sequential), so equivalent but not bit-identical.
 
 Still open in the loss path: `loss_value.item()` per SSL loss head
 (`loss_module_ssl.py`) — only relevant for SSL runs; and whatever the trainer does with
@@ -234,8 +263,8 @@ Fallback: if a code path arrives without the host copy, `assimilate_local` does 
 | ForecastingEngine | ✅ none | unchanged |
 | TargetPredictionEngine(Classic) | ✅ none | constant kv max (9), exact q max from dataset |
 | Encoder wrapper | ✅ none | host bookkeeping via `tokens_lens_cpu` |
-| Model target loop | ✅ none by default | NaN guard opt-in via `pred_nan_check` |
-| Loss (physical) | ✅ none steady-state | device accumulators/counters; loss==0 check first 3 steps only |
+| Model target loop | ⚠️ one guard sync per stream/fstep by default | NaN guard on by default (`pred_nan_check`, see §8) — off only for runs known NaN-free |
+| Loss (physical) | ✅ none steady-state | stacked per-level reductions (no 0-dim accumulators); loss==0 check first 3 steps only |
 
 ---
 

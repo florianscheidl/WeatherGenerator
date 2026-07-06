@@ -244,12 +244,11 @@ class LossPhysical(LossModuleBase):
         Compute loss for given loss function
         """
 
-        # accumulators live on the device; scalar torch.tensor(0.0, device=...) would be a
-        # synchronizing pageable host-to-device copy, and `if loss > 0.0` a device read
-        loss_lfct = torch.zeros((), device=target.device, requires_grad=True)
-        losses_chs = torch.zeros(target.shape[-1], device=target.device, dtype=torch.float32)
-
-        ctr_substeps = torch.zeros((), device=target.device)
+        # collect per-substep losses and reduce once with stack().sum(); chained 0-dim
+        # accumulators would launch one kernel per substep and, starting from
+        # torch.zeros(()), one cudaMemsetAsync each (docs/sync-barriers-backward-pass.md)
+        losses_t = []
+        losses_chs_t = []
         for i_t, idxs_t in enumerate(substep_masks):
             if weights_locations[i_t] is not None:
                 num_points = target.shape[0] if idxs_t is None else idxs_t.shape[0]
@@ -259,17 +258,22 @@ class LossPhysical(LossModuleBase):
             pred_t = pred if idxs_t is None else pred.index_select(1, idxs_t)
             loss, loss_chs = loss_fct(target_t, pred_t, weights_channels, weights_locations[i_t])
 
-            # accumulate loss
-            loss_lfct = loss_lfct + loss
-            losses_chs = losses_chs + loss_chs.detach() if len(loss_chs) > 0 else losses_chs
-            ctr_substeps = ctr_substeps + (loss > 0.0)
+            losses_t.append(loss)
+            if len(loss_chs) > 0:
+                losses_chs_t.append(loss_chs.detach())
 
-        # normalize over forecast steps in window
-        denom = ctr_substeps.clamp(min=1.0)
-        losses_chs = losses_chs / denom
+        losses_stacked = torch.stack(losses_t)
+        # normalize over the substeps with a non-zero loss (single batched comparison
+        # instead of one `loss > 0.0` kernel per substep; stays on device, no sync)
+        denom = (losses_stacked.detach() > 0.0).sum().clamp(min=1)
 
         # TODO: substep weight
-        loss_lfct = loss_lfct / denom
+        loss_lfct = losses_stacked.sum() / denom
+
+        if losses_chs_t:
+            losses_chs = torch.stack(losses_chs_t).sum(0, dtype=torch.float32) / denom
+        else:
+            losses_chs = torch.zeros(target.shape[-1], device=target.device, dtype=torch.float32)
 
         return loss_lfct, losses_chs
 
@@ -306,12 +310,14 @@ class LossPhysical(LossModuleBase):
 
         self._num_compute_loss_calls += 1
 
-        # gradient loss; all scalar accumulators and counters are created and kept on the
-        # device: torch.tensor(0.0, device=...) is a synchronizing pageable host-to-device
-        # copy and host-side counters would require reading device values back per branch
-        loss = torch.zeros((), device=self.device, requires_grad=True)
-        # counter for non-empty targets
-        ctr_streams = torch.zeros((), device=self.device)
+        # per-stream weighted losses and non-empty flags. Every level collects its terms
+        # in a python list and reduces once with torch.stack(...).sum(): chained 0-dim
+        # accumulators would launch one kernel per term plus one cudaMemsetAsync per
+        # torch.zeros(()), hundreds per step (docs/sync-barriers-backward-pass.md).
+        # Everything stays on the device; host-side counters would require reading device
+        # values back per branch (a sync), python floats would sync as pageable copies.
+        stream_losses = []
+        stream_flags = []
 
         # initialize dictionaries for detailed loss tracking and standard deviation statistics
         # create tensor for each stream
@@ -342,9 +348,12 @@ class LossPhysical(LossModuleBase):
             if len(targets.physical) - len(targets.output_idxs) > 0:
                 output_step_loss_weights.insert(0, None)
 
-            # loss_stream: loss for given stream
-            loss_stream = torch.zeros((), device=self.device, requires_grad=True)
-            ctr_timesteps = torch.zeros((), device=self.device)
+            # flat list of every weighted loss term of this stream; the per-timestep /
+            # per-correspondence nesting only matters for the counters, not for the sum
+            loss_parts = []
+            # one flag per timestep that had non-spoof loss terms: True if any is positive
+            # (equivalent to the nested any-per-correspondence, any-per-timestep counting)
+            timestep_flags = []
             for timestep_idx, (preds_cur, target_cur) in enumerate(
                 zip(preds.physical, targets.physical, strict=True)
             ):
@@ -361,9 +370,8 @@ class LossPhysical(LossModuleBase):
 
                 output_step_weight = output_step_loss_weights[timestep_idx]
 
-                # loss_timestep: loss for given timestep
-                loss_timestep = torch.zeros((), device=self.device, requires_grad=True)
-                ctr_batch = torch.zeros((), device=self.device)
+                # non-spoof loss terms of this timestep, for the counting flag
+                counted_parts = []
                 for pred, pred_params in zip(preds_batch, output_info, strict=True):
                     # source has a unique target but index is not invariant with multiple
                     # target_aux calculators
@@ -392,9 +400,6 @@ class LossPhysical(LossModuleBase):
                         stream_info, targets_coords_batch[target_idx], substep_masks
                     )
 
-                    # loss_st_corr: loss for give source-target correspondence
-                    loss_st_corr = torch.zeros((), device=self.device, requires_grad=True)
-                    ctr_loss_fcts = torch.zeros((), device=self.device)
                     for loss_fct, loss_fct_weight, loss_fct_name in self.loss_fcts:
                         # skip is loss is not computed for this sample
                         if loss_fct_name not in pred_params.global_params["loss"]:
@@ -431,10 +436,8 @@ class LossPhysical(LossModuleBase):
 
                         # mark channels without contribution as nan on the device; the
                         # per-channel `v != 0.0` branch would sync once per channel
-                        loss_lfct_chs_masked = torch.where(
-                            loss_lfct_chs != 0.0,
-                            loss_lfct_chs,
-                            torch.full_like(loss_lfct_chs, torch.nan),
+                        loss_lfct_chs_masked = loss_lfct_chs.masked_fill(
+                            loss_lfct_chs == 0.0, torch.nan
                         )
                         for ch_n, v in zip(target_channels, loss_lfct_chs_masked, strict=True):
                             losses_all[stream_name][str(timestep_idx)][loss_fct_name][ch_n] = (
@@ -453,24 +456,40 @@ class LossPhysical(LossModuleBase):
                         # Add the weighted and normalized loss from this loss function to the total
                         # batch loss
                         loss_cur_w = spoof_weight * loss_fct_weight * loss_lfct * output_step_weight
-                        loss_st_corr = loss_st_corr + loss_cur_w
-                        # counters stay on device: `if loss_cur_w > 0.0` would be a sync
+                        loss_parts.append(loss_cur_w)
                         if not is_spoof:
-                            ctr_loss_fcts = ctr_loss_fcts + (loss_cur_w > 0.0)
+                            counted_parts.append(loss_cur_w)
 
-                    loss_timestep = loss_timestep + loss_st_corr
-                    ctr_batch = ctr_batch + (ctr_loss_fcts > 0.0)
+                if counted_parts:
+                    # single batched comparison per timestep instead of one `> 0.0` kernel
+                    # per loss term; stays on device, no sync
+                    timestep_flags.append((torch.stack(counted_parts).detach() > 0.0).any())
 
-                loss_stream = loss_stream + loss_timestep
-                ctr_timesteps = ctr_timesteps + (ctr_batch > 0)
+            if not loss_parts:
+                # stream contributed nothing (same as adding 0 with count 0)
+                continue
 
-            denom = ctr_timesteps.clamp(min=1.0)
-            loss = loss + (stream_loss_weight * loss_stream) / denom
-
-            ctr_streams = ctr_streams + (ctr_timesteps > 0)
+            loss_stream = torch.stack(loss_parts).sum()
+            if timestep_flags:
+                ctr_timesteps = torch.stack(timestep_flags).sum()
+                stream_losses.append(
+                    (stream_loss_weight * loss_stream) / ctr_timesteps.clamp(min=1)
+                )
+                stream_flags.append(ctr_timesteps > 0)
+            else:
+                # only spoofed targets: all terms are zero-weighted; counts as empty stream
+                # but keeps the (zero-valued) graph edges, as before
+                stream_losses.append(stream_loss_weight * loss_stream)
 
         # normalize by all targets and forecast steps that were non-empty
         # (with each having an expected loss of 1 for an uninitalized neural net)
+        if not stream_losses:
+            loss = torch.zeros((), device=self.device, requires_grad=True)
+        elif stream_flags:
+            loss = torch.stack(stream_losses).sum() / torch.stack(stream_flags).sum().clamp(min=1)
+        else:
+            loss = torch.stack(stream_losses).sum()
+
         # misconfiguration sanity check: reading the device loss is a sync, so only check
         # during the first steps where a misconfiguration would already show
         if self._num_compute_loss_calls <= 3 and bool(loss == 0.0):
@@ -478,7 +497,6 @@ class LossPhysical(LossModuleBase):
                 "Loss is 0.0, likely incorrect configuration. Check stream"
                 " support time and training configuration."
             )
-        loss = loss / ctr_streams.clamp(min=1.0)
 
         def _nested_dict():
             return defaultdict(dict)
@@ -493,21 +511,30 @@ class LossPhysical(LossModuleBase):
                         reordered_losses[stream_name][loss_fct_name][ch_n][output_step] = v
 
         # Calculate per stream, per lfct average across channels and output_steps;
-        # values are a mix of python floats (nan markers) and 0-dim device tensors (which
-        # may hold nan for zero-contribution channels) — nans count as 0 contribution.
+        # values are a mix of python floats (nan markers and ema weights) and 0-dim device
+        # tensors (which may hold nan for zero-contribution channels) — nans count as 0
+        # contribution. Tensor values are reduced with one stacked nan_to_num + sum per
+        # (stream, loss function) instead of one nan_to_num and one add kernel per entry.
         # All tensor arithmetic stays on device; no host reads.
         for stream_name, lfct_dict in reordered_losses.items():
             for loss_fct_name, ch_dict in lfct_dict.items():
-                total = 0.0
+                tensor_vals = []
+                float_total = 0.0
                 count = 0
                 for ch_n, output_step_dict in ch_dict.items():
                     if ch_n != "avg":
                         for _, v in output_step_dict.items():
                             if torch.is_tensor(v):
-                                total = total + v.nan_to_num(0.0)
+                                tensor_vals.append(v)
                             elif not (type(v) is float and np.isnan(v)):
-                                total = total + v
+                                float_total += v
                             count += 1
+                if tensor_vals:
+                    total = torch.stack(tensor_vals).nan_to_num(0.0).sum()
+                    if float_total != 0.0:
+                        total = total + float_total
+                else:
+                    total = float_total
                 reordered_losses[stream_name][loss_fct_name]["avg"] = total / count
 
         # Return all computed loss components encapsulated in a ModelLoss dataclass
