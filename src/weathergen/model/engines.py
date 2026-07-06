@@ -119,16 +119,23 @@ class EmbeddingEngine(torch.nn.Module):
             tokens_all = torch.empty_like(cat_embeds)
             tokens_all.scatter_(0, scatter_idxs, cat_embeds)
 
-        pe_idxs = self.get_pe_idxs_vectorized(batch, cat_embeds.shape[0])
-        try:
-            tokens_all = tokens_all + pe_embed[pe_idxs]
-        except IndexError as e:
-            max_tokens = self.cf.get("ae_local_max_tokens_per_cell", 64)
-            actual_max = batch.tokens_lens.flatten(0, 2).sum(0).max().item()
+        # validate the per-cell token count (summed over streams, the quantity indexing
+        # pe_embed and bounding the varlen attention seqlens) on the host copy of the
+        # lens: no device sync, and an out-of-range pe index would otherwise only trigger
+        # an uninformative async device-side assert far from the cause
+        tokens_lens_cpu = getattr(batch, "tokens_lens_cpu", None)
+        if tokens_lens_cpu is None:
+            tokens_lens_cpu = batch.tokens_lens.cpu()
+        max_tokens = self.cf.get("ae_local_max_tokens_per_cell", 64)
+        actual_max = int(tokens_lens_cpu.sum(2).max())
+        if actual_max > max_tokens:
             raise RuntimeError(
                 f"Token limit exceeded in EmbeddingEngine: {actual_max} > {max_tokens}. "
                 f"Increase ae_local_max_tokens_per_cell in config or check data."
-            ) from e
+            )
+
+        pe_idxs = self.get_pe_idxs_vectorized(batch, cat_embeds.shape[0])
+        tokens_all = tokens_all + pe_embed[pe_idxs]
 
         return tokens_all
 
@@ -225,8 +232,8 @@ class LocalAssimilationEngine(torch.nn.Module):
         super(LocalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_local_blocks = torch.nn.ModuleList()
-        # static upper bound on tokens per cell, enforced upstream by the pe_embed size in
-        # EmbeddingEngine; passed to varlen attention to avoid a device sync per block
+        # static upper bound on tokens per cell, enforced upstream by the host-side check
+        # in EmbeddingEngine; passed to varlen attention to avoid a device sync per block
         self.max_seqlen = cf.get("ae_local_max_tokens_per_cell", 64)
 
         for _ in range(self.cf.ae_local_num_blocks):
@@ -275,8 +282,8 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         super(Local2GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_adapter = torch.nn.ModuleList()
-        # static upper bound on tokens per cell (kv side), enforced upstream by the pe_embed
-        # size in EmbeddingEngine; passed to varlen attention to avoid device syncs
+        # static upper bound on tokens per cell (kv side), enforced upstream by the
+        # host-side check in EmbeddingEngine; passed to varlen attention to avoid device syncs
         self.max_kv_seqlen = cf.get("ae_local_max_tokens_per_cell", 64)
 
         self.ae_adapter.append(
