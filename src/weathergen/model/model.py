@@ -768,8 +768,11 @@ class Model(torch.nn.Module):
         idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).flatten(0, 1)
         tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
         # TODO: precompute in model_params?
+        # 1-ring neighborhood incl. the cell itself; also the (constant) max seqlen for the
+        # varlen cross-attention over the latent, passed as host int to avoid a device sync
+        num_nbors = model_params.hp_nbours.shape[1]
         tokens_nbors_lens = torch.full(
-            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
+            (s[0] * s[1] + 1,), fill_value=num_nbors, dtype=torch.int32, device=tokens_nbors.device
         )
         tokens_nbors_lens[0] = 0
 
@@ -813,6 +816,12 @@ class Model(torch.nn.Module):
                     ]
                 )
                 tcs_lens = torch.cat([torch.zeros(1, dtype=torch.int32, device=tcls.device), tcls])
+                # host-side max (precomputed on CPU at data prep), passed as flash-attn
+                # max_seqlen to avoid a device sync from tcs_lens.max() in the readout
+                max_tcs_len = max(
+                    sample.streams_data[stream_name].target_coords_lens_max[step]
+                    for sample in batch.samples
+                )
 
                 if self.cf.decoder_type == "Linear":
                     pred = self.target_token_engines[stream_name](
@@ -827,6 +836,8 @@ class Model(torch.nn.Module):
                         latent_lens=tokens_nbors_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
+                        max_latent_len=num_nbors,
+                        max_output_len=max_tcs_len,
                     )
 
                     # final prediction head to map back to physical space

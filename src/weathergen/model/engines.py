@@ -212,6 +212,9 @@ class LocalAssimilationEngine(torch.nn.Module):
         super(LocalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_local_blocks = torch.nn.ModuleList()
+        # static upper bound on tokens per cell, enforced upstream by the pe_embed size in
+        # EmbeddingEngine; passed to varlen attention to avoid a device sync per block
+        self.max_seqlen = cf.get("ae_local_max_tokens_per_cell", 64)
 
         for _ in range(self.cf.ae_local_num_blocks):
             self.ae_local_blocks.append(
@@ -240,7 +243,10 @@ class LocalAssimilationEngine(torch.nn.Module):
 
     def forward(self, tokens_c, cell_lens_c, use_reentrant):
         for block in self.ae_local_blocks:
-            tokens_c = block(tokens_c, cell_lens_c)
+            if isinstance(block, MultiSelfAttentionHeadVarlen):
+                tokens_c = block(tokens_c, cell_lens_c, max_x_len=self.max_seqlen)
+            else:
+                tokens_c = block(tokens_c, cell_lens_c)
         return tokens_c
 
 
@@ -256,6 +262,9 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         super(Local2GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_adapter = torch.nn.ModuleList()
+        # static upper bound on tokens per cell (kv side), enforced upstream by the pe_embed
+        # size in EmbeddingEngine; passed to varlen attention to avoid device syncs
+        self.max_kv_seqlen = cf.get("ae_local_max_tokens_per_cell", 64)
 
         self.ae_adapter.append(
             MultiCrossAttentionHeadVarlenSlicedQ(
@@ -307,12 +316,24 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
 
     def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c):
         for block in self.ae_adapter:
-            tokens_global_c = block(
-                tokens_global_c,
-                tokens_c,
-                q_cells_lens_c,
-                cell_lens_c,
-            )
+            if isinstance(block, MultiCrossAttentionHeadVarlenSlicedQ):
+                # q_cells_lens is all-ones (one query token per cell sequence, see
+                # ModelParams.q_cells_lens), so the max query seqlen is exactly 1
+                tokens_global_c = block(
+                    tokens_global_c,
+                    tokens_c,
+                    q_cells_lens_c,
+                    cell_lens_c,
+                    max_q_len=1,
+                    max_kv_len=self.max_kv_seqlen,
+                )
+            else:
+                tokens_global_c = block(
+                    tokens_global_c,
+                    tokens_c,
+                    q_cells_lens_c,
+                    cell_lens_c,
+                )
         return tokens_global_c
 
 
@@ -389,6 +410,9 @@ class QueryAggregationEngine(torch.nn.Module):
         super(QueryAggregationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
+        # per-sample sequence = unmasked cells + class/register tokens; the cell count is
+        # statically bounded, so pass the bound to varlen attention to avoid device syncs
+        self.max_seqlen = num_healpix_cells + cf.num_class_tokens + cf.num_register_tokens
 
         self.ae_aggregation_blocks = torch.nn.ModuleList()
 
@@ -446,7 +470,7 @@ class QueryAggregationEngine(torch.nn.Module):
         for block in self.ae_aggregation_blocks:
             aux_info = None
             if isinstance(block, MultiSelfAttentionHeadVarlen):
-                tokens = block(tokens, x_lens=batch_lens, coords=coords)
+                tokens = block(tokens, x_lens=batch_lens, coords=coords, max_x_len=self.max_seqlen)
             else:
                 tokens = block(tokens, coords, aux_info)
         return tokens
@@ -775,7 +799,16 @@ class TargetPredictionEngineClassic(nn.Module):
                 )
             )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        max_latent_len=None,
+        max_output_len=None,
+    ):
         tc_tokens = output
         tcs_lens = output_lens
         tokens_stream = latent
@@ -784,7 +817,26 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tcs_lens,
+                    tcs_aux,
+                    max_x_len=max_output_len,
+                    use_reentrant=False,
+                )
+            elif isinstance(block, MultiCrossAttentionHeadVarlen):
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tokens_stream,
+                    tcs_lens,
+                    tokens_lens,
+                    tcs_aux,
+                    max_q_len=max_output_len,
+                    max_kv_len=max_latent_len,
+                    use_reentrant=False,
+                )
             else:
                 tc_tokens = checkpoint(
                     block,
@@ -939,7 +991,16 @@ class TargetPredictionEngine(nn.Module):
                     f"{self.cf.decoder_type} is not implemented for prediction heads"
                 )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        max_latent_len=None,
+        max_output_len=None,
+    ):
         latent = (
             self.dropout(self.latent_in_norm(latent + self.pos_embed))
             if self.cf.decoder_type != "PerceiverIOCoordConditioning"
@@ -954,6 +1015,8 @@ class TargetPredictionEngine(nn.Module):
                     coords=coordinates,
                     latent_lens=latent_lens,
                     output_lens=output_lens,
+                    max_latent_len=max_latent_len,
+                    max_output_len=max_output_len,
                     use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
@@ -964,6 +1027,8 @@ class TargetPredictionEngine(nn.Module):
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
+                    max_x_len=max_output_len,
+                    max_kv_len=max_latent_len,
                     use_reentrant=False,
                 )
             else:
@@ -972,6 +1037,7 @@ class TargetPredictionEngine(nn.Module):
                     x=output,
                     x_lens=output_lens,
                     aux=latent[:, 0],
+                    max_x_len=max_output_len,
                     use_reentrant=False,
                 )
         output = (

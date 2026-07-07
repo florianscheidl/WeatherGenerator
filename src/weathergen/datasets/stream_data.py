@@ -97,6 +97,10 @@ class StreamData:
         self.target_coords_lens = [
             torch.tensor([0 for _ in range(self.healpix_cells)]) for _ in range(output_steps)
         ]
+        # host-side max of target_coords_lens per output step, computed on CPU before the
+        # lens are moved to the device; consumed as flash-attn max_seqlen (a Python int)
+        # to avoid a host-device sync from target_coords_lens.max() in the model
+        self.target_coords_lens_max = [0 for _ in range(output_steps)]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
         self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
 
@@ -240,6 +244,9 @@ class StreamData:
         self.target_tokens[fstep] = targets
         self.target_coords[fstep] = target_coords
         self.target_coords_lens[fstep] = target_coords_per_cell
+        self.target_coords_lens_max[fstep] = (
+            int(target_coords_per_cell.max()) if target_coords_per_cell.numel() > 0 else 0
+        )
         self.target_times_raw[fstep] = times_raw
         self.target_coords_raw[fstep] = target_coords_raw
         self.idxs_inv[fstep] = idxs_inv
@@ -328,6 +335,9 @@ class StreamData:
 
         self.target_coords[fstep] = target_coords
         self.target_coords_lens[fstep] = target_coords_per_cell
+        self.target_coords_lens_max[fstep] = (
+            int(target_coords_per_cell.max()) if target_coords_per_cell.numel() > 0 else 0
+        )
 
         self.target_is_spoof[fstep] = is_spoof
 
