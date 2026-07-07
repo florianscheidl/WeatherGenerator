@@ -137,8 +137,8 @@ training_config:
   # training_mode: "masking", "student_teacher", "latent_loss"
   training_mode: ["masking"]
 
-  num_mini_epochs: 56
-  samples_per_mini_epoch: 512
+  num_mini_epochs: 32
+  samples_per_mini_epoch: 4096
   shuffle: True
 
   start_date: 2016-01-01T00:00
