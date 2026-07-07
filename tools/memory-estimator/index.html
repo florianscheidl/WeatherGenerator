@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeatherGenerator memory estimator</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1a1d21; --muted: #6b7280;
+    --border: #e2e5ea; --accent: #2563eb; --warn: #dc2626; --ok: #16a34a;
+    --c-params: #2563eb; --c-grads: #db2777; --c-optim: #7c3aed;
+    --c-acts: #ea580c; --c-over: #9ca3af;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1e2127; --text: #e5e7eb; --muted: #9ca3af;
+      --border: #33373f; --accent: #60a5fa; --warn: #f87171; --ok: #4ade80;
+      --c-params: #60a5fa; --c-grads: #f472b6; --c-optim: #a78bfa;
+      --c-acts: #fb923c; --c-over: #6b7280;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    padding: 14px 22px; border-bottom: 1px solid var(--border); background: var(--panel);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  .layout { display: flex; align-items: flex-start; gap: 18px; padding: 18px 22px; max-width: 1650px; }
+  /* ---------- controls ---------- */
+  #controls { width: 340px; flex: none; display: flex; flex-direction: column; gap: 12px; }
+  .group { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .group > summary {
+    cursor: pointer; padding: 8px 12px; font-weight: 600; font-size: 13px;
+    list-style: none; user-select: none;
+  }
+  .group > summary::before { content: "▸ "; color: var(--muted); }
+  .group[open] > summary::before { content: "▾ "; }
+  .group .rows { padding: 4px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .row { display: grid; grid-template-columns: 1fr 86px; align-items: center; gap: 8px; }
+  .row label { font-size: 12.5px; }
+  .row .hint { display: block; color: var(--muted); font-size: 11px; }
+  input[type=number] {
+    width: 100%; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px;
+    background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px;
+  }
+  input[type=checkbox] { width: 15px; height: 15px; }
+  button {
+    padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+    background: var(--panel); color: var(--text); font: inherit; font-size: 12.5px;
+  }
+  button:hover { border-color: var(--accent); }
+  /* ---------- results ---------- */
+  #results { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; }
+  .headline { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  .headline .total { font-size: 32px; font-weight: 700; }
+  .headline .total.over { color: var(--warn); }
+  .headline .total.under { color: var(--ok); }
+  .headline .budget, .headline .peakat { color: var(--muted); }
+  #chartwrap { position: relative; }
+  #chart { width: 100%; height: 360px; display: block; }
+  #tooltip {
+    position: absolute; pointer-events: none; display: none; z-index: 5;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); min-width: 210px;
+  }
+  #tooltip .t { font-weight: 600; margin-bottom: 4px; }
+  #tooltip .r { display: flex; justify-content: space-between; gap: 14px; }
+  #tooltip .key, #legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
+  #legend { display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 8px; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.peak td { font-weight: 700; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .badge {
+    display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px;
+    border: 1px solid var(--border); color: var(--muted); margin-left: 6px;
+  }
+  .scroll { max-height: 420px; overflow-y: auto; }
+  .overx { overflow-x: auto; }
+  /* stream table */
+  #streams td input[type=number] { width: 62px; padding: 2px 5px; }
+  #streams td { white-space: nowrap; }
+  #streams .ro { color: var(--muted); }
+  #streams .off td { opacity: 0.45; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>WeatherGenerator training-memory estimator</h1>
+  <span class="sub">per-GPU timeline over one training step &middot; checkpointing, FSDP &amp; per-stream data modeled &middot; see README.md</span>
+</header>
+
+<div class="layout">
+  <div id="controls">
+    <div style="display:flex; gap:8px;">
+      <button id="preset-lowres">Reset: operan_georing_avhrr lowres</button>
+    </div>
+    <!-- groups generated from SCHEMA -->
+  </div>
+
+  <div id="results">
+    <div class="card">
+      <div class="headline">
+        <span class="total" id="total">–</span>
+        <span class="budget" id="budgetLabel"></span>
+        <span class="peakat" id="peakAt"></span>
+      </div>
+      <div id="chartwrap">
+        <svg id="chart" preserveAspectRatio="none"></svg>
+        <div id="tooltip"></div>
+      </div>
+      <div id="legend"></div>
+    </div>
+
+    <div class="card">
+      <h2>Streams <span class="badge">from config/streams/operan_georing_avhrr_synop_lowres — grey columns fixed by config, white editable</span></h2>
+      <div class="overx"><table id="streams"></table></div>
+      <div class="note">
+        <b>keep</b> = per-stream <code>masking_override…rate</code> (a <i>keep</i>-rate in the code:
+        satellites keep 100% of source tokens, ERA5_in and SYNOP only 10%).
+        <b>src tokens</b> = raw source tokens per input step (×1000), before the keep-rate —
+        data-dependent, not in the config; defaults are rough guesses, calibrate against a real run.
+        <b>targets</b> = decoded target points per forecast step (×1000); ERA5 o96 grid = 40.3k points.
+        Channel counts for obs streams come from the zarr, not the config — also estimates.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Timeline by phase <span class="badge" id="tokinfo"></span></h2>
+      <div class="scroll"><table id="phases"></table></div>
+      <div class="note" id="modeNote"></div>
+    </div>
+
+    <div class="card">
+      <h2>Parameters by module</h2>
+      <table id="params"></table>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * Stream definitions, extracted from
+ * config/streams/operan_georing_avhrr_synop_lowres/*.yml
+ *
+ * role      : in = forcing (encoder only), out = diagnostic
+ *             (decoder only), inout = both
+ * tokenSize : values per channel per token           [config]
+ * chan      : data channels        [config for era5/synop; zarr
+ *             (estimate) for obs streams]
+ * geo       : geoinfo channels                       [config]
+ * eDim/eBlocks : stream embedder transformer         [config]
+ * keep      : masking_override keep-rate             [config]
+ * etcDim    : embed_target_coords dim_embed          [config]
+ * outChan   : target channels                        [config]
+ * kTok      : raw source tokens per input step, ×1000 [GUESS —
+ *             data-dependent, calibrate against a run]
+ * kTgt      : target points per forecast step, ×1000  [era5:
+ *             o96 grid; synop: guess]
+ * ============================================================ */
+const STREAMS_DEF = [
+  { name: "ERA5_in",      role: "in",    tokenSize: 8,    chan: 68, geo: 9, eDim: 512, eBlocks: 2, keep: 0.1, kTok: 5.0 },
+  { name: "ERA5 (out)",   role: "out",   tokenSize: 8,    chan: 68, geo: 9, etcDim: 512, outChan: 68, kTgt: 40.3 },
+  { name: "AVHRR/IASI",   role: "in",    tokenSize: 512,  chan: 15, geo: 4, eDim: 256, eBlocks: 2, keep: 1.0, kTok: 4.0 },
+  { name: "SEVIRI IR",    role: "in",    tokenSize: 1024, chan: 8,  geo: 6, eDim: 512, eBlocks: 2, keep: 1.0, kTok: 2.5 },
+  { name: "GOES ABI IR",  role: "in",    tokenSize: 1024, chan: 10, geo: 6, eDim: 512, eBlocks: 2, keep: 1.0, kTok: 2.5 },
+  { name: "Himawari IR",  role: "in",    tokenSize: 1024, chan: 10, geo: 6, eDim: 512, eBlocks: 2, keep: 1.0, kTok: 2.5 },
+  { name: "GOES ABI VIS", role: "in",    tokenSize: 1024, chan: 2,  geo: 1, eDim: 512, eBlocks: 2, keep: 1.0, kTok: 1.5 },
+  { name: "Himawari VIS", role: "in",    tokenSize: 1024, chan: 2,  geo: 1, eDim: 512, eBlocks: 2, keep: 1.0, kTok: 1.5 },
+  { name: "SYNOP",        role: "inout", tokenSize: 64,   chan: 7,  geo: 7, eDim: 512, eBlocks: 2, keep: 0.1, kTok: 0.5,
+                          etcDim: 512, outChan: 7, kTgt: 15 },
+];
+let streams = STREAMS_DEF.map(s => ({ ...s, on: true }));
+
+/* ---------------- global inputs ---------------- */
+const SCHEMA = [
+  { group: "Data & run", open: true, items: [
+    ["hpLevel",      "healpix_level", 5, {min:1, max:9, hint:"cells = 12·4^level"}],
+    ["batch",        "batch size per GPU", 1, {min:1}],
+    ["inputSteps",   "input (source) time steps", 1, {min:1}],
+    ["forecastSteps","decoded forecast steps", 2, {min:1, max:12, hint:"forecast.num_steps"}],
+    ["fill",         "unmasked-cell fraction", 1.0, {min:0.01, max:1, step:0.01, hint:"cells with source tokens"}],
+    ["tokenScale",   "scale all stream token counts ×", 1.0, {min:0.1, step:0.1, hint:"quick what-if on data volume"}],
+  ]},
+  { group: "Encoder", open: true, items: [
+    ["dLocal",       "ae_local_dim_embed", 2048, {min:64, step:64}],
+    ["localBlocks",  "ae_local_num_blocks", 4, {min:0}],
+    ["Q",            "ae_local_num_queries", 1, {min:1}],
+    ["adapterCross", "adapter cross-attn blocks", 2, {min:1, hint:"ae_adapter_num_blocks"}],
+    ["adapterP",     "adapter proj dim (heads·head_dim)", 2048, {min:64, step:64, hint:"ae_adapter_num_heads · ae_adapter_embed"}],
+    ["dGlobal",      "ae_global_dim_embed", 2048, {min:64, step:64}],
+    ["globalBlocks", "ae_global_num_blocks", 4, {min:0}],
+    ["globalMlpH",   "ae_global_mlp_hidden_factor", 2, {min:1}],
+    ["aggBlocks",    "ae_aggregation_num_blocks", 0, {min:0}],
+  ]},
+  { group: "Forecast engine", open: true, items: [
+    ["feBlocks",     "fe_num_blocks", 16, {min:0}],
+  ]},
+  { group: "Decoder (all decoded streams)", open: false, items: [
+    ["trLayers",     "target_readout num_layers", 2, {min:1}],
+    ["predSelfAtt",  "pred_self_attention", true, {bool:true}],
+    ["predHeadLayers","pred_head num_layers", 1, {min:1}],
+    ["ensSize",      "pred_head ens_size", 1, {min:1}],
+  ]},
+  { group: "Checkpointing, precision & FSDP", open: true, items: [
+    ["ckpt",         "activation checkpointing (as in code)", true, {bool:true}],
+    ["fsdp",         "FSDP (shard states across GPUs)", true, {bool:true}],
+    ["worldSize",    "world size (GPUs)", 1, {min:1}],
+    ["actBytes",     "bytes per activation element", 2, {min:1, max:4, hint:"bf16 = 2; also FSDP compute copies"}],
+    ["paramBytes",   "bytes per master param", 4, {min:1, max:4, hint:"fp32 master"}],
+    ["gradBytes",    "bytes per grad", 4, {min:1, max:4}],
+    ["optimBytes",   "optimizer bytes per param", 8, {min:0, hint:"AdamW m+v fp32"}],
+    ["ema",          "EMA weight copy (validate_with_ema)", true, {bool:true}],
+  ]},
+  { group: "Model assumptions (advanced)", open: false, items: [
+    ["attnMult",     "stored tensors per attn block (×N·D)", 7, {min:3, max:12, hint:"norm,q,k,v,attn-out,proj,qk-lnorm"}],
+    ["mlpExtra",     "stored tensors per MLP beyond hidden (×N·D)", 2, {min:1, max:4, hint:"MLP mult = extra + 2·hidden_factor"}],
+    ["asmMult",      "latent-assembly buffers (×N·D)", 3, {min:0, max:8, hint:"tokens_global build / scatter / cat"}],
+    ["gradActFrac",  "backward transient (× region recompute)", 0.15, {min:0, max:1, step:0.05, hint:"activation-grad buffers during a region's backward"}],
+    ["prefetch",     "FSDP units unsharded at once", 2, {min:1, max:4, hint:"current + prefetched"}],
+    ["overheadGB",   "fixed overhead (GB)", 2.5, {min:0, step:0.5, hint:"CUDA ctx, allocator, flash workspace"}],
+    ["budgetGB",     "GPU memory budget (GB)", 96, {min:1, hint:"GH200: 96"}],
+  ]},
+];
+
+const DEFAULTS = {};
+SCHEMA.forEach(g => g.items.forEach(([id,,def]) => DEFAULTS[id] = def));
+
+/* ============================================================
+ * Memory model. Timeline phases:
+ *   baseline → fwd per checkpoint region → loss
+ *   → bwd per region (reverse) → optimizer step → end
+ * Categories: params (sharded master + FSDP unshard transients),
+ * grads (first-touch alloc, sharded + unshard transient),
+ * optim (AdamW + EMA, constant), acts (input data + ckpt stash
+ * + recompute during backward). See README.md.
+ *
+ * Checkpoint regions mirror the code:
+ *   embed engine     – outer ckpt + nested per-layer ckpts
+ *   assimilate_local – ONE region, no inner ckpts → its whole
+ *                      internals rematerialize in backward (peak!)
+ *   global engine    – outer ckpt + nested per-block ckpts
+ *   Σ-over-steps glue – not checkpointed
+ *   FE (per fstep)   – per-block ckpts
+ *   decoder (per fstep) – per-block ckpts; tokens_nbors gather
+ *                      and pred heads NOT checkpointed
+ * ============================================================ */
+function simulate(p, strs) {
+  const GiB = 1024 ** 3;
+  const cells = 12 * 4 ** p.hpLevel;
+  const AB = p.actBytes;
+
+  // ---- per-stream effective token counts ----
+  const sIn  = strs.filter(s => s.on && s.role !== "out");
+  const sOut = strs.filter(s => s.on && s.role !== "in");
+  const eff = s => s.kTok * 1000 * s.keep * p.tokenScale * p.batch * p.inputSteps;
+  const chn = s => s.chan + s.geo;                       // embed attention seq len
+  const Nloc  = sIn.reduce((a, s) => a + eff(s), 0);     // local tokens, all streams
+  const NgAll = p.batch * p.inputSteps * cells * p.Q;
+  const NgUnm = NgAll * p.fill;
+  const Nfe   = p.batch * cells * p.Q;
+  const Nnb   = p.batch * cells * 9 * p.Q;
+  const nt  = s => s.kTgt * 1000 * p.batch;              // targets per fstep, per stream
+  const NtTot = sOut.reduce((a, s) => a + nt(s), 0);
+
+  const attnM = p.attnMult;
+  const mlpM = h => p.mlpExtra + 2 * h;
+
+  // ---- parameters (elements) ----
+  const selfAttnP = D => 4 * D * D;
+  const mlpP = (D, h) => 2 * h * D * D;
+  const crossAttnP = (Dq, Dkv, P) => Dq * P + 2 * Dkv * P + P * Dq;
+
+  const params = {};
+  params["Stream embedders"] = sIn.reduce((a, s) =>
+    a + s.eBlocks * (selfAttnP(s.eDim) + mlpP(s.eDim, 2))
+      + s.tokenSize * s.eDim + s.eDim * p.dLocal, 0);
+  params["Local AE"] = p.localBlocks * (selfAttnP(p.dLocal) + mlpP(p.dLocal, 2));
+  params["Local→global adapter"] =
+    p.adapterCross * crossAttnP(p.dGlobal, p.dLocal, p.adapterP) +
+    (p.adapterCross - 1) * mlpP(p.dGlobal, 2);
+  params["Aggregation engine"] = p.aggBlocks * (selfAttnP(p.dGlobal) + mlpP(p.dGlobal, p.globalMlpH));
+  params["Global AE"] = p.globalBlocks * (selfAttnP(p.dGlobal) + mlpP(p.dGlobal, p.globalMlpH));
+  params["Forecast engine"] = p.feBlocks * (selfAttnP(p.dGlobal) + mlpP(p.dGlobal, 2));
+  params["Decoders + pred heads"] = sOut.reduce((a, s) => {
+    const P = s.etcDim; // dim_head_proj defaults to etcDim/num_heads → total = etcDim
+    let per = p.trLayers * (crossAttnP(s.etcDim, p.dGlobal, P)
+              + (p.predSelfAtt ? selfAttnP(s.etcDim) : 0) + mlpP(s.etcDim, 2));
+    per += 32 * s.etcDim;                                             // coord embedding
+    per += p.ensSize * (p.predHeadLayers * s.etcDim * s.etcDim + s.etcDim * s.outChan);
+    return a + per;
+  }, 0);
+  params["Learnable queries"] = p.Q * p.dGlobal;
+  const pTotal = Object.values(params).reduce((a, b) => a + b, 0);
+
+  const pg = {
+    embed:  params["Stream embedders"],
+    assim:  params["Local AE"] + params["Local→global adapter"]
+            + params["Aggregation engine"] + params["Learnable queries"],
+    global: params["Global AE"],
+    fe:     params["Forecast engine"],
+    dec:    params["Decoders + pred heads"],
+    none:   0,
+  };
+
+  /* ---- checkpoint regions (elements; see header comment) ---- */
+  const regions = [];
+  // per-stream embed sequence volume: tokens × channels × embed dim
+  const embVol = s => eff(s) * chn(s) * s.eDim;
+  const embVolTot = sIn.reduce((a, s) => a + embVol(s), 0);
+
+  regions.push({ name: "embed", label: "embedders", group: "embed",
+    stash: Nloc * p.dLocal,
+    internals: sIn.reduce((a, s) => a + s.eBlocks * (attnM + mlpM(2)) * embVol(s), 0)
+               + 2 * Nloc * p.dLocal,
+    // nested per-layer ckpts: recompute stores every layer input (all streams),
+    // but only ONE layer of ONE stream rematerializes fully at a time
+    repeak: sIn.reduce((a, s) => a + (2 * s.eBlocks + 1) * embVol(s), 0)
+            + attnM * Math.max(0, ...sIn.map(embVol))
+            + Nloc * p.dLocal,
+  });
+  regions.push({ name: "assim", label: "assimilate_local", group: "assim",
+    stash: NgAll * p.dGlobal,
+    internals:
+      p.localBlocks * (attnM + mlpM(2)) * Nloc * p.dLocal
+      + p.adapterCross * (4 * NgUnm * p.dGlobal + 2 * Nloc * p.adapterP)
+      + (p.adapterCross - 1) * mlpM(2) * NgUnm * p.dGlobal
+      + p.aggBlocks * (attnM + mlpM(p.globalMlpH)) * NgUnm * p.dGlobal
+      + p.asmMult * NgAll * p.dGlobal,
+    repeak: null, // no inner ckpts → repeak = internals (set below)
+  });
+  regions[regions.length - 1].repeak = regions[regions.length - 1].internals;
+  regions.push({ name: "global", label: "global AE", group: "global",
+    stash: NgAll * p.dGlobal,
+    internals: p.globalBlocks * (attnM + mlpM(p.globalMlpH)) * NgAll * p.dGlobal,
+    repeak: 2 * p.globalBlocks * NgAll * p.dGlobal + attnM * NgAll * p.dGlobal,
+  });
+  regions.push({ name: "sum", label: "Σ steps", group: "none", // glue, not checkpointed
+    stash: Nfe * p.dGlobal, internals: Nfe * p.dGlobal, repeak: 0,
+  });
+  for (let st = 1; st <= p.forecastSteps; st++) {
+    regions.push({ name: "fe" + st, label: "FE " + st, group: "fe",
+      stash: (2 * p.feBlocks + 1) * Nfe * p.dGlobal,
+      internals: p.feBlocks * (attnM + mlpM(2)) * Nfe * p.dGlobal + 2 * Nfe * p.dGlobal,
+      repeak: attnM * Nfe * p.dGlobal,
+    });
+    const nbors = Nnb * p.dGlobal; // gather, not checkpointed, shared across streams
+    const blocksPer = p.trLayers * (2 + (p.predSelfAtt ? 1 : 0));
+    let stash = nbors, internals = nbors, repeak = 0;
+    for (const s of sOut) {
+      const N = nt(s), D = s.etcDim;
+      const head = p.ensSize * N * (D + s.outChan);      // pred head, not checkpointed
+      stash += (blocksPer + 1) * N * D + head + N * s.outChan;
+      internals += p.trLayers * ((4 * N * D + 2 * Nnb * D)
+                   + (p.predSelfAtt ? attnM * N * D : 0) + mlpM(2) * N * D)
+                   + N * D + head + N * s.outChan;
+      repeak = Math.max(repeak, 4 * N * D + 2 * Nnb * D, attnM * N * D);
+    }
+    regions.push({ name: "dec" + st, label: "decode " + st, group: "dec",
+      stash, internals, repeak });
+  }
+  const lossElems = 2 * p.forecastSteps *
+    sOut.reduce((a, s) => a + nt(s) * s.outChan, 0) * 2; // preds+targets, fp32 (×2 vs bf16)
+  regions.push({ name: "loss", label: "loss", group: "none",
+    stash: lossElems, internals: lossElems, repeak: 0 });
+
+  // ---- constant state (bytes) ----
+  const W = p.fsdp ? p.worldSize : 1;
+  const paramsBase = pTotal * p.paramBytes / W;
+  const optimBase  = pTotal * p.optimBytes / W + (p.ema ? pTotal * p.paramBytes / W : 0);
+  const overhead   = p.overheadGB * GiB;
+  const inputData  = sIn.reduce((a, s) => a + eff(s) * s.tokenSize * chn(s), 0) * AB;
+
+  // FSDP unsharded compute copies for the active + prefetched units (bytes)
+  const unshard = groups => !p.fsdp ? 0
+    : AB * [...new Set(groups)].slice(0, p.prefetch).reduce((a, g) => a + pg[g], 0);
+
+  /* ---- walk the timeline ---- */
+  const phases = [];
+  const gradDone = new Set();
+  let gradBytesResident = 0;
+  let stashCum = 0;
+
+  const push = (label, kind, opt) => {
+    const o = opt || {};
+    phases.push({
+      label, kind,
+      params: paramsBase + unshard(o.active || []),
+      grads: gradBytesResident + (o.gradTransient || 0),
+      optim: optimBase,
+      acts: inputData * (o.inputFreed ? 0 : 1) + stashCum + (o.actExtra || 0),
+      overhead,
+    });
+  };
+
+  push("baseline", "base");
+
+  // forward
+  for (let i = 0; i < regions.length; i++) {
+    const r = regions[i];
+    stashCum += (p.ckpt ? r.stash : r.internals + (r.name === "loss" ? 0 : r.stash)) * AB;
+    const nxt = regions[i + 1];
+    push("fwd " + r.label, "fwd", { active: nxt ? [r.group, nxt.group] : [r.group] });
+  }
+
+  // backward (reverse region order)
+  for (let i = regions.length - 1; i >= 0; i--) {
+    const r = regions[i];
+    const recompute = p.ckpt ? r.repeak * AB : 0;
+    const transient = recompute * p.gradActFrac
+                    + (p.ckpt ? 0 : r.internals * AB * p.gradActFrac);
+    const gradTransient = p.fsdp ? pg[r.group] * AB : 0;
+    push("bwd " + r.label, "bwd", {
+      active: [r.group, i > 0 ? regions[i - 1].group : "none"],
+      actExtra: recompute + transient,
+      gradTransient,
+    });
+    stashCum -= (p.ckpt ? r.stash : r.internals + (r.name === "loss" ? 0 : r.stash)) * AB;
+    if (r.group !== "none" && !gradDone.has(r.group)) {
+      gradDone.add(r.group);
+      gradBytesResident += pg[r.group] * p.gradBytes / W;
+    }
+  }
+
+  push("optimizer step", "opt");
+  gradBytesResident = 0;            // zero_grad(set_to_none=True)
+  push("end of step", "end", { inputFreed: true });
+
+  let peak = 0, peakIdx = 0;
+  phases.forEach((ph, i) => {
+    ph.total = ph.params + ph.grads + ph.optim + ph.acts + ph.overhead;
+    if (ph.total > peak) { peak = ph.total; peakIdx = i; }
+  });
+
+  return { cells, Nloc, NgAll, NtTot, inputData, params, pTotal, phases, peak, peakIdx,
+           budget: p.budgetGB * GiB };
+}
+
+/* ============================================================
+ * UI
+ * ============================================================ */
+const CATS = [
+  ["optim",  "Optimizer states + EMA", "--c-optim"],
+  ["params", "Parameters",             "--c-params"],
+  ["grads",  "Gradients",              "--c-grads"],
+  ["acts",   "Activations",            "--c-acts"],
+  ["overhead","Fixed overhead",        "--c-over"],
+];
+const cssVar = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmtGB = b => (b / 1024 ** 3).toFixed(b >= 100 * 1024 ** 3 ? 0 : 2) + " GB";
+const fmtM  = n => n >= 1e9 ? (n / 1e9).toFixed(2) + " B" : (n / 1e6).toFixed(1) + " M";
+const fmtN  = n => n >= 1e6 ? (n / 1e6).toFixed(2) + " M" : Math.round(n).toLocaleString();
+
+function buildControls() {
+  const root = document.getElementById("controls");
+  SCHEMA.forEach(g => {
+    const det = document.createElement("details");
+    det.className = "group";
+    if (g.open) det.open = true;
+    det.innerHTML = `<summary>${g.group}</summary>`;
+    const rows = document.createElement("div");
+    rows.className = "rows";
+    g.items.forEach(([id, label, def, opt]) => {
+      opt = opt || {};
+      const row = document.createElement("div");
+      row.className = "row";
+      const hint = opt.hint ? `<span class="hint">${opt.hint}</span>` : "";
+      if (opt.bool) {
+        row.innerHTML = `<label for="${id}">${label}${hint}</label>
+          <input type="checkbox" id="${id}" ${def ? "checked" : ""}>`;
+      } else {
+        row.innerHTML = `<label for="${id}">${label}${hint}</label>
+          <input type="number" id="${id}" value="${def}"
+            ${opt.min != null ? `min="${opt.min}"` : ""} ${opt.max != null ? `max="${opt.max}"` : ""}
+            step="${opt.step || 1}">`;
+      }
+      rows.appendChild(row);
+    });
+    det.appendChild(rows);
+    root.appendChild(det);
+  });
+  root.addEventListener("input", render);
+  document.getElementById("preset-lowres").addEventListener("click", () => {
+    for (const id in DEFAULTS) {
+      const el = document.getElementById(id);
+      if (el.type === "checkbox") el.checked = DEFAULTS[id];
+      else el.value = DEFAULTS[id];
+    }
+    streams = STREAMS_DEF.map(s => ({ ...s, on: true }));
+    buildStreamTable();
+    render();
+  });
+}
+
+function buildStreamTable() {
+  const tbl = document.getElementById("streams");
+  let html = `<tr>
+    <th></th><th>stream</th><th>role</th>
+    <th class="num">token_size</th><th class="num">chan</th><th class="num">geo</th>
+    <th class="num">embed dim</th><th class="num">keep</th>
+    <th class="num">src tokens ×1000</th>
+    <th class="num">etc dim</th><th class="num">out chan</th>
+    <th class="num">targets ×1000</th></tr>`;
+  streams.forEach((s, i) => {
+    const isIn = s.role !== "out", isOut = s.role !== "in";
+    const num = (field, on) => on
+      ? `<td class="num"><input type="number" data-i="${i}" data-f="${field}"
+           value="${s[field]}" min="0" step="${field === "keep" ? 0.05 : field === "kTok" || field === "kTgt" ? 0.1 : 1}"></td>`
+      : `<td class="num ro">–</td>`;
+    html += `<tr class="${s.on ? "" : "off"}">
+      <td><input type="checkbox" data-i="${i}" data-f="on" ${s.on ? "checked" : ""}></td>
+      <td>${s.name}</td><td class="ro">${s.role}</td>
+      <td class="num ro">${isIn ? s.tokenSize : "–"}</td>
+      ${num("chan", isIn)}${num("geo", isIn)}
+      <td class="num ro">${isIn ? s.eDim : "–"}</td>
+      ${num("keep", isIn)}${num("kTok", isIn)}
+      <td class="num ro">${isOut ? s.etcDim : "–"}</td>
+      ${num("outChan", isOut)}${num("kTgt", isOut)}
+    </tr>`;
+  });
+  tbl.innerHTML = html;
+  tbl.querySelectorAll("input").forEach(inp => {
+    inp.addEventListener("input", () => {
+      const s = streams[+inp.dataset.i], f = inp.dataset.f;
+      if (f === "on") { s.on = inp.checked; buildStreamTable(); }
+      else s[f] = parseFloat(inp.value) || 0;
+      render();
+    });
+  });
+}
+
+function readInputs() {
+  const q = {};
+  for (const id in DEFAULTS) {
+    const el = document.getElementById(id);
+    q[id] = el.type === "checkbox" ? el.checked : parseFloat(el.value) || 0;
+  }
+  return q;
+}
+
+let lastResult = null;
+
+function drawChart(r) {
+  const svg = document.getElementById("chart");
+  const wrap = document.getElementById("chartwrap");
+  const Wpx = wrap.clientWidth, Hpx = 360, padL = 56, padR = 8, padT = 10, padB = 62;
+  svg.setAttribute("viewBox", `0 0 ${Wpx} ${Hpx}`);
+  const GiB = 1024 ** 3;
+  const n = r.phases.length;
+  const yMax = Math.max(r.peak, r.budget) * 1.08;
+  const x = i => padL + (Wpx - padL - padR) * i / n;
+  const y = b => padT + (Hpx - padT - padB) * (1 - b / yMax);
+  let out = "";
+
+  const stepGB = yMax / GiB > 240 ? 64 : yMax / GiB > 120 ? 32 : yMax / GiB > 60 ? 16 : yMax / GiB > 30 ? 8 : 4;
+  for (let g = 0; g * stepGB * GiB < yMax; g++) {
+    const yy = y(g * stepGB * GiB);
+    out += `<line x1="${padL}" x2="${Wpx - padR}" y1="${yy}" y2="${yy}"
+              stroke="${cssVar("--border")}" stroke-width="1"/>
+            <text x="${padL - 6}" y="${yy + 4}" text-anchor="end" font-size="11"
+              fill="${cssVar("--muted")}">${g * stepGB}</text>`;
+  }
+  out += `<text x="12" y="${padT + 10}" font-size="11" fill="${cssVar("--muted")}">GB</text>`;
+
+  const stackOrder = ["optim", "params", "grads", "acts", "overhead"];
+  const colors = { optim: cssVar("--c-optim"), params: cssVar("--c-params"),
+                   grads: cssVar("--c-grads"), acts: cssVar("--c-acts"),
+                   overhead: cssVar("--c-over") };
+  let base = r.phases.map(() => 0);
+  stackOrder.forEach(cat => {
+    const top = r.phases.map((ph, i) => base[i] + ph[cat]);
+    let path = `M ${x(0)} ${y(base[0])}`;
+    for (let i = 0; i < n; i++) path += ` L ${x(i)} ${y(top[i])} L ${x(i + 1)} ${y(top[i])}`;
+    for (let i = n - 1; i >= 0; i--) path += ` L ${x(i + 1)} ${y(base[i])} L ${x(i)} ${y(base[i])}`;
+    path += " Z";
+    out += `<path d="${path}" fill="${colors[cat]}" fill-opacity="0.82"/>`;
+    base = top;
+  });
+
+  out += `<line x1="${padL}" x2="${Wpx - padR}" y1="${y(r.budget)}" y2="${y(r.budget)}"
+            stroke="${cssVar("--warn")}" stroke-width="1.5" stroke-dasharray="6 4"/>
+          <text x="${Wpx - padR - 4}" y="${y(r.budget) - 5}" text-anchor="end" font-size="11"
+            fill="${cssVar("--warn")}">budget ${fmtGB(r.budget)}</text>`;
+
+  const px = (x(r.peakIdx) + x(r.peakIdx + 1)) / 2;
+  out += `<line x1="${px}" x2="${px}" y1="${y(r.peak)}" y2="${Hpx - padB}"
+            stroke="${cssVar("--text")}" stroke-width="1" stroke-dasharray="2 3" opacity="0.6"/>
+          <circle cx="${px}" cy="${y(r.peak)}" r="3.5" fill="${cssVar("--text")}"/>`;
+
+  r.phases.forEach((ph, i) => {
+    const cx = (x(i) + x(i + 1)) / 2;
+    out += `<text x="${cx}" y="${Hpx - padB + 12}" font-size="10" fill="${cssVar("--muted")}"
+              text-anchor="end" transform="rotate(-38 ${cx} ${Hpx - padB + 12})">${ph.label}</text>`;
+  });
+
+  r.phases.forEach((ph, i) => {
+    out += `<rect data-i="${i}" x="${x(i)}" y="${padT}" width="${x(i + 1) - x(i)}"
+              height="${Hpx - padT - padB}" fill="transparent"/>`;
+  });
+
+  svg.innerHTML = out;
+
+  const tip = document.getElementById("tooltip");
+  svg.querySelectorAll("rect[data-i]").forEach(rect => {
+    rect.addEventListener("mousemove", ev => {
+      const ph = r.phases[+rect.dataset.i];
+      tip.style.display = "block";
+      const box = wrap.getBoundingClientRect();
+      tip.style.left = Math.min(ev.clientX - box.left + 14, box.width - 230) + "px";
+      tip.style.top = (ev.clientY - box.top + 8) + "px";
+      tip.innerHTML = `<div class="t">${ph.label} — ${fmtGB(ph.total)}</div>` +
+        CATS.map(([k, name, cvar]) =>
+          `<div class="r"><span><span class="key" style="background:${cssVar(cvar)}"></span>${name}</span>
+           <span>${fmtGB(ph[k])}</span></div>`).join("");
+    });
+    rect.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+  });
+}
+
+function render() {
+  const q = readInputs();
+  const r = simulate(q, streams);
+  lastResult = r;
+
+  const totalEl = document.getElementById("total");
+  totalEl.textContent = fmtGB(r.peak);
+  totalEl.className = "total " + (r.peak > r.budget ? "over" : "under");
+  document.getElementById("budgetLabel").textContent =
+    `peak, of ${fmtGB(r.budget)} budget (${(100 * r.peak / r.budget).toFixed(0)}%)`;
+  document.getElementById("peakAt").textContent =
+    `peak at: ${r.phases[r.peakIdx].label}`;
+  document.getElementById("tokinfo").textContent =
+    `${fmtN(r.cells)} cells · ${fmtN(r.Nloc)} local tokens · ${fmtN(r.NgAll)} latent tokens · ` +
+    `${fmtN(r.NtTot)} targets/step · input data ${fmtGB(r.inputData)}`;
+  document.getElementById("modeNote").innerHTML = q.ckpt
+    ? `Checkpointing <b>on</b> (matches the code): forward stores only region boundaries / block
+       inputs; each region's internals rematerialize during its backward.
+       <code>assimilate_local</code> has no inner checkpoints, so its <i>entire</i> internals
+       rematerialize at once. FSDP ${q.fsdp
+         ? "on: sharded master/grads/optimizer, unsharded bf16 compute copies of ~" + q.prefetch
+           + " active units, grad unshard transient until reduce-scatter."
+         : "off."}`
+    : `Checkpointing <b>off</b>: all forward internals retained until each region's backward
+       (upper bound; the real code checkpoints heavily).`;
+
+  drawChart(r);
+
+  document.getElementById("legend").innerHTML = CATS.map(([k, name, cvar]) =>
+    `<span><span class="key" style="background:${cssVar(cvar)}"></span>${name}</span>`).join("");
+
+  let html = `<tr><th>Phase</th>` +
+    CATS.map(([, name]) => `<th class="num">${name.split(" ")[0]}</th>`).join("") +
+    `<th class="num">Total</th></tr>`;
+  r.phases.forEach((ph, i) => {
+    html += `<tr class="${i === r.peakIdx ? "peak" : ""}"><td>${ph.label}${i === r.peakIdx ? " ◀ peak" : ""}</td>` +
+      CATS.map(([k]) => `<td class="num">${fmtGB(ph[k])}</td>`).join("") +
+      `<td class="num">${fmtGB(ph.total)}</td></tr>`;
+  });
+  document.getElementById("phases").innerHTML = html;
+
+  let phh = `<tr><th>Module</th><th class="num">params</th></tr>`;
+  Object.entries(r.params).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => {
+    phh += `<tr><td>${k}</td><td class="num">${fmtM(v)}</td></tr>`;
+  });
+  phh += `<tr><td><b>Total</b></td><td class="num"><b>${fmtM(r.pTotal)}</b></td></tr>`;
+  document.getElementById("params").innerHTML = phh;
+}
+
+buildControls();
+buildStreamTable();
+render();
+window.addEventListener("resize", () => { if (lastResult) drawChart(lastResult); });
+</script>
+</body>
+</html>
