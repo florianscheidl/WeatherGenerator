@@ -551,14 +551,12 @@ class Trainer(TrainerBase):
 
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_logging.metrics == 0:
-                self._log(TRAIN)
-                # Reduce and log throughput once per interval; the cross-rank
-                # collective (and its device sync) happens only here, not per step.
-                self.perf_tracker.log(
-                    log_fn=lambda m: self.train_logger.log_metrics(
-                        TRAIN, m,
-                    ),
-                )
+                # Reduce throughput once per interval and merge it into the
+                # training metrics record. The cross-rank collective (and its
+                # device sync) happens only here, not per step; it returns None
+                # until the first counts have accumulated.
+                perf_metrics = self.perf_tracker.compute_metrics()
+                self._log(TRAIN, extra_metrics=perf_metrics)
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)
@@ -730,13 +728,15 @@ class Trainer(TrainerBase):
             # save config
             config.save(self.cf, mini_epoch)
 
-    def _log(self, stage: Stage):
+    def _log(self, stage: Stage, extra_metrics: dict[str, float] | None = None):
         """
         Logs training or validation metrics.
 
         Args:
             stage: Stage Is it's VAL, logs are treated as validation logs.
                         If TRAIN, logs are treated as training logs
+            extra_metrics: Additional scalar metrics (e.g. throughput stats) to
+                        merge into the same record instead of a separate log line.
 
         Notes:
             - This method only executes logging on the main process (rank 0).
@@ -754,7 +754,9 @@ class Trainer(TrainerBase):
         if is_root():
             # plain logger
             if stage == VAL:
-                self.train_logger.add_logs(stage, samples, losses_all, stddev_all)
+                self.train_logger.add_logs(
+                    stage, samples, losses_all, stddev_all, extra_metrics=extra_metrics
+                )
 
             elif self.cf.general.istep >= 0:
                 elapsed_time = time.time() - self.t_training_start
@@ -766,6 +768,7 @@ class Trainer(TrainerBase):
                     avg_loss=avg_loss,
                     lr=self.lr_scheduler.get_lr(),
                     elapsed_training_time_seconds=elapsed_time,
+                    extra_metrics=extra_metrics,
                 )
 
         loss_calculator.loss_hist = []

@@ -10,12 +10,9 @@
 """Utilities for measuring training throughput metrics."""
 
 import logging
-from collections.abc import Callable
 from contextlib import contextmanager
 
 import torch
-
-from weathergen.utils.distributed import is_root
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +37,9 @@ class ThroughputTracker:
     def step(self, batch) -> None:
         """Accumulate one training step's counts. No synchronization or collectives.
 
-        Call on every step from the training loop. Metrics are emitted separately
-        via ``log`` at the logging interval, so the hot path stays free of device
-        syncs and cross-rank collectives.
+        Call on every step from the training loop. Metrics are computed separately
+        via ``compute_metrics`` at the logging interval, so the hot path stays free
+        of device syncs and cross-rank collectives.
 
         Args:
             batch: The current training batch (must expose ``get_source_samples()``).
@@ -65,22 +62,6 @@ class ThroughputTracker:
         self._total_batches += 1
         self._total_samples += self.batch_size_per_gpu
         self._total_mb += source_mb
-
-    def log(self, log_fn: Callable[[dict[str, float]], None] | None = None) -> None:
-        """Collective: reduce throughput across ranks and log it on the root rank.
-
-        Must be called on every rank at the same point in the training loop (the
-        all-reduce lives in ``compute_metrics``). Intended to be called once per
-        logging interval rather than every step, so the only cross-rank
-        synchronization for throughput happens here.
-
-        Args:
-            log_fn: Called with the metrics dict on the root rank once warmup is
-                    complete. Typically ``lambda m: logger.log_metrics(stage, m, step=istep)``.
-        """
-        metrics = self.compute_metrics()
-        if metrics is not None and log_fn is not None and is_root():
-            log_fn(metrics)
 
     def compute_metrics(self) -> dict[str, float] | None:
         """Return throughput metrics dict, or None if warmup is not yet complete.
@@ -130,8 +111,8 @@ class NullThroughputTracker:
     def step(self, batch) -> None:
         pass
 
-    def log(self, log_fn=None) -> None:
-        pass
+    def compute_metrics(self) -> dict[str, float] | None:
+        return None
 
 
 def compute_source_bytes(source_samples) -> int:
