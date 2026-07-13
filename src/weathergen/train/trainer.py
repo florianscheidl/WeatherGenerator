@@ -538,13 +538,8 @@ class Trainer(TrainerBase):
             if self.validate_with_ema:
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
 
-            self.perf_tracker.step(
-                batch,
-                self.cf.general.istep,
-                log_fn=lambda m: self.train_logger.log_metrics(
-                    TRAIN, m, step=self.cf.general.istep
-                ),
-            )
+            # Accumulate throughput counts every step; no sync or collective here.
+            self.perf_tracker.step(batch, self.cf.general.istep)
             # Compute collapse monitoring metrics
             if self.collapse_monitor.should_compute(self.cf.general.istep):
                 self.collapse_monitor._compute_collapse_metrics(
@@ -558,6 +553,13 @@ class Trainer(TrainerBase):
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_logging.metrics == 0:
                 self._log(TRAIN)
+                # Reduce and log throughput once per interval; the cross-rank
+                # collective (and its device sync) happens only here, not per step.
+                self.perf_tracker.log(
+                    log_fn=lambda m: self.train_logger.log_metrics(
+                        TRAIN, m, step=self.cf.general.istep
+                    ),
+                )
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)

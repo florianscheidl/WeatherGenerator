@@ -24,17 +24,9 @@ from weathergen.utils.performance import (
     compute_source_bytes,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def _no_cuda_sync():
-    """Disable cuda.synchronize globally — tests run on CPU."""
-    with patch("weathergen.utils.performance.torch.cuda.synchronize"):
-        yield
-
 
 def _make_mock_source_samples(tensor_shapes: list[list[tuple]]):
     """Build a minimal mock of the source_samples object.
@@ -112,7 +104,6 @@ def test_metrics_available_after_warmup(tracker):
     """After warmup_steps, metrics become available."""
     tracker.update(istep=1, source_mb=1.0)
     tracker.update(istep=2, source_mb=1.0)
-    tracker._sync()
     metrics = tracker.compute_metrics()
     assert metrics is not None
 
@@ -121,7 +112,6 @@ def test_metrics_keys(tracker):
     """All expected metric keys are present."""
     tracker.update(istep=1, source_mb=1.0)
     tracker.update(istep=2, source_mb=2.0)
-    tracker._sync()
     metrics = tracker.compute_metrics()
 
     expected_keys = [
@@ -162,7 +152,6 @@ def test_throughput_values_positive(tracker):
     tracker.update(istep=1, source_mb=1.0)
     tracker._t0 = time.time() - 0.1
     tracker.update(istep=2, source_mb=1.0)
-    tracker._sync()
     metrics = tracker.compute_metrics()
 
     assert metrics is not None
@@ -171,8 +160,21 @@ def test_throughput_values_positive(tracker):
     assert metrics["performance.throughput.device.mb_per_sec"] > 0
 
 
-def test_step_calls_log_fn_on_root(tracker):
-    """step() invokes log_fn with metrics on the root rank after warmup."""
+def test_step_accumulates_without_logging(tracker):
+    """step() only accumulates; it never calls log_fn on its own."""
+    source = _make_mock_source_samples([[(2, 2)]])
+    batch = _make_mock_batch(source)
+
+    tracker.step(batch, istep=1)
+    tracker.step(batch, istep=2)
+
+    # Warmup ends at istep=1, so the istep=2 step is the first counted one.
+    assert tracker._total_batches == 1
+    assert tracker._total_samples == 4
+
+
+def test_log_calls_log_fn_on_root(tracker):
+    """log() invokes log_fn with metrics on the root rank after warmup."""
     source = _make_mock_source_samples([[(2, 2)]])
     batch = _make_mock_batch(source)
 
@@ -181,28 +183,47 @@ def test_step_calls_log_fn_on_root(tracker):
     def log_fn(m):
         logged.update(m)
 
-    tracker.step(batch, istep=1, log_fn=log_fn)
+    # Before warmup completes there is nothing to log.
+    tracker.step(batch, istep=1)
+    with patch("weathergen.utils.performance.is_root", return_value=True):
+        tracker.log(log_fn=log_fn)
     assert logged == {}
 
+    tracker.step(batch, istep=2)
     tracker._t0 = time.time() - 0.1
 
     with patch("weathergen.utils.performance.is_root", return_value=True):
-        tracker.step(batch, istep=2, log_fn=log_fn)
+        tracker.log(log_fn=log_fn)
 
     assert "performance.throughput.device.batches_per_sec" in logged
 
 
-def test_step_does_not_log_on_non_root(tracker):
-    """step() does not invoke log_fn on non-root ranks."""
+def test_log_does_not_log_on_non_root(tracker):
+    """log() does not invoke log_fn on non-root ranks."""
     source = _make_mock_source_samples([[(2, 2)]])
     batch = _make_mock_batch(source)
 
     logged = {}
 
-    tracker.step(batch, istep=1, log_fn=lambda m: logged.update(m))
+    tracker.step(batch, istep=1)
+    tracker.step(batch, istep=2)
     tracker._t0 = time.time() - 0.1
 
     with patch("weathergen.utils.performance.is_root", return_value=False):
-        tracker.step(batch, istep=2, log_fn=lambda m: logged.update(m))
+        tracker.log(log_fn=lambda m: logged.update(m))
 
     assert logged == {}
+
+
+def test_global_throughput_matches_device_without_distributed(tracker):
+    """Without a process group, global throughput equals the device rate."""
+    tracker.update(istep=1, source_mb=1.0)
+    tracker._t0 = time.time() - 0.1
+    tracker.update(istep=2, source_mb=1.0)
+    metrics = tracker.compute_metrics()
+
+    assert metrics is not None
+    for name in ("batches_per_sec", "samples_per_sec", "mb_per_sec"):
+        assert metrics[f"performance.throughput.global.{name}"] == pytest.approx(
+            metrics[f"performance.throughput.device.{name}"]
+        )
