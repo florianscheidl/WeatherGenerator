@@ -10,7 +10,6 @@
 """Utilities for measuring training throughput metrics."""
 
 import logging
-import time
 from collections.abc import Callable
 from contextlib import contextmanager
 
@@ -24,26 +23,21 @@ logger = logging.getLogger(__name__)
 class ThroughputTracker:
     """Tracks training throughput metrics.
 
-    Accumulates per-batch sample and source-byte counts across ranks, with the warmup
-    / accumulation logic required to produce stable global throughput metrics.
+    Accumulates per-batch sample and source-byte counts across ranks.
     """
 
     def __init__(
         self,
         device: torch.device,
-        warmup_steps: int,
         batch_size_per_gpu: int,
     ) -> None:
         self._device = device
-        self._warmup_steps = warmup_steps
         self.batch_size_per_gpu = batch_size_per_gpu
-        self._t0: float | None = None
-        self._warmup_done: bool = False
         self._total_batches: int = 0
         self._total_samples: int = 0
         self._total_mb: float = 0.0
 
-    def step(self, batch, istep: int) -> None:
+    def step(self, batch) -> None:
         """Accumulate one training step's counts. No synchronization or collectives.
 
         Call on every step from the training loop. Metrics are emitted separately
@@ -52,12 +46,11 @@ class ThroughputTracker:
 
         Args:
             batch: The current training batch (must expose ``get_source_samples()``).
-            istep: Global training step index (used for the warmup countdown).
         """
         source_mb = compute_source_bytes(batch.get_source_samples()) / 1e6
-        self.update(istep, source_mb)
+        self.update(source_mb)
 
-    def update(self, istep: int, source_mb: float) -> None:
+    def update(self, source_mb: float) -> None:
         """Record one training step, handling warmup internally.
 
         Purely local bookkeeping: no device synchronization. The cumulative
@@ -65,7 +58,6 @@ class ThroughputTracker:
         ``compute_metrics`` runs.
 
         Args:
-            istep: Global training step index (used for warmup countdown).
             source_mb: Source tensor megabytes for this batch. Should be computed
                        fresh each step via ``compute_source_bytes`` as batch sizes
                        can vary across samples.
@@ -101,7 +93,7 @@ class ThroughputTracker:
         Returns:
             Dict of ``"performance.<key>": value`` pairs, or None if no data yet.
         """
-        if self._total_batches == 0 or self._t0 is None:
+        if self._total_batches == 0:
             return None
 
 
@@ -135,7 +127,7 @@ class NullThroughputTracker:
     training loop need no ``if`` guards.
     """
 
-    def step(self, batch, istep: int) -> None:
+    def step(self, batch) -> None:
         pass
 
     def log(self, log_fn=None) -> None:

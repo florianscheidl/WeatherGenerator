@@ -168,7 +168,6 @@ class Trainer(TrainerBase):
         if cf.train_logging.get("track_performance_metrics"):
             self.perf_tracker = ThroughputTracker(
                 device=torch.device(self.devices[0]),
-                warmup_steps=cf.train_logging.get("performance_tracking_warmup_steps", 2),
                 batch_size_per_gpu=self.batch_size_per_gpu,
             )
         if cf.get("profiling", {}).get("nvtx_annotate", False):
@@ -539,7 +538,7 @@ class Trainer(TrainerBase):
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
 
             # Accumulate throughput counts every step; no sync or collective here.
-            self.perf_tracker.step(batch, self.cf.general.istep)
+            self.perf_tracker.step(batch)
             # Compute collapse monitoring metrics
             if self.collapse_monitor.should_compute(self.cf.general.istep):
                 self.collapse_monitor._compute_collapse_metrics(
@@ -557,7 +556,7 @@ class Trainer(TrainerBase):
                 # collective (and its device sync) happens only here, not per step.
                 self.perf_tracker.log(
                     log_fn=lambda m: self.train_logger.log_metrics(
-                        TRAIN, m, step=self.cf.general.istep
+                        TRAIN, m,
                     ),
                 )
                 # Log collapse metrics
