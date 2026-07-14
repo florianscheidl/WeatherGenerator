@@ -1,2 +1,3 @@
 profiling:
-  enabled: true
+  enabled: True
+  only_profiling: True
