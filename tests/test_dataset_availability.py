@@ -9,7 +9,9 @@
 
 """Tests for the dataset-availability analysis scripts in packages/science/."""
 
+import csv
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -158,13 +160,57 @@ def test_store_roundtrip_and_plots(obs_zarr: pathlib.Path, tmp_path: pathlib.Pat
     assert ds["n_present"].shape == (48, 2)
     np.testing.assert_allclose(ds["completeness"].values, [1.0, 0.5])
 
-    overview = tmp_path / "overview.png"
-    pda.plot_overview(store, overview, "coverage", 100, None, dpi=80)
+    overview = tmp_path / "overview.html"
+    pda.plot_overview(store, overview, "coverage", 100, None)
     assert overview.exists() and overview.stat().st_size > 0
+    overview_text = overview.read_text()
+    assert "plotly" in overview_text.lower()
+    assert "Available channels: %{z:.2f}%" in overview_text
 
-    per_channel = tmp_path / "per_channel.png"
-    pda.plot_per_channel(store, "SYNOP/obs", per_channel, "coverage", 100, None, dpi=80)
+    per_channel = tmp_path / "per_channel.html"
+    pda.plot_per_channel(store, "SYNOP/obs", per_channel, "coverage", 100, None)
     assert per_channel.exists() and per_channel.stat().st_size > 0
+    assert "Availability: %{z:.2f}%" in per_channel.read_text()
+
+
+def test_summary_html_and_csv_exports(tmp_path: pathlib.Path):
+    summary = {
+        "label": "test_config",
+        "datasets": [
+            {
+                "stream": "SYNOP",
+                "dataset": "a-very-long-observation-dataset-name-for-hovering",
+                "reader_type": "obs",
+                "analysis_mode": "full",
+                "time_min": "2020-01-01T00:00:00",
+                "time_max": "2020-01-02T00:00:00",
+                "n_channels": 2,
+                "total_rows": 100,
+                "native_frequency_seconds": None,
+                "timestamp_spacing_seconds": {"median": 3600.0},
+                "completeness_min": 0.5,
+                "completeness_median": 0.75,
+                "completeness_max": 1.0,
+                "completeness_per_channel": {"a": 1.0, "b": 0.5},
+                "fraction_bins_with_data": 0.875,
+            }
+        ],
+    }
+    summary_path = tmp_path / "availability.summary.json"
+    summary_path.write_text(json.dumps(summary))
+    html_path = tmp_path / "summary.html"
+    csv_path = tmp_path / "summary.csv"
+
+    pda.write_summary_exports(summary_path, html_path, csv_path)
+
+    html_text = html_path.read_text()
+    assert "Dataset availability summary — test_config" in html_text
+    assert 'title="a-very-long-observation-dataset-name-for-hovering"' in html_text
+    with csv_path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["dataset"] == "a-very-long-observation-dataset-name-for-hovering"
+    assert float(rows[0]["completeness_median_pct"]) == 75.0
 
 
 def test_aggregate_to_display_coverage_vs_raw():
