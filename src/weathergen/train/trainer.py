@@ -172,10 +172,9 @@ class Trainer(TrainerBase):
         collapse_config = cf.train_logging.get("collapse_monitoring", {})
         self.collapse_monitor = CollapseMonitor(collapse_config, None)  # device set later in run()
 
-        if cf.train_logging.get("track_performance_metrics"):
+        if cf.train_logging.get("throughput_tracking"):
             self.perf_tracker = ThroughputTracker(
                 device=torch.device(self.devices[0]),
-                warmup_steps=cf.train_logging.get("performance_tracking_warmup_steps", 2),
                 batch_size_per_gpu=self.batch_size_per_gpu,
             )
         if cf.train_logging.get("memory_tracking", False) and torch.cuda.is_available():
@@ -547,13 +546,8 @@ class Trainer(TrainerBase):
             if self.validate_with_ema:
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
 
-            self.perf_tracker.step(
-                batch,
-                self.cf.general.istep,
-                log_fn=lambda m: self.train_logger.log_metrics(
-                    TRAIN, m, step=self.cf.general.istep
-                ),
-            )
+            # Accumulate throughput counts every step; no sync or collective here.
+            self.perf_tracker.step(batch)
             # Compute collapse monitoring metrics
             if self.collapse_monitor.should_compute(self.cf.general.istep):
                 self.collapse_monitor._compute_collapse_metrics(
@@ -571,7 +565,13 @@ class Trainer(TrainerBase):
                 # reduction (and its device sync) runs on all ranks here, once
                 # per interval, rather than per step.
                 mem_metrics = self.memory_tracker.collect(window="train")
-                self._log(TRAIN, extra_metrics=mem_metrics)
+                # Reduce throughput once per interval and merge it into the
+                # training metrics record. The cross-rank collective (and its
+                # device sync) happens only here, not per step; it returns None
+                # until the first counts have accumulated.
+                perf_metrics = self.perf_tracker.compute_metrics()
+                combined_metrics = {**mem_metrics, **perf_metrics}
+                self._log(TRAIN, extra_metrics=combined_metrics)
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)

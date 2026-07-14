@@ -103,6 +103,7 @@ class TrainLogger:
         lr: float = None,
         elapsed_training_time_seconds: float | None = None,
         extra_metrics: dict[str, float] | None = None,
+        extra_metrics: dict[str, float] | None = None,
     ) -> None:
         """
         Log training or validation data.
