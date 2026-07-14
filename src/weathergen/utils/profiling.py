@@ -80,8 +80,9 @@ def wrap_module_forward_with_profiling(model, prefix=""):
             wrap_module_forward_with_profiling(module, module_name)
             continue
 
-        # Wrap custom modules
+        # Wrap custom modules, stashing the original so it can be restored later
         original_forward = module.forward
+        module._original_forward = original_forward
 
         def make_profiled_forward(mod_name, orig_forward):
             def profiled_forward(*args, **kwargs):
@@ -94,3 +95,14 @@ def wrap_module_forward_with_profiling(model, prefix=""):
 
         # Recurse into children
         wrap_module_forward_with_profiling(module, module_name)
+
+
+def unwrap_module_forward_with_profiling(model) -> None:
+    """
+    Undo wrap_module_forward_with_profiling, restoring the original forward
+    methods so the record_function wrappers no longer add overhead.
+    """
+    for module in model.modules():
+        if hasattr(module, "_original_forward"):
+            module.forward = module._original_forward
+            del module._original_forward

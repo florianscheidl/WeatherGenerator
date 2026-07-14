@@ -59,6 +59,7 @@ from weathergen.utils.profiling import (
     start_record_memory_history,
     stop_record_memory_history,
     trace_handler,
+    unwrap_module_forward_with_profiling,
     wrap_module_forward_with_profiling,
 )
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
@@ -862,18 +863,21 @@ class ProfilingTrainer(Trainer):
         self.max_profile_steps: int = 0
         self.schedule = None
         self.prof = nullcontext()
+        self.only_profiling: bool = True
 
     PROFILING_DEFAULTS = {
         "wait_iteration": 1,
         "warmup_iteration": 1,
         "active_iteration": 1,
         "repeat": 1,
+        "only_profiling": True, # True shuts down after profiling, False continues training
     }
 
     def init(self, cf: Config, devices: list):
         super().init(cf, devices)
 
-        profiling_cfg = OmegaConf.merge(cf.profiling, self.PROFILING_DEFAULTS)
+        profiling_cfg = OmegaConf.merge(self.PROFILING_DEFAULTS, cf.profiling)
+        self.only_profiling = profiling_cfg.only_profiling
 
         self.max_profile_steps = (
             profiling_cfg.wait_iteration
@@ -913,25 +917,34 @@ class ProfilingTrainer(Trainer):
             self.prof = nullcontext()
 
     def save_model(self, mini_epoch: int, name=None):
-        # Skip save in profiling mode.
-        return
+        """
+        Saves the model checkpoint if not only profiling.
+        """
+        if self.only_profiling:
+            return
+        return super().save_model(mini_epoch, name=name)
 
     def _training_loop(self, mini_epoch_base: int):
-        # run validation before training if requested
-        self.validate_before_training()
+        """
+        First profiles, then if not only profiling, continues with the normal training loop.
+        """
         wrap_module_forward_with_profiling(self.model, prefix="model")
+        self._profile_opening_iterations(mini_epoch_base)
 
-        end = min(mini_epoch_base + 1, self.training_cfg.num_mini_epochs)
-        for mini_epoch in range(mini_epoch_base, end):
-            logger.info(f"Mini_epoch {mini_epoch} of {end}: train.")
+        if self.only_profiling:
+            # Legacy behaviour: stop once the traces have been collected.
+            if torch.distributed.is_initialized():
+                torch.distributed.destroy_process_group()
+            return
 
-            self.train(mini_epoch)
+        # Remove the record_function wrappers so continued training is not
+        # slowed down by profiling instrumentation, then train normally
+        # (validate_before_training + validation + checkpointing, as usual).
+        unwrap_module_forward_with_profiling(self.model)
+        super()._training_loop(mini_epoch_base)
 
-    def train(self, mini_epoch):
-        """
-        Profiling the training using torch profiler.
-        """
-
+    def _profile_opening_iterations(self, mini_epoch: int):
+        """Run the profiler over the opening training iterations and dump traces."""
         cf = self.cf
         self.model.train()
 
@@ -940,8 +953,6 @@ class ProfilingTrainer(Trainer):
         dataset_iter = iter(self.data_loader)
 
         self.optimizer.zero_grad()
-
-        # training loop
         self.t_start = time.time()
 
         if is_root():
@@ -994,9 +1005,6 @@ class ProfilingTrainer(Trainer):
                 "The memory snapshot, memory usage distribution, and PyTorch profiler"
                 "trace can be found in the profiler_logs folder."
             )
-
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
 
 
 def get_trainer(cf) -> Trainer:
