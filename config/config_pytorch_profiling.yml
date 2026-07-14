@@ -1,2 +1,4 @@
 profiling:
-  enabled: true
+  memory_profiling: True
+  pytorch_profiling: True
+  only_profiling: True

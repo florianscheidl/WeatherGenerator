@@ -25,6 +25,10 @@ def start_record_memory_history() -> None:
 
 
 def stop_record_memory_history() -> None:
+    if not torch.cuda.is_available():
+        logger.info("CUDA unavailable. Not stopping memory history")
+        return
+
     logger.info("Stopping snapshot record_memory_history")
     torch.cuda.memory._record_memory_history(enabled=None)
 

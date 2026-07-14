@@ -864,13 +864,17 @@ class ProfilingTrainer(Trainer):
         self.schedule = None
         self.prof = nullcontext()
         self.only_profiling: bool = True
+        self.memory_profiling: bool = False
+        self.pytorch_profiling: bool = False
 
     PROFILING_DEFAULTS = {
         "wait_iteration": 1,
         "warmup_iteration": 1,
         "active_iteration": 1,
         "repeat": 1,
-        "only_profiling": True, # True shuts down after profiling, False continues training
+        "only_profiling": True,  # True shuts down after profiling, False continues training
+        "memory_profiling": False,
+        "pytorch_profiling": False,
     }
 
     def init(self, cf: Config, devices: list):
@@ -878,6 +882,8 @@ class ProfilingTrainer(Trainer):
 
         profiling_cfg = OmegaConf.merge(self.PROFILING_DEFAULTS, cf.profiling)
         self.only_profiling = profiling_cfg.only_profiling
+        self.memory_profiling = profiling_cfg.memory_profiling
+        self.pytorch_profiling = profiling_cfg.pytorch_profiling
 
         self.max_profile_steps = (
             profiling_cfg.wait_iteration
@@ -885,19 +891,16 @@ class ProfilingTrainer(Trainer):
             + profiling_cfg.active_iteration
         ) * profiling_cfg.repeat
 
-        self.schedule = torch.profiler.schedule(
-            wait=profiling_cfg.wait_iteration,
-            warmup=profiling_cfg.warmup_iteration,
-            active=profiling_cfg.active_iteration,
-            repeat=profiling_cfg.repeat,
-        )
         if is_root():
             config.get_path_profiling_traces(cf).mkdir(exist_ok=True, parents=True)
 
-        handler = partial(trace_handler, cf)
-
-        # Determine profiler setup
-        if is_root():
+        if self.pytorch_profiling and is_root():
+            self.schedule = torch.profiler.schedule(
+                wait=profiling_cfg.wait_iteration,
+                warmup=profiling_cfg.warmup_iteration,
+                active=profiling_cfg.active_iteration,
+                repeat=profiling_cfg.repeat,
+            )
             self.prof = profile(
                 activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                 record_shapes=True,
@@ -905,13 +908,8 @@ class ProfilingTrainer(Trainer):
                 with_stack=True,
                 with_modules=True,
                 with_flops=True,
-                schedule=torch.profiler.schedule(
-                    wait=profiling_cfg.wait_iteration,
-                    warmup=profiling_cfg.warmup_iteration,
-                    active=profiling_cfg.active_iteration,
-                    repeat=profiling_cfg.repeat,
-                ),
-                on_trace_ready=handler,
+                schedule=self.schedule,
+                on_trace_ready=partial(trace_handler, cf),
             )
         else:
             self.prof = nullcontext()
@@ -928,7 +926,8 @@ class ProfilingTrainer(Trainer):
         """
         First profiles, then if not only profiling, continues with the normal training loop.
         """
-        wrap_module_forward_with_profiling(self.model, prefix="model")
+        if self.pytorch_profiling:
+            wrap_module_forward_with_profiling(self.model, prefix="model")
         self._profile_opening_iterations(mini_epoch_base)
 
         if self.only_profiling:
@@ -940,7 +939,8 @@ class ProfilingTrainer(Trainer):
         # Remove the record_function wrappers so continued training is not
         # slowed down by profiling instrumentation, then train normally
         # (validate_before_training + validation + checkpointing, as usual).
-        unwrap_module_forward_with_profiling(self.model)
+        if self.pytorch_profiling:
+            unwrap_module_forward_with_profiling(self.model)
         super()._training_loop(mini_epoch_base)
 
     def _profile_opening_iterations(self, mini_epoch: int):
@@ -955,18 +955,17 @@ class ProfilingTrainer(Trainer):
         self.optimizer.zero_grad()
         self.t_start = time.time()
 
-        if is_root():
-            # Start recording memory snapshot history
+        if self.memory_profiling and is_root():
             start_record_memory_history()
 
         with self.prof:
             for bidx, batch in enumerate(islice(dataset_iter, self.max_profile_steps)):
                 self._train_batch(batch, bidx, mini_epoch)
-                if hasattr(self.prof, "step"):
+                if self.pytorch_profiling and hasattr(self.prof, "step"):
                     self.prof.step()
 
             # Print only on rank 0
-            if is_root() and hasattr(self.prof, "key_averages"):
+            if self.pytorch_profiling and is_root() and hasattr(self.prof, "key_averages"):
                 logger.info("\n" + "=" * 80)
                 logger.info("PROFILING SUMMARY")
                 logger.info("=" * 80)
@@ -990,26 +989,22 @@ class ProfilingTrainer(Trainer):
                     self.prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=20)
                 )
 
-        if is_root():
-            # Create the memory snapshot file
+        if self.memory_profiling and is_root():
             export_memory_snapshot(cf)
-
-            # Stop recording memory snapshot history
             stop_record_memory_history()
 
         torch.distributed.barrier()
 
         if is_root():
             logger.info("Training loop profiling is complete.")
-            logger.info(
-                "The memory snapshot, memory usage distribution, and PyTorch profiler"
-                "trace can be found in the profiler_logs folder."
-            )
+            logger.info("Profiling traces can be found in the profiling_traces folder.")
 
 
 def get_trainer(cf) -> Trainer:
     profiling = cf.get("profiling")
-    if profiling and cf.profiling.enabled:
+    if profiling and (
+        profiling.get("memory_profiling", False) or profiling.get("pytorch_profiling", False)
+    ):
         return ProfilingTrainer(cf.train_logging)
     else:
         return Trainer(cf.train_logging)
