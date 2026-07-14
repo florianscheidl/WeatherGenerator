@@ -39,16 +39,27 @@ range, ``--streams`` to subset streams, ``--check-nans`` to sample gridded (anem
 datasets for NaNs instead of trusting their metadata, ``--row-chunk-stride N`` to
 subsample huge observation datasets (reads every N-th chunk; counts become estimates
 and sparse datasets may show spurious gaps — keep 1 unless a full scan is too slow).
+
+Performance: datasets are analyzed in parallel worker processes (``--workers``, auto by
+default — reserve matching cores, e.g. ``srun -c 8``). The dominant cost is
+decompressing the large observation tables; ``--start/--end`` seeks via the store's
+hourly index instead of scanning from the beginning, ``--skip-existing`` resumes an
+interrupted or extended run without recomputing finished datasets, and
+``--row-chunk-stride`` trades exactness for a proportional read reduction.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dataclasses
+import datetime
 import json
 import logging
+import os
 import pathlib
 import sys
+import time
 
 import numpy as np
 import xarray as xr
@@ -148,6 +159,29 @@ def _delta_stats(deltas_seconds: NDArray[np.float64]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def _obs_seek_row(
+    z: zarr.Group, start: np.datetime64 | None, chunk_rows: int
+) -> int:
+    """First row to scan: jump via the store's hourly index (idx_YYYYMMDDHHMM_*) when
+    a start restriction is given, instead of scanning from row 0."""
+    if start is None:
+        return 0
+    try:
+        key = next(k for k in z.keys() if str(k).startswith("idx_"))
+        base = datetime.datetime.strptime(str(key).split("_")[1], "%Y%m%d%H%M")
+        hours = int(
+            (start.astype("datetime64[s]") - np.datetime64(base)) / np.timedelta64(1, "h")
+        )
+        if hours <= 0:
+            return 0
+        idx = z[key]
+        hours = min(hours, idx.shape[0] - 1)
+        row = int(np.asarray(idx[hours]).ravel()[0])
+        return (row // chunk_rows) * chunk_rows  # align to chunks for efficient reads
+    except (StopIteration, ValueError, IndexError):
+        return 0
+
+
 def analyze_obs(
     path: pathlib.Path,
     stream: str,
@@ -189,8 +223,10 @@ def analyze_obs(
     total_rows_seen = 0
     deltas: list[NDArray[np.float64]] = []
     n_deltas = 0
+    t_wall = time.monotonic()
 
-    slab_starts = range(0, n_rows_total, slab_rows * row_chunk_stride)
+    first_row = _obs_seek_row(z, start, chunk_rows)
+    slab_starts = range(first_row, n_rows_total, slab_rows * row_chunk_stride)
     for slab_no, r0 in enumerate(slab_starts):
         r1 = min(r0 + slab_rows, n_rows_total)
         dt_slab = np.asarray(dates[r0:r1]).reshape(-1).astype("datetime64[s]")
@@ -201,20 +237,27 @@ def analyze_obs(
                 break
             continue
         rows = np.flatnonzero(in_range)
-        values = np.asarray(data[r0 + rows[0] : r0 + rows[-1] + 1])[:, channel_idx]
+        # orthogonal indexing: only the requested columns' chunks are read/decompressed
+        values = data.oindex[slice(r0 + rows[0], r0 + rows[-1] + 1), channel_idx]
         dt_slab = dt_slab[rows[0] : rows[-1] + 1]
         bin_idx = _to_bin_idx(dt_slab, bin_start, bin_seconds)
         accumulate_counts(n_present, n_reports, bin_idx, np.isfinite(values))
         total_rows_seen += len(dt_slab)
 
-        if n_deltas < max_delta_samples:
-            uniq = np.unique(dt_slab)
-            if len(uniq) > 1:
-                d = np.diff(uniq) / _SECOND
-                deltas.append(d.astype(np.float64))
+        if n_deltas < max_delta_samples and len(dt_slab) > 1:
+            # dates are time-ordered, so distinct-timestamp deltas come from a diff mask
+            changed = np.flatnonzero(dt_slab[1:] != dt_slab[:-1])
+            d = ((dt_slab[changed + 1] - dt_slab[changed]) / _SECOND).astype(np.float64)
+            d = d[d > 0]
+            if len(d) > 0:
+                deltas.append(d)
                 n_deltas += len(d)
-        if slab_no % 50 == 0:
-            logger.info(f"{stream}/{path.stem}: scanned {r1 / max(1, n_rows_total):.0%} of rows")
+        if slab_no % 20 == 0:
+            rate = total_rows_seen / max(1e-9, time.monotonic() - t_wall)
+            logger.info(
+                f"{stream}/{path.stem}: {r1 / max(1, n_rows_total):.0%} of rows, "
+                f"{rate:,.0f} rows/s"
+            )
 
     completeness = (
         n_present.sum(axis=0, dtype=np.float64) / total_rows_seen
@@ -309,7 +352,7 @@ def analyze_regular_dates(
 def analyze_anemoi(
     path: pathlib.Path,
     stream: str,
-    stream_info: dict,
+    reader_type: str,
     bin_seconds: int,
     start: np.datetime64 | None,
     end: np.datetime64 | None,
@@ -377,7 +420,7 @@ def analyze_anemoi(
         stream=stream,
         dataset=path.stem,
         path=str(path),
-        reader_type=stream_info.get("type", "anemoi"),
+        reader_type=reader_type,
         bin_seconds=bin_seconds,
         native_frequency_seconds=native_freq,
         completeness=completeness,
@@ -469,15 +512,26 @@ def write_store(
     skipped: list[dict],
     label: str,
     bin_seconds: int,
+    manifest: list[dict] | None = None,
 ) -> None:
-    """Write all results into one zarr store with a manifest in the root attributes."""
+    """Write results into one zarr store with a manifest in the root attributes.
+
+    ``manifest`` fixes the group order (and may include groups already present in the
+    store, e.g. reused by --skip-existing); by default it is built from ``results``.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = []
+    if manifest is None:
+        manifest = [
+            {"stream": r.stream, "dataset": r.dataset, "group": _group_name(r)} for r in results
+        ]
+    root = zarr.open_group(str(out_path), mode="a")
     for r in results:
         group = _group_name(r)
+        try:
+            del root[group]  # recomputed: replace instead of appending into stale arrays
+        except KeyError:
+            pass
         result_to_xarray(r).to_zarr(out_path, group=group, mode="a")
-        manifest.append({"stream": r.stream, "dataset": r.dataset, "group": group})
-    root = zarr.open_group(str(out_path), mode="a")
     root.attrs.update(
         {
             "wg_availability": {
@@ -545,6 +599,38 @@ def _parse_dt(value: str | None) -> np.datetime64 | None:
     return np.datetime64(value).astype("datetime64[s]") if value else None
 
 
+def _init_worker_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+
+def _analyze_job(job: dict) -> tuple[str, DatasetAvailability | dict]:
+    """Analyze one dataset; runs in a worker process, so takes/returns picklable values."""
+    try:
+        if job["reader_type"] in _OBS_TYPES:
+            r = analyze_obs(
+                pathlib.Path(job["path"]),
+                job["stream"],
+                job["bin_seconds"],
+                job["start"],
+                job["end"],
+                job["row_chunk_stride"],
+            )
+        else:
+            r = analyze_anemoi(
+                pathlib.Path(job["path"]),
+                job["stream"],
+                job["reader_type"],
+                job["bin_seconds"],
+                job["start"],
+                job["end"],
+                job["check_nans"],
+                job["nan_time_samples"],
+            )
+        return ("ok", r)
+    except (FileNotFoundError, ValueError) as exc:
+        return ("error", {"stream": job["stream"], "dataset": job["dataset"], "reason": str(exc)})
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Compute temporal availability statistics for the datasets of a run config.",
@@ -588,6 +674,17 @@ def main(argv: list[str] | None = None) -> None:
         default=1,
         help="Read every N-th chunk of observation datasets (estimate; may fake gaps).",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Datasets analyzed in parallel processes (0 = auto: min(8, #cpus, #datasets)).",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Reuse groups already present in the output store (resume interrupted runs).",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -604,51 +701,101 @@ def main(argv: list[str] | None = None) -> None:
     bin_seconds = args.bin_minutes * 60
     start, end = _parse_dt(args.start), _parse_dt(args.end)
     out_path = pathlib.Path(args.output or f"results/dataset_availability/{label}.zarr")
+    summary_path = out_path.with_suffix(".summary.json")
 
-    results: list[DatasetAvailability] = []
+    existing_groups: set[str] = set()
+    if args.skip_existing and out_path.exists():
+        old_manifest = zarr.open_group(str(out_path), mode="r").attrs.get("wg_availability")
+        existing_groups = {g["group"] for g in (old_manifest or {}).get("groups", [])}
+
+    # collect jobs and the manifest in config order; datasets already in the store are reused
+    jobs: list[dict] = []
+    manifest: list[dict] = []
+    reused: list[dict] = []
     skipped: list[dict] = []
     for stream_name, stream_info in streams.items():
         reader_type = stream_info.get("type", "")
         for fname in stream_info.get("filenames", []):
+            if reader_type not in _OBS_TYPES + _ANEMOI_TYPES:
+                skipped.append(
+                    {
+                        "stream": stream_name,
+                        "dataset": str(fname),
+                        "reason": f"unsupported reader type '{reader_type}'",
+                    }
+                )
+                logger.warning(f"Skipping {stream_name}/{fname}: type '{reader_type}'.")
+                continue
             try:
                 path = resolve_dataset_path(str(fname), data_paths)
-                logger.info(f"Analyzing {stream_name}/{path.name} (type={reader_type})")
-                if reader_type in _OBS_TYPES:
-                    r = analyze_obs(
-                        path, stream_name, bin_seconds, start, end, args.row_chunk_stride
-                    )
-                elif reader_type in _ANEMOI_TYPES:
-                    r = analyze_anemoi(
-                        path,
-                        stream_name,
-                        dict(stream_info),
-                        bin_seconds,
-                        start,
-                        end,
-                        args.check_nans,
-                        args.nan_time_samples,
-                    )
-                else:
-                    skipped.append(
-                        {
-                            "stream": stream_name,
-                            "dataset": str(fname),
-                            "reason": f"unsupported reader type '{reader_type}'",
-                        }
-                    )
-                    logger.warning(f"Skipping {stream_name}/{fname}: type '{reader_type}'.")
-                    continue
-                results.append(r)
-            except (FileNotFoundError, ValueError) as exc:
+            except FileNotFoundError as exc:
                 skipped.append({"stream": stream_name, "dataset": str(fname), "reason": str(exc)})
                 logger.warning(f"Skipping {stream_name}/{fname}: {exc}")
+                continue
+            entry = {
+                "stream": stream_name,
+                "dataset": path.stem.replace("/", "_").replace(" ", "_"),
+                "group": f"streams/{stream_name}/{path.stem.replace('/', '_').replace(' ', '_')}",
+            }
+            manifest.append(entry)
+            if entry["group"] in existing_groups:
+                reused.append(entry)
+                logger.info(f"Reusing existing stats for {stream_name}/{path.name}.")
+                continue
+            jobs.append(
+                {
+                    "stream": stream_name,
+                    "dataset": str(fname),
+                    "path": str(path),
+                    "reader_type": reader_type,
+                    "bin_seconds": bin_seconds,
+                    "start": start,
+                    "end": end,
+                    "check_nans": args.check_nans,
+                    "nan_time_samples": args.nan_time_samples,
+                    "row_chunk_stride": args.row_chunk_stride,
+                }
+            )
 
-    if not results:
+    n_workers = args.workers or min(8, os.cpu_count() or 1)
+    n_workers = min(n_workers, max(1, len(jobs)))
+    logger.info(f"Analyzing {len(jobs)} dataset(s) with {n_workers} worker(s).")
+    if n_workers > 1:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=n_workers, initializer=_init_worker_logging
+        ) as pool:
+            outcomes = list(pool.map(_analyze_job, jobs))
+    else:
+        outcomes = [_analyze_job(j) for j in jobs]
+
+    results: list[DatasetAvailability] = []
+    for status, payload in outcomes:
+        if status == "ok":
+            results.append(payload)
+        else:
+            skipped.append(payload)
+            logger.warning(
+                f"Skipping {payload['stream']}/{payload['dataset']}: {payload['reason']}"
+            )
+    kept_groups = {_group_name(r) for r in results} | {e["group"] for e in reused}
+    manifest = [e for e in manifest if e["group"] in kept_groups]
+
+    if not results and not reused:
         raise SystemExit("No dataset could be analyzed; see warnings above.")
 
-    write_store(out_path, results, skipped, label, bin_seconds)
+    write_store(out_path, results, skipped, label, bin_seconds, manifest=manifest)
+
+    # summaries: fresh for computed datasets, carried over from a previous run for reused ones
+    old_summaries: dict[tuple[str, str], dict] = {}
+    if reused and summary_path.exists():
+        for d in json.loads(summary_path.read_text()).get("datasets", []):
+            old_summaries[(d["stream"], d["dataset"])] = d
     summaries = [summarize(r) for r in results]
-    summary_path = out_path.with_suffix(".summary.json")
+    summaries += [
+        old_summaries[(e["stream"], e["dataset"])]
+        for e in reused
+        if (e["stream"], e["dataset"]) in old_summaries
+    ]
     summary_path.write_text(json.dumps({"label": label, "datasets": summaries}, indent=2))
 
     sys.stdout.write("\n" + _format_summary_table(summaries) + "\n")
