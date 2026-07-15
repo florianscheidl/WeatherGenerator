@@ -17,7 +17,6 @@ regular time-bin grid (default 15 minutes):
 - ``n_expected[time]``          — number of timestamps at which data is expected
                                   (native timestamps for regular datasets, 1 inside the
                                   dataset's time span for irregular observations),
-- ``n_reports[time]``           — number of raw rows/timestamps found per bin,
 
 plus per-channel completeness and an estimate of the native temporal resolution.
 Results are written to a single zarr store (one group per dataset) consumed by
@@ -31,8 +30,11 @@ Intended to run on the HPC (dataset paths resolve via the private config). Run f
 repository root:
 
     uv run python packages/science/compute_dataset_availability.py \\
-        --config config/config_era5_georing_avhrr.yml \\
-        --output results/dataset_availability/era5_georing_avhrr.zarr
+        --config config/config_era5_georing_avhrr.yml
+
+Without ``--output`` the store is written to
+``results/dataset_availability/<config-name>_<start>_<end>.zarr`` (start/end only when
+given on the command line).
 
 Useful options: ``--bin-minutes 5|15``, ``--start/--end`` to restrict the scanned time
 range, ``--streams`` to subset streams, ``--check-nans`` to sample gridded (anemoi)
@@ -52,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -89,7 +92,6 @@ class DatasetAvailability:
     time_bins: NDArray[np.datetime64]  # [n_bins] bin start times
     n_present: NDArray[np.int32]  # [n_bins, n_channels] non-NaN values per bin
     n_expected: NDArray[np.int64]  # [n_bins] expected timestamps per bin
-    n_reports: NDArray[np.int64]  # [n_bins] rows / native timestamps found per bin
     completeness: NDArray[np.float64]  # [n_channels] non-NaN fraction over the scan range
     time_min: np.datetime64
     time_max: np.datetime64
@@ -120,18 +122,16 @@ def _floor_to_bin(t: np.datetime64, bin_seconds: int) -> np.datetime64:
 
 def accumulate_counts(
     n_present: NDArray[np.int32],
-    n_reports: NDArray[np.int64],
     bin_idx: NDArray[np.int64],
     finite: NDArray[np.bool_],
 ) -> None:
-    """Add per-bin non-NaN counts and row counts of one slab of rows.
+    """Add per-bin non-NaN counts of one slab of rows.
 
     Uses a fast segment-sum path when the slab's bin indices are sorted (the usual case,
     observation zarrs are time-ordered) and falls back to np.add.at otherwise.
     """
     if len(bin_idx) == 0:
         return
-    n_reports += np.bincount(bin_idx, minlength=len(n_reports)).astype(np.int64)
     if np.all(np.diff(bin_idx) >= 0):
         starts = np.concatenate(([0], np.flatnonzero(np.diff(bin_idx)) + 1))
         seg_bins = bin_idx[starts]
@@ -159,9 +159,7 @@ def _delta_stats(deltas_seconds: NDArray[np.float64]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def _obs_seek_row(
-    z: zarr.Group, start: np.datetime64 | None, chunk_rows: int
-) -> int:
+def _obs_seek_row(z: zarr.Group, start: np.datetime64 | None, chunk_rows: int) -> int:
     """First row to scan: jump via the store's hourly index (idx_YYYYMMDDHHMM_*) when
     a start restriction is given, instead of scanning from row 0."""
     if start is None:
@@ -169,9 +167,7 @@ def _obs_seek_row(
     try:
         key = next(k for k in z.keys() if str(k).startswith("idx_"))
         base = datetime.datetime.strptime(str(key).split("_")[1], "%Y%m%d%H%M")
-        hours = int(
-            (start.astype("datetime64[s]") - np.datetime64(base)) / np.timedelta64(1, "h")
-        )
+        hours = int((start.astype("datetime64[s]") - np.datetime64(base)) / np.timedelta64(1, "h"))
         if hours <= 0:
             return 0
         idx = z[key]
@@ -216,7 +212,6 @@ def analyze_obs(
     n_bins = int((t_hi - bin_start) / _SECOND) // bin_seconds + 1
     n_present = np.zeros((n_bins, len(channels)), dtype=np.int32)
     n_expected = np.ones(n_bins, dtype=np.int64)  # irregular: data may occur in any bin
-    n_reports = np.zeros(n_bins, dtype=np.int64)
 
     chunk_rows = data.chunks[0]
     slab_rows = chunk_rows * max(1, 2_000_000 // max(1, chunk_rows))
@@ -241,7 +236,7 @@ def analyze_obs(
         values = data.oindex[slice(r0 + rows[0], r0 + rows[-1] + 1), channel_idx]
         dt_slab = dt_slab[rows[0] : rows[-1] + 1]
         bin_idx = _to_bin_idx(dt_slab, bin_start, bin_seconds)
-        accumulate_counts(n_present, n_reports, bin_idx, np.isfinite(values))
+        accumulate_counts(n_present, bin_idx, np.isfinite(values))
         total_rows_seen += len(dt_slab)
 
         if n_deltas < max_delta_samples and len(dt_slab) > 1:
@@ -255,8 +250,7 @@ def analyze_obs(
         if slab_no % 20 == 0:
             rate = total_rows_seen / max(1e-9, time.monotonic() - t_wall)
             logger.info(
-                f"{stream}/{path.stem}: {r1 / max(1, n_rows_total):.0%} of rows, "
-                f"{rate:,.0f} rows/s"
+                f"{stream}/{path.stem}: {r1 / max(1, n_rows_total):.0%} of rows, {rate:,.0f} rows/s"
             )
 
     completeness = (
@@ -276,7 +270,6 @@ def analyze_obs(
         time_bins=time_bins,
         n_present=n_present,
         n_expected=n_expected,
-        n_reports=n_reports,
         completeness=completeness,
         time_min=t_lo,
         time_max=t_hi,
@@ -320,9 +313,8 @@ def analyze_regular_dates(
     bin_start = _floor_to_bin(t_lo, bin_seconds)
     n_bins = int((t_hi - bin_start) / _SECOND) // bin_seconds + 1
     n_present = np.zeros((n_bins, len(channels)), dtype=np.int32)
-    n_reports = np.zeros(n_bins, dtype=np.int64)
     bin_idx = _to_bin_idx(dates, bin_start, bin_seconds)
-    accumulate_counts(n_present, n_reports, bin_idx, presence)
+    accumulate_counts(n_present, bin_idx, presence)
     n_expected = np.bincount(bin_idx, minlength=n_bins).astype(np.int64)
 
     time_bins = bin_start + np.arange(n_bins) * np.timedelta64(bin_seconds, "s")
@@ -338,7 +330,6 @@ def analyze_regular_dates(
         time_bins=time_bins,
         n_present=n_present,
         n_expected=n_expected,
-        n_reports=n_reports,
         completeness=completeness,
         time_min=t_lo,
         time_max=t_hi,
@@ -486,7 +477,6 @@ def result_to_xarray(result: DatasetAvailability) -> xr.Dataset:
         {
             "n_present": (("time", "channel"), result.n_present),
             "n_expected": (("time",), result.n_expected),
-            "n_reports": (("time",), result.n_reports),
             "completeness": (("channel",), result.completeness),
         },
         coords={"time": result.time_bins, "channel": result.channels},
@@ -527,10 +517,8 @@ def write_store(
     root = zarr.open_group(str(out_path), mode="a")
     for r in results:
         group = _group_name(r)
-        try:
+        with contextlib.suppress(KeyError):
             del root[group]  # recomputed: replace instead of appending into stale arrays
-        except KeyError:
-            pass
         result_to_xarray(r).to_zarr(out_path, group=group, mode="a")
     root.attrs.update(
         {
@@ -542,6 +530,20 @@ def write_store(
             }
         }
     )
+
+
+def default_output_path(
+    label: str, start: np.datetime64 | None, end: np.datetime64 | None
+) -> pathlib.Path:
+    """Default stats-store path: results/dataset_availability/<label>[_<start>][_<end>].zarr."""
+
+    def tag(t: np.datetime64) -> str:
+        s = str(t.astype("datetime64[s]"))  # YYYY-MM-DDThh:mm:ss
+        date, time_part = s.split("T")
+        return date if time_part == "00:00:00" else f"{date}T{time_part.replace(':', '')}"
+
+    parts = [label] + [tag(t) for t in (start, end) if t is not None]
+    return pathlib.Path("results/dataset_availability") / ("_".join(parts) + ".zarr")
 
 
 def summarize(result: DatasetAvailability) -> dict:
@@ -564,7 +566,6 @@ def summarize(result: DatasetAvailability) -> dict:
         "completeness_per_channel": {
             c: float(v) for c, v in zip(result.channels, comp, strict=True)
         },
-        "fraction_bins_with_data": float((result.n_reports > 0).mean()),
     }
 
 
@@ -652,7 +653,12 @@ def main(argv: list[str] | None = None) -> None:
         default=[],
         help="Additional directory to resolve dataset filenames against (repeatable).",
     )
-    parser.add_argument("--output", default=None, help="Output zarr store path.")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output zarr store path "
+        "(default: results/dataset_availability/<config-name>_<start>_<end>.zarr).",
+    )
     parser.add_argument("--bin-minutes", type=int, default=15, help="Time bin size in minutes.")
     parser.add_argument("--start", default=None, help="Restrict scan start (ISO datetime).")
     parser.add_argument("--end", default=None, help="Restrict scan end (ISO datetime).")
@@ -700,7 +706,7 @@ def main(argv: list[str] | None = None) -> None:
 
     bin_seconds = args.bin_minutes * 60
     start, end = _parse_dt(args.start), _parse_dt(args.end)
-    out_path = pathlib.Path(args.output or f"results/dataset_availability/{label}.zarr")
+    out_path = pathlib.Path(args.output) if args.output else default_output_path(label, start, end)
     summary_path = out_path.with_suffix(".summary.json")
 
     existing_groups: set[str] = set()

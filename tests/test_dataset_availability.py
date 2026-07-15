@@ -65,11 +65,9 @@ def obs_zarr(tmp_path: pathlib.Path) -> pathlib.Path:
 def test_accumulate_counts_sorted_and_unsorted():
     for order in (np.arange(6), np.array([3, 0, 4, 1, 5, 2])):
         n_present = np.zeros((3, 2), dtype=np.int32)
-        n_reports = np.zeros(3, dtype=np.int64)
         bin_idx = np.array([0, 0, 1, 1, 2, 2])[order]
         finite = np.array([[1, 0], [1, 1], [0, 0], [1, 0], [1, 1], [1, 1]], dtype=bool)[order]
-        cda.accumulate_counts(n_present, n_reports, bin_idx, finite)
-        assert n_reports.tolist() == [2, 2, 2]
+        cda.accumulate_counts(n_present, bin_idx, finite)
         assert n_present.tolist() == [[2, 1], [1, 0], [2, 2]]
 
 
@@ -78,16 +76,13 @@ def test_analyze_obs_gaps_and_completeness(obs_zarr: pathlib.Path):
 
     assert r.channels == ["obsvalue_a", "obsvalue_b"]
     assert r.total_rows == 42 * 4
-    # the 6h gap has zero reports; all other hourly bins have 4
+    # the 6h gap has zero values; every other hourly bin has 4 rows (obsvalue_b half NaN)
     gap = slice(6, 12)
-    assert (r.n_reports[gap] == 0).all()
-    reports_outside = np.delete(r.n_reports, np.arange(6, 12))
-    assert (reports_outside == 4).all()
+    assert (r.n_present[gap] == 0).all()
+    present_outside = np.delete(r.n_present, np.arange(6, 12), axis=0)
+    assert (present_outside == [4, 2]).all()
     # obsvalue_a fully valid, obsvalue_b valid in half the rows
     np.testing.assert_allclose(r.completeness, [1.0, 0.5])
-    # channel presence: both channels present in every non-empty bin
-    present = r.n_present > 0
-    assert (present[r.n_reports > 0].sum(axis=1) == 2).all()
     assert r.native_frequency_seconds is None
     assert r.delta_stats_seconds["median"] == 3600.0
 
@@ -192,7 +187,6 @@ def test_summary_html_and_csv_exports(tmp_path: pathlib.Path):
                 "completeness_median": 0.75,
                 "completeness_max": 1.0,
                 "completeness_per_channel": {"a": 1.0, "b": 0.5},
-                "fraction_bins_with_data": 0.875,
             }
         ],
     }
@@ -211,6 +205,7 @@ def test_summary_html_and_csv_exports(tmp_path: pathlib.Path):
     assert len(rows) == 1
     assert rows[0]["dataset"] == "a-very-long-observation-dataset-name-for-hovering"
     assert float(rows[0]["completeness_median_pct"]) == 75.0
+    assert "fraction_bins_with_data_pct" not in rows[0]
 
 
 def test_aggregate_to_display_coverage_vs_raw():
@@ -233,6 +228,23 @@ def test_aggregate_to_display_coverage_vs_raw():
     coverage = pda.aggregate_to_display(ds, edges, "coverage")
     # a complete regular dataset has 100% availability in coverage mode
     np.testing.assert_allclose(coverage[np.isfinite(coverage)], 1.0)
+
+
+def test_default_output_path():
+    base = pathlib.Path("results/dataset_availability")
+    assert cda.default_output_path("my_config", None, None) == base / "my_config.zarr"
+    assert (
+        cda.default_output_path(
+            "my_config",
+            np.datetime64("2023-01-01T00:00:00"),
+            np.datetime64("2023-02-01T06:30:00"),
+        )
+        == base / "my_config_2023-01-01_2023-02-01T063000.zarr"
+    )
+    assert (
+        cda.default_output_path("my_config", np.datetime64("2023-01-01"), None)
+        == base / "my_config_2023-01-01.zarr"
+    )
 
 
 def test_resolve_dataset_path(tmp_path: pathlib.Path):

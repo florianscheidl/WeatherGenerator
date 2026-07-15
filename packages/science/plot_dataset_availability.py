@@ -345,7 +345,6 @@ _SUMMARY_COLUMNS = [
     "completeness_min_pct",
     "completeness_median_pct",
     "completeness_max_pct",
-    "fraction_bins_with_data_pct",
 ]
 
 
@@ -369,7 +368,6 @@ def summary_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "completeness_min_pct": 100.0 * dataset["completeness_min"],
                 "completeness_median_pct": 100.0 * dataset["completeness_median"],
                 "completeness_max_pct": 100.0 * dataset["completeness_max"],
-                "fraction_bins_with_data_pct": 100.0 * dataset["fraction_bins_with_data"],
             }
         )
     return rows
@@ -405,7 +403,6 @@ def _summary_html(summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
             f"{row['completeness_min_pct']:.2f}%",
             f"{row['completeness_median_pct']:.2f}%",
             f"{row['completeness_max_pct']:.2f}%",
-            f"{row['fraction_bins_with_data_pct']:.2f}%",
         ]
         table_rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
 
@@ -423,7 +420,6 @@ def _summary_html(summary: dict[str, Any], rows: list[dict[str, Any]]) -> str:
         "Completeness min",
         "Completeness median",
         "Completeness max",
-        "Bins with data",
     ]
     label = html.escape(str(summary.get("label", "dataset availability")))
     return f"""<!doctype html>
