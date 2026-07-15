@@ -571,7 +571,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     stats_path = pathlib.Path(args.stats)
-    label = load_manifest(stats_path)["label"]
+    stem = stats_path.stem  # default outputs are named after the stats store
     zoom = None
     if args.zoom:
         zoom = (
@@ -580,9 +580,7 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if args.per_channel:
-        default_out = (
-            f"plots/dataset_availability/{label}_{args.per_channel.replace('/', '_')}.html"
-        )
+        default_out = f"plots/dataset_availability/{stem}_{args.per_channel.replace('/', '_')}.html"
         plot_out = pathlib.Path(args.out or default_out)
         plot_per_channel(
             stats_path,
@@ -593,7 +591,7 @@ def main(argv: list[str] | None = None) -> None:
             zoom,
         )
     else:
-        default_out = f"plots/dataset_availability/{label}.html"
+        default_out = f"plots/dataset_availability/{stem}.html"
         plot_out = pathlib.Path(args.out or default_out)
         plot_overview(stats_path, plot_out, args.mode, args.display_bins, zoom)
 
@@ -606,8 +604,8 @@ def main(argv: list[str] | None = None) -> None:
         else stats_path.with_suffix(".summary.json")
     )
     if summary_path.exists():
-        summary_html = pathlib.Path(args.summary_out or plot_out.parent / f"{label}_summary.html")
-        summary_csv = pathlib.Path(args.summary_csv or plot_out.parent / f"{label}_summary.csv")
+        summary_html = pathlib.Path(args.summary_out or plot_out.parent / f"{stem}_summary.html")
+        summary_csv = pathlib.Path(args.summary_csv or plot_out.parent / f"{stem}_summary.csv")
         write_summary_exports(summary_path, summary_html, summary_csv)
     else:
         logger.warning(f"Summary JSON not found at {summary_path}; skipping summary exports.")
