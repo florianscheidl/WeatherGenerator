@@ -102,6 +102,7 @@ class TrainLogger:
         avg_loss: list[float] = None,
         lr: float | dict[str, float] = None,
         elapsed_training_time_seconds: float | None = None,
+        extra_metrics: dict[str, float] | None = None,
     ) -> None:
         """
         Log training or validation data.
@@ -110,6 +111,10 @@ class TrainLogger:
             to its current lr (multiple optimizers, e.g. {"adamw": ..., "muon": ...}).
             When a dict, "adamw" (if present, else the first entry) is additionally
             logged under the plain "learning_rate" key for backwards compatibility.
+
+        Args:
+            extra_metrics: Additional scalar metrics (e.g. peak-memory stats) to
+                merge into the same record instead of emitting a separate log line.
         """
         metrics: dict[str, float] = dict(num_samples=samples)
 
@@ -140,6 +145,9 @@ class TrainLogger:
         for key, value in stddev_all.items():
             val = np.nan if np.isnan(value).all() else np.nanmean(value)
             metrics[key] = val
+
+        if extra_metrics:
+            metrics.update(extra_metrics)
 
         self.log_metrics(stage, metrics)
 
