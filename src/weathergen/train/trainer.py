@@ -811,11 +811,11 @@ class Trainer(TrainerBase):
             self.grad_scaler.scale(loss).backward()
 
             # gradient clipping
-            self.grad_scaler.unscale_(self.optimizer)
+            for optimizer in self.optimizers:
+                    self.grad_scaler.unscale_(optimizer)
             total_norm = torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
             )
-
             # log gradient norms
             if self.log_grad_norms:
                 if bidx % self.train_logging.terminal == 0:
@@ -824,7 +824,8 @@ class Trainer(TrainerBase):
                     self._log_instant_grad_norms(TRAIN)
 
             # optimizer step
-            self.grad_scaler.step(self.optimizer)
+            for optimizer in self.optimizers:
+                self.grad_scaler.step(optimizer)
             self.grad_scaler.update()
 
             # update learning rate
