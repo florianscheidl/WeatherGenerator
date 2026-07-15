@@ -11,13 +11,16 @@
 """Create interactive reports from ``compute_dataset_availability.py`` output.
 
 The main HTML report contains one heatmap row per dataset over a common time axis.
-The cell value is the percentage of channels that have at least one value in the time
-interval. Because the fine bins (5/15 min) of a multi-year archive are far more numerous
-than a browser can usefully show, the time axis is aggregated to ``--display-bins``
-columns with an explicit mean — never by implicit image downsampling. Hovering a cell
-shows its exact percentage and the full dataset/channel name. ``--zoom`` renders a
-subrange at (up to) native bin resolution; ``--per-channel`` renders a
-channel-by-time heatmap for one dataset.
+The cell value is the value-level completeness: the fraction of non-NaN values among
+the values a fully complete dataset would have in the interval (rows × channels for
+observations, native timestamps × channels for regular datasets) — the same quantity
+as the summary table's per-channel completeness, averaged over channels. Because the
+fine bins (5/15 min) of a multi-year archive are far more numerous than a browser can
+usefully show, the time axis is aggregated to ``--display-bins`` columns with explicit
+sums of counts — never by implicit image downsampling. Hovering a cell shows its exact
+percentage and the full dataset/channel name. ``--zoom`` renders a subrange at (up to)
+native bin resolution; ``--per-channel`` renders a channel-by-time heatmap for one
+dataset.
 
 When the companion ``*.summary.json`` exists, the CLI also writes dataset-level summary
 tables as HTML and CSV. The JSON remains the complete source, including per-channel
@@ -25,9 +28,11 @@ completeness.
 
 Aggregation modes:
 
-- ``coverage`` (default): the mean is taken only over fine bins where data is expected.
-  A complete 6-hourly dataset therefore shows 100%, while gaps show as dips.
-- ``raw``: plain duty cycle over all fine bins. This is honest about absolute temporal
+- ``coverage`` (default): value-level completeness as above; intervals without any
+  expected data (no rows, no native timestamps) are white. A complete 6-hourly dataset
+  therefore shows 100%, while NaNs and missing dates show as dips.
+- ``raw``: plain duty cycle — the fraction of fine bins in the interval that contain at
+  least one value, averaged over channels. This is honest about absolute temporal
   density but makes datasets with different frequencies harder to compare.
 
 Example (run from the repository root):
@@ -76,6 +81,11 @@ _NO_DATA_COLOR = "white"
 _TEXT_PRIMARY = "#3a3a37"
 _TEXT_MUTED = "#6f6e6a"
 
+# Store format this plotter understands (see compute_dataset_availability.FORMAT_VERSION).
+_FORMAT_VERSION = 2
+# What the heatmap z-value means per aggregation mode; used in hover text and colorbar.
+_MODE_QUANTITY = {"coverage": "Value completeness", "raw": "Duty cycle"}
+
 
 def availability_colorscale() -> list[list[Any]]:
     """Plotly colorscale equivalent of the sequential availability ramp."""
@@ -97,6 +107,11 @@ def load_manifest(stats_path: pathlib.Path) -> dict:
     manifest = root.attrs.get("wg_availability")
     if manifest is None:
         raise ValueError(f"{stats_path} is not a dataset-availability store.")
+    if manifest.get("format_version") != _FORMAT_VERSION:
+        raise ValueError(
+            f"{stats_path} was written by an older compute_dataset_availability.py "
+            "(n_expected held no per-bin denominators); recompute the stats store."
+        )
     return dict(manifest)
 
 
@@ -109,24 +124,33 @@ def aggregate_to_display(
     edges: NDArray[np.datetime64],
     mode: str,
 ) -> NDArray[np.float64]:
-    """Aggregate one dataset's fine-bin channel availability onto display bin edges.
+    """Aggregate one dataset's fine-bin counts onto display bin edges.
 
-    Returns, per display bin, the mean fraction of channels with at least one value;
-    NaN where the dataset has no expected data (rendered as white).
+    Returns per display bin, NaN where the dataset has no data (rendered as white):
+
+    - ``coverage``: value-level completeness — total non-NaN values divided by total
+      expected values (``n_expected`` rows/timestamps × channels),
+    - ``raw``: duty cycle — the fraction of fine bins with at least one value,
+      averaged over channels.
     """
     time = ds["time"].values
-    frac_present = (ds["n_present"].values > 0).mean(axis=1)
-    expected = ds["n_expected"].values > 0
-    if mode == "raw":
-        expected = (time >= time[0]) & (time <= time[-1])
-
+    n_present = ds["n_present"].values
+    n_expected = ds["n_expected"].values
     idx = np.searchsorted(edges, time, side="right") - 1
-    valid = (idx >= 0) & (idx < len(edges) - 1) & expected
+    in_range = (idx >= 0) & (idx < len(edges) - 1)
     n_display = len(edges) - 1
-    sums = np.bincount(idx[valid], weights=frac_present[valid], minlength=n_display)
-    counts = np.bincount(idx[valid], minlength=n_display)
-    with np.errstate(invalid="ignore"):
+
+    if mode == "raw":
+        frac_present = (n_present > 0).mean(axis=1)
+        sums = np.bincount(idx[in_range], weights=frac_present[in_range], minlength=n_display)
+        counts = np.bincount(idx[in_range], minlength=n_display)
         return np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+
+    valid = in_range & (n_expected > 0)
+    present = n_present.mean(axis=1)  # mean over channels; per-channel denominator is shared
+    sums = np.bincount(idx[valid], weights=present[valid], minlength=n_display)
+    denom = np.bincount(idx[valid], weights=n_expected[valid].astype(float), minlength=n_display)
+    return np.where(denom > 0, sums / np.maximum(denom, 1), np.nan)
 
 
 def display_edges(
@@ -155,7 +179,7 @@ def _write_figure(fig: go.Figure, out_path: pathlib.Path) -> None:
     logger.info(f"Wrote {out_path}")
 
 
-def _base_layout(height: int) -> dict[str, Any]:
+def _base_layout(height: int, quantity: str) -> dict[str, Any]:
     return {
         "template": "plotly_white",
         "height": height,
@@ -169,7 +193,7 @@ def _base_layout(height: int) -> dict[str, Any]:
             "cmin": 0.0,
             "cmax": 100.0,
             "colorbar": {
-                "title": {"text": "Availability (%)", "side": "right"},
+                "title": {"text": f"{quantity} (%)", "side": "right"},
                 "ticksuffix": "%",
                 "len": 0.75,
             },
@@ -206,6 +230,7 @@ def plot_overview(
     bin_min = manifest["bin_seconds"] // 60
     step_s = int((edges[1] - edges[0]) / np.timedelta64(1, "s"))
     step_str = f"{step_s / 3600:.1f}h" if step_s >= 3600 else f"{step_s / 60:.0f}min"
+    quantity = _MODE_QUANTITY[mode]
     fig = go.Figure(
         go.Heatmap(
             x=edges[:-1],
@@ -217,17 +242,18 @@ def plot_overview(
             ygap=2,
             hovertemplate=(
                 "<b>%{y}</b><br>Display interval starts: %{x|%Y-%m-%d %H:%M}<br>"
-                "Available channels: %{z:.2f}%<extra></extra>"
+                f"{quantity}: %{{z:.2f}}%<extra></extra>"
             ),
         )
     )
     fig.update_layout(
-        **_base_layout(max(440, 34 * len(datasets) + 250)),
+        **_base_layout(max(440, 34 * len(datasets) + 250), quantity),
         title={
             "text": (
                 f"Dataset availability — {manifest['label']}"
-                f"<br><sup>Computed on {bin_min}-min bins; {step_str}/column; mode={mode}. "
-                "White = no data expected. Hover for full names and exact percentages.</sup>"
+                f"<br><sup>Computed on {bin_min}-min bins; {step_str}/column; mode={mode}: "
+                f"{quantity.lower()}, averaged over channels. White = no data. "
+                "Hover for full names and exact percentages.</sup>"
             ),
             "x": 0.01,
             "xanchor": "left",
@@ -268,24 +294,35 @@ def plot_per_channel(
     channels = [str(c) for c in ds["channel"].values]
     completeness = ds["completeness"].values
 
-    expected = ds["n_expected"].values > 0
-    if mode == "raw":
-        expected = np.ones_like(expected)
+    n_present = ds["n_present"].values
+    n_expected = ds["n_expected"].values
     idx = np.searchsorted(edges, time, side="right") - 1
-    valid = (idx >= 0) & (idx < len(edges) - 1) & expected
+    in_range = (idx >= 0) & (idx < len(edges) - 1)
     n_display = len(edges) - 1
-    counts = np.bincount(idx[valid], minlength=n_display)
 
-    present = ds["n_present"].values > 0
     matrix = np.full((len(channels), n_display), np.nan)
-    for channel_idx in range(len(channels)):
-        sums = np.bincount(idx[valid], weights=present[valid, channel_idx], minlength=n_display)
-        matrix[channel_idx] = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+    if mode == "raw":
+        counts = np.bincount(idx[in_range], minlength=n_display)
+        present = (n_present > 0).astype(float)
+        for c in range(len(channels)):
+            sums = np.bincount(idx[in_range], weights=present[in_range, c], minlength=n_display)
+            matrix[c] = np.where(counts > 0, sums / np.maximum(counts, 1), np.nan)
+    else:
+        valid = in_range & (n_expected > 0)
+        denom = np.bincount(
+            idx[valid], weights=n_expected[valid].astype(float), minlength=n_display
+        )
+        for c in range(len(channels)):
+            sums = np.bincount(
+                idx[valid], weights=n_present[valid, c].astype(float), minlength=n_display
+            )
+            matrix[c] = np.where(denom > 0, sums / np.maximum(denom, 1), np.nan)
 
     labels = [
         f"{_shorten(channel, 42)} · overall {100 * value:.1f}%"
         for channel, value in zip(channels, completeness, strict=True)
     ]
+    quantity = _MODE_QUANTITY[mode]
     fig = go.Figure(
         go.Heatmap(
             x=edges[:-1],
@@ -297,17 +334,18 @@ def plot_per_channel(
             ygap=1,
             hovertemplate=(
                 "<b>%{y}</b><br>Display interval starts: %{x|%Y-%m-%d %H:%M}<br>"
-                "Availability: %{z:.2f}%<extra></extra>"
+                f"{quantity}: %{{z:.2f}}%<extra></extra>"
             ),
         )
     )
     fig.update_layout(
-        **_base_layout(max(440, 26 * len(channels) + 250)),
+        **_base_layout(max(440, 26 * len(channels) + 250), quantity),
         title={
             "text": (
                 f"Per-channel availability — {target}"
-                f"<br><sup>Mode={mode}. Labels show overall non-NaN completeness; "
-                "hover for full channel names and exact interval percentages.</sup>"
+                f"<br><sup>Mode={mode}: {quantity.lower()} per channel. Labels show "
+                "overall non-NaN completeness; hover for full channel names and exact "
+                "interval percentages.</sup>"
             ),
             "x": 0.01,
             "xanchor": "left",
@@ -499,7 +537,8 @@ def main(argv: list[str] | None = None) -> None:
         "--mode",
         choices=["coverage", "raw"],
         default="coverage",
-        help="coverage: availability relative to expected timestamps; raw: plain duty cycle.",
+        help="coverage: value completeness relative to expected rows/timestamps; "
+        "raw: plain duty cycle.",
     )
     parser.add_argument(
         "--display-bins",

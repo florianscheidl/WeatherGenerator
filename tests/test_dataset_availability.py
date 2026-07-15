@@ -79,8 +79,10 @@ def test_analyze_obs_gaps_and_completeness(obs_zarr: pathlib.Path):
     # the 6h gap has zero values; every other hourly bin has 4 rows (obsvalue_b half NaN)
     gap = slice(6, 12)
     assert (r.n_present[gap] == 0).all()
+    assert (r.n_expected[gap] == 0).all()
     present_outside = np.delete(r.n_present, np.arange(6, 12), axis=0)
     assert (present_outside == [4, 2]).all()
+    assert (np.delete(r.n_expected, np.arange(6, 12)) == 4).all()
     # obsvalue_a fully valid, obsvalue_b valid in half the rows
     np.testing.assert_allclose(r.completeness, [1.0, 0.5])
     assert r.native_frequency_seconds is None
@@ -160,12 +162,12 @@ def test_store_roundtrip_and_plots(obs_zarr: pathlib.Path, tmp_path: pathlib.Pat
     assert overview.exists() and overview.stat().st_size > 0
     overview_text = overview.read_text()
     assert "plotly" in overview_text.lower()
-    assert "Available channels: %{z:.2f}%" in overview_text
+    assert "Value completeness: %{z:.2f}%" in overview_text
 
     per_channel = tmp_path / "per_channel.html"
     pda.plot_per_channel(store, "SYNOP/obs", per_channel, "coverage", 100, None)
     assert per_channel.exists() and per_channel.stat().st_size > 0
-    assert "Availability: %{z:.2f}%" in per_channel.read_text()
+    assert "Value completeness: %{z:.2f}%" in per_channel.read_text()
 
 
 def test_summary_html_and_csv_exports(tmp_path: pathlib.Path):
@@ -228,6 +230,33 @@ def test_aggregate_to_display_coverage_vs_raw():
     coverage = pda.aggregate_to_display(ds, edges, "coverage")
     # a complete regular dataset has 100% availability in coverage mode
     np.testing.assert_allclose(coverage[np.isfinite(coverage)], 1.0)
+
+
+def test_aggregate_to_display_obs_value_completeness(obs_zarr: pathlib.Path):
+    r = cda.analyze_obs(obs_zarr, "SYNOP", bin_seconds=3600, start=None, end=None)
+    ds = cda.result_to_xarray(r)
+    # hourly display columns aligned with the fine bins
+    edges = pda.display_edges(r.time_bins[0], r.time_bins[-1] + np.timedelta64(1, "h"), 48)
+
+    coverage = pda.aggregate_to_display(ds, edges, "coverage")
+    # per occupied hour: obsvalue_a 4/4 + obsvalue_b 2/4 of 2*4 slots = 75%; the gap is white
+    np.testing.assert_allclose(coverage[:6], 0.75)
+    assert np.isnan(coverage[6:12]).all()
+    np.testing.assert_allclose(coverage[12:48], 0.75)
+
+    raw = pda.aggregate_to_display(ds, edges, "raw")
+    # duty cycle: both channels have values in every occupied bin, none in the gap
+    np.testing.assert_allclose(raw[:6], 1.0)
+    np.testing.assert_allclose(raw[6:12], 0.0)
+    np.testing.assert_allclose(raw[12:48], 1.0)
+
+
+def test_load_manifest_rejects_old_store_format(tmp_path: pathlib.Path):
+    store = tmp_path / "old.zarr"
+    root = zarr.open_group(str(store), mode="w")
+    root.attrs["wg_availability"] = {"label": "x", "bin_seconds": 900, "groups": [], "skipped": []}
+    with pytest.raises(ValueError, match="older"):
+        pda.load_manifest(store)
 
 
 def test_default_output_path():

@@ -14,9 +14,10 @@ For every dataset (one entry of ``filenames`` per stream) the script measures, o
 regular time-bin grid (default 15 minutes):
 
 - ``n_present[time, channel]`` — number of non-NaN values per channel per bin,
-- ``n_expected[time]``          — number of timestamps at which data is expected
-                                  (native timestamps for regular datasets, 1 inside the
-                                  dataset's time span for irregular observations),
+- ``n_expected[time]``          — per-channel denominator: how many values a fully
+                                  complete channel would have in the bin (native
+                                  timestamps for regular datasets, data rows for
+                                  irregular observations),
 
 plus per-channel completeness and an estimate of the native temporal resolution.
 Results are written to a single zarr store (one group per dataset) consumed by
@@ -74,6 +75,10 @@ logger = logging.getLogger(__name__)
 _EPOCH = np.datetime64(0, "s")
 _SECOND = np.timedelta64(1, "s")
 
+# Bump when the store layout or array semantics change (2: n_expected counts the
+# per-channel value slots per bin instead of being 1 for irregular observations).
+FORMAT_VERSION = 2
+
 # Reader types this script can analyze; anything else is reported as skipped.
 _ANEMOI_TYPES = ("anemoi", "anemoi_operan")
 _OBS_TYPES = ("obs",)
@@ -91,7 +96,7 @@ class DatasetAvailability:
     bin_seconds: int
     time_bins: NDArray[np.datetime64]  # [n_bins] bin start times
     n_present: NDArray[np.int32]  # [n_bins, n_channels] non-NaN values per bin
-    n_expected: NDArray[np.int64]  # [n_bins] expected timestamps per bin
+    n_expected: NDArray[np.int64]  # [n_bins] per-channel value slots per bin (rows/timestamps)
     completeness: NDArray[np.float64]  # [n_channels] non-NaN fraction over the scan range
     time_min: np.datetime64
     time_max: np.datetime64
@@ -211,7 +216,7 @@ def analyze_obs(
     bin_start = _floor_to_bin(t_lo, bin_seconds)
     n_bins = int((t_hi - bin_start) / _SECOND) // bin_seconds + 1
     n_present = np.zeros((n_bins, len(channels)), dtype=np.int32)
-    n_expected = np.ones(n_bins, dtype=np.int64)  # irregular: data may occur in any bin
+    n_expected = np.zeros(n_bins, dtype=np.int64)  # rows per bin, accumulated per slab
 
     chunk_rows = data.chunks[0]
     slab_rows = chunk_rows * max(1, 2_000_000 // max(1, chunk_rows))
@@ -237,6 +242,7 @@ def analyze_obs(
         dt_slab = dt_slab[rows[0] : rows[-1] + 1]
         bin_idx = _to_bin_idx(dt_slab, bin_start, bin_seconds)
         accumulate_counts(n_present, bin_idx, np.isfinite(values))
+        n_expected += np.bincount(bin_idx, minlength=n_bins)
         total_rows_seen += len(dt_slab)
 
         if n_deltas < max_delta_samples and len(dt_slab) > 1:
@@ -523,6 +529,7 @@ def write_store(
     root.attrs.update(
         {
             "wg_availability": {
+                "format_version": FORMAT_VERSION,
                 "label": label,
                 "bin_seconds": bin_seconds,
                 "groups": manifest,
@@ -712,7 +719,12 @@ def main(argv: list[str] | None = None) -> None:
     existing_groups: set[str] = set()
     if args.skip_existing and out_path.exists():
         old_manifest = zarr.open_group(str(out_path), mode="r").attrs.get("wg_availability")
-        existing_groups = {g["group"] for g in (old_manifest or {}).get("groups", [])}
+        if (old_manifest or {}).get("format_version") != FORMAT_VERSION:
+            logger.warning(
+                f"{out_path} was written with an older format; recomputing all datasets."
+            )
+        else:
+            existing_groups = {g["group"] for g in (old_manifest or {}).get("groups", [])}
 
     # collect jobs and the manifest in config order; datasets already in the store are reused
     jobs: list[dict] = []
