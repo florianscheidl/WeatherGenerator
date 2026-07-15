@@ -806,7 +806,8 @@ class Trainer(TrainerBase):
             ]
 
             # backward pass
-            self.optimizer.zero_grad()
+            for optimizer in self.optimizers:
+                optimizer.zero_grad()
             self.grad_scaler.scale(loss).backward()
 
             # gradient clipping
@@ -1129,7 +1130,8 @@ class ProfilingTrainer(Trainer):
 
         dataset_iter = iter(self.data_loader)
 
-        self.optimizer.zero_grad()
+        for optimizer in self.optimizers:
+            optimizer.zero_grad()
         self.t_start = time.time()
 
         if self.memory_profiling and is_root():
