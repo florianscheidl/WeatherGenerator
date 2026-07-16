@@ -1,3 +1,5 @@
 train_logging:
   throughput_tracking: True
   memory_tracking: True
+data_loading:
+  rng_seed: 26

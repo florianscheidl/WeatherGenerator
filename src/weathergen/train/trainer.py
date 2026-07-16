@@ -710,7 +710,9 @@ class Trainer(TrainerBase):
 
         self._log_terminal(bidx, mini_epoch, TRAIN)
         if bidx % self.train_logging.metrics == 0:
-            self._log(TRAIN)
+            perf_metrics = self.perf_tracker.compute_metrics()
+            mem_metrics = self.memory_tracker.collect(window="train")
+            self._log(TRAIN, extra_metrics={**mem_metrics, **perf_metrics})
             # Log collapse metrics
             if self.collapse_monitor.should_log(self.cf.general.istep):
                 self._log_collapse_metrics(TRAIN)
@@ -753,10 +755,8 @@ class Trainer(TrainerBase):
         # state dict on rank 0 is often the run-wide peak. There is no companion
         # metrics record at this point, so log it on its own.
         mem_metrics = self.memory_tracker.collect(window="save_model")
-        perf_metrics = self.perf_tracker.compute_metrics()
-        extra_metrics = {**mem_metrics, **perf_metrics}
         if mem_metrics and is_root():
-            self.train_logger.log_metrics(TRAIN, extra_metrics, step=self.cf.general.istep)
+            self.train_logger.log_metrics(TRAIN, mem_metrics, step=self.cf.general.istep)
 
     def _log(self, stage: Stage, extra_metrics: dict[str, float] | None = None):
         """
