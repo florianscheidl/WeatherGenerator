@@ -885,7 +885,7 @@ class ProfilingTrainer(Trainer):
         self.max_profile_steps: int = 0
         self.schedule = None
         self.prof = nullcontext()
-        self.only_profiling: bool = True
+        self.only_profiling: bool = False
         self.memory_profiling: bool = False
         self.pytorch_profiling: bool = False
 
@@ -894,7 +894,7 @@ class ProfilingTrainer(Trainer):
         "warmup_iteration": 1,
         "active_iteration": 1,
         "repeat": 1,
-        "only_profiling": True,  # True shuts down after profiling, False continues training
+        "only_profiling": False,  # True shuts down after profiling, False continues training
         "memory_profiling": False,
         "pytorch_profiling": False,
     }
