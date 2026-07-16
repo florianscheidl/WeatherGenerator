@@ -1,0 +1,3 @@
+train_logging:
+  throughput_tracking: True
+  memory_tracking: True
