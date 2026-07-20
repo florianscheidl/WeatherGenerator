@@ -24,11 +24,18 @@ Example usage:
         --run-ids run1 run2 run3 \\
         --metrics loss_avg_mean LossPhysical.ERA5.mse.avg "LossPhysical.ERA5.mse.z_500.*" \\
         --metrics-sample-normalized loss_avg_mean \\
+        --metrics-sample-derivative loss_avg_mean \\
         --results-dir results
 
-Metrics passed to ``--metrics-sample-normalized`` are divided by the ``num_samples`` of
-their own record and written to ``<metric>.per_sample.<stage>.png``, so a metric may appear
-in both lists to get a raw and a normalized figure. At least one of the two is required.
+Besides the raw ``--metrics``, two sample-relative views are available, each written to its
+own suffixed file so a metric may appear in several lists at once:
+
+- ``--metrics-sample-normalized`` divides each value by the ``num_samples`` of its own
+  record (``<metric>.per_sample.<stage>.png``).
+- ``--metrics-sample-derivative`` takes the finite difference between consecutive records,
+  ``d(metric) / d(num_samples)`` (``<metric>.derivative.<stage>.png``).
+
+At least one of the three lists is required.
 
 Plots are written to ``<results-dir>/<run-id>/`` for a single run and to
 ``<results-dir>/metric_plots/`` when comparing several runs (override with --out-dir).
@@ -42,10 +49,22 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
+
+# How a metric's values are transformed before plotting. "raw" plots the logged value,
+# "per_sample" divides by the record's own num_samples, "derivative" takes the finite
+# difference between consecutive records (d metric / d num_samples).
+Transform = Literal["raw", "per_sample", "derivative"]
+
+_TRANSFORM_SUFFIX: dict[Transform, str] = {
+    "raw": "",
+    "per_sample": ".per_sample",
+    "derivative": ".derivative",
+}
 
 # Colorblind-safe categorical palette (light surface), assigned to runs in fixed order.
 _SERIES_COLORS = [
@@ -102,22 +121,42 @@ def resolve_metric_names(
 
 
 def extract_series(
-    records: list[dict[str, float | int]], metric: str, normalize: bool = False
+    records: list[dict[str, float | int]], metric: str, transform: Transform = "raw"
 ) -> tuple[list[float], list[float]]:
     """Return (num_samples, values) for records that contain both keys, in file order.
 
-    With ``normalize``, each value is divided by the ``num_samples`` of its own record;
-    records logged at ``num_samples == 0`` are dropped, having no defined ratio.
+    ``per_sample`` divides each value by the ``num_samples`` of its own record, dropping
+    records at ``num_samples == 0`` as having no defined ratio. ``derivative`` returns the
+    finite difference between consecutive records, ``(y[i] - y[i-1]) / (x[i] - x[i-1])``,
+    plotted at the right endpoint ``x[i]`` so it lines up with the raw curve; it is one
+    point shorter than the raw series, and pairs with no change in ``num_samples`` are
+    skipped rather than dividing by zero.
     """
     xs: list[float] = []
     ys: list[float] = []
     for rec in records:
         if "num_samples" in rec and metric in rec:
             num_samples = float(rec["num_samples"])
-            if normalize and num_samples == 0.0:
+            if transform == "per_sample":
+                if num_samples == 0.0:
+                    continue
+                xs.append(num_samples)
+                ys.append(float(rec[metric]) / num_samples)
+            else:
+                xs.append(num_samples)
+                ys.append(float(rec[metric]))
+
+    if transform == "derivative":
+        dxs: list[float] = []
+        dys: list[float] = []
+        for i in range(1, len(xs)):
+            dx = xs[i] - xs[i - 1]
+            if dx == 0.0:
                 continue
-            xs.append(num_samples)
-            ys.append(float(rec[metric]) / num_samples if normalize else float(rec[metric]))
+            dxs.append(xs[i])
+            dys.append((ys[i] - ys[i - 1]) / dx)
+        return dxs, dys
+
     return xs, ys
 
 
@@ -127,17 +166,17 @@ def plot_metric(
     out_dir: Path,
     stage: str,
     logy: bool,
-    normalize: bool = False,
+    transform: Transform = "raw",
 ) -> Path | None:
     """Plot one metric for all runs and save the figure; returns the path or None if no data.
 
-    With ``normalize``, values are plotted per sample (divided by ``num_samples``) and the
-    figure is written to a separate ``.per_sample.`` file so it never overwrites the raw one.
+    Each ``transform`` writes to its own suffixed file, so the same metric can be plotted
+    raw, per sample and as a derivative without the figures overwriting one another.
     """
     fig, ax = plt.subplots(figsize=(8, 4.5))
     plotted = False
     for idx, (run_id, records) in enumerate(runs.items()):
-        xs, ys = extract_series(records, metric, normalize)
+        xs, ys = extract_series(records, metric, transform)
         if not xs:
             logger.warning("Run %s has no values for metric %s", run_id, metric)
             continue
@@ -155,8 +194,17 @@ def plot_metric(
         return None
 
     ax.set_xlabel("num_samples")
-    ax.set_ylabel(f"{metric} / num_samples" if normalize else metric)
-    ax.set_title(f"{metric} per sample ({stage})" if normalize else f"{metric} ({stage})")
+    if transform == "per_sample":
+        ax.set_ylabel(f"{metric} / num_samples")
+        ax.set_title(f"{metric} per sample ({stage})")
+    elif transform == "derivative":
+        ax.set_ylabel(f"d({metric}) / d(num_samples)")
+        ax.set_title(f"{metric} rate of change ({stage})")
+        # A derivative straddles zero; mark it so sign changes are readable.
+        ax.axhline(0.0, color="#999999", linewidth=0.8)
+    else:
+        ax.set_ylabel(metric)
+        ax.set_title(f"{metric} ({stage})")
     if logy:
         ax.set_yscale("log")
     ax.grid(True, color="#dddddd", linewidth=0.6)
@@ -167,8 +215,7 @@ def plot_metric(
     fig.tight_layout()
 
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", metric)
-    suffix = ".per_sample" if normalize else ""
-    out_path = out_dir / f"{safe_name}{suffix}.{stage}.png"
+    out_path = out_dir / f"{safe_name}{_TRANSFORM_SUFFIX[transform]}.{stage}.png"
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
@@ -235,6 +282,14 @@ def main() -> None:
         "yields both a raw and a normalized figure",
     )
     parser.add_argument(
+        "--metrics-sample-derivative",
+        nargs="+",
+        default=[],
+        help="Metric names or fnmatch patterns to plot as the first derivative with respect "
+        "to num_samples (finite difference between consecutive records); written to "
+        "<metric>.derivative.<stage>.png",
+    )
+    parser.add_argument(
         "--results-dir",
         type=Path,
         default=Path("results"),
@@ -255,8 +310,12 @@ def main() -> None:
     parser.add_argument("--logy", action="store_true", help="Use a logarithmic y-axis")
     args = parser.parse_args()
 
-    if not args.metrics and not args.metrics_sample_normalized:
-        parser.error("at least one of --metrics or --metrics-sample-normalized is required")
+    requested = args.metrics + args.metrics_sample_normalized + args.metrics_sample_derivative
+    if not requested:
+        parser.error(
+            "at least one of --metrics, --metrics-sample-normalized or "
+            "--metrics-sample-derivative is required"
+        )
 
     runs: dict[str, list[dict[str, float | int]]] = {}
     for run_id in args.run_ids:
@@ -282,23 +341,21 @@ def main() -> None:
         out_dir = args.results_dir / "metric_plots"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    metric_names = resolve_metric_names(args.metrics, runs)
-    normalized_names = resolve_metric_names(args.metrics_sample_normalized, runs)
-    if not metric_names and not normalized_names:
+    by_transform: list[tuple[Transform, list[str]]] = [
+        ("raw", resolve_metric_names(args.metrics, runs)),
+        ("per_sample", resolve_metric_names(args.metrics_sample_normalized, runs)),
+        ("derivative", resolve_metric_names(args.metrics_sample_derivative, runs)),
+    ]
+    if not any(names for _, names in by_transform):
         raise SystemExit("No requested metric matched any key in the metrics files.")
 
     written = 0
-    for metric in metric_names:
-        out_path = plot_metric(metric, runs, out_dir, args.stage, args.logy)
-        if out_path is not None:
-            logger.info("Wrote %s", out_path)
-            written += 1
-
-    for metric in normalized_names:
-        out_path = plot_metric(metric, runs, out_dir, args.stage, args.logy, normalize=True)
-        if out_path is not None:
-            logger.info("Wrote %s", out_path)
-            written += 1
+    for transform, names in by_transform:
+        for metric in names:
+            out_path = plot_metric(metric, runs, out_dir, args.stage, args.logy, transform)
+            if out_path is not None:
+                logger.info("Wrote %s", out_path)
+                written += 1
 
     samples_path = plot_num_samples(runs, out_dir, args.stage)
     if samples_path is not None:
