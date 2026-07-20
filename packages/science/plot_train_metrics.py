@@ -166,12 +166,12 @@ def plot_num_samples(
     totals: list[float] = []
     colors: list[str] = []
     for idx, (run_id, records) in enumerate(runs.items()):
-        last = next((rec for rec in reversed(records) if "num_samples" in rec), None)
+        last = next((rec for rec in reversed(records) if "performance.throughput.global.samples" in rec), None)
         if last is None:
-            logger.warning("Run %s has no num_samples record", run_id)
+            logger.warning("Run %s has no performance.throughput.global.samples record", run_id)
             continue
         run_ids.append(run_id)
-        totals.append(float(last["num_samples"]))
+        totals.append(float(last["performance.throughput.global.samples"]))
         # Keep bar colors aligned with the line plots, which index the palette by run order.
         colors.append(_SERIES_COLORS[idx % len(_SERIES_COLORS)])
     if not run_ids:
