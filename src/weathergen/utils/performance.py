@@ -23,6 +23,12 @@ class ThroughputTracker:
     """Tracks training throughput metrics.
 
     Accumulates per-batch sample and source-byte counts across ranks.
+
+    Note the counts include the first steps of a run, which carry one-off startup
+    costs (kernel autotuning, allocator growth, NCCL buffer setup, cold page
+    cache). Since the counters are cumulative and never reset, only the first
+    logging window is affected; discard it when reading throughput off a short
+    run rather than filtering here, to keep the per-step path branch-free.
     """
 
     def __init__(
@@ -50,7 +56,7 @@ class ThroughputTracker:
         self.update(source_mb)
 
     def update(self, source_mb: float) -> None:
-        """Record one training step, handling warmup internally.
+        """Record one training step.
 
         Purely local bookkeeping: no device synchronization. The cumulative
         counts are turned into throughput (and reduced across ranks) only when
@@ -66,18 +72,23 @@ class ThroughputTracker:
         self._total_mb += source_mb
 
     def compute_metrics(self) -> dict[str, float]:
-        """Return throughput metrics dict, or None if warmup is not yet complete.
+        """Return throughput metrics, empty if no step has been recorded yet.
 
         Collective: performs a single SUM all-reduce of the per-device throughput
         to obtain the global throughput, so it must be called on every rank at the
         same point in the training loop. The returned dict is identical on all
         ranks. Global throughput is the sum of the per-device rates across ranks.
 
+        Note the empty-dict early return is not collective, but it is taken on
+        every rank simultaneously: it depends only on the step count, and all
+        ranks run the training loop in lockstep.
+
         Returns:
-            Dict of ``"performance.<key>": value`` pairs, or None if no data yet.
+            Dict of ``"performance.<key>": value`` pairs; empty if no step has
+            been recorded.
         """
         if self._total_batches == 0:
-            return None
+            return {}
 
         device_batches = self._total_batches
         device_samples = self._total_samples
