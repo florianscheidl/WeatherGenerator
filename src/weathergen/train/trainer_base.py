@@ -89,9 +89,9 @@ class TrainerBase:
         # in the distributed case, rank 0's seed is communicated to all ranks below
         if cf.data_loading.get("rng_seed", None) is None:
             cf.data_loading.rng_seed = int(time.time())
-        # seed 0 breaks the multiplicative per-rank/worker seed derivation in
-        # MultiStreamDataSampler and negative seeds are invalid for numpy
-        cf.data_loading.rng_seed = max(int(cf.data_loading.rng_seed), 1)
+        # negative seeds are invalid for numpy (both np.random.seed and the SeedSequence
+        # derivation in MultiStreamDataSampler); 0 is a valid seed for both
+        cf.data_loading.rng_seed = max(int(cf.data_loading.rng_seed), 0)
 
         if not dist.is_available():
             print("Distributed training is not available.")

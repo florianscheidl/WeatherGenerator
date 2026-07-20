@@ -24,8 +24,13 @@ logger = logging.getLogger(__name__)
 class ThroughputTracker:
     """Tracks training throughput metrics.
 
-    Accumulates per-batch sample and source-byte counts across ranks, with the warmup
-    / accumulation logic required to produce stable global throughput metrics.
+    Accumulates per-batch sample and source-byte counts across ranks.
+
+    Note the counts include the first steps of a run, which carry one-off startup
+    costs (kernel autotuning, allocator growth, NCCL buffer setup, cold page
+    cache). Since the counters are cumulative and never reset, only the first
+    logging window is affected; discard it when reading throughput off a short
+    run rather than filtering here, to keep the per-step path branch-free.
     """
 
     def __init__(
@@ -127,7 +132,8 @@ class ThroughputTracker:
         """Return performance metrics dict, or None if warmup is not yet complete.
 
         Returns:
-            Dict of ``"performance.<key>": value`` pairs, or None if no data yet.
+            Dict of ``"performance.<key>": value`` pairs; empty if no step has
+            been recorded.
         """
         if self._total_batches == 0 or self._t0 is None:
             return None

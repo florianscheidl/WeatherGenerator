@@ -74,12 +74,15 @@ def test_init_ddp_fills_missing_seed():
     assert cf.data_loading.rng_seed >= 1
 
 
-def test_init_ddp_clamps_nonpositive_seed():
-    """Seed 0 / negative seeds are clamped to >= 1 (0 breaks per-rank seed derivation)."""
-    for seed in (0, -5):
-        cf = _make_cf(seed)
-        TrainerBase.init_ddp(cf)
-        assert cf.data_loading.rng_seed == 1
+def test_init_ddp_clamps_negative_seed():
+    """Negative seeds are clamped to 0; 0 itself is valid and kept."""
+    cf = _make_cf(-5)
+    TrainerBase.init_ddp(cf)
+    assert cf.data_loading.rng_seed == 0
+
+    cf = _make_cf(0)
+    TrainerBase.init_ddp(cf)
+    assert cf.data_loading.rng_seed == 0
 
 
 def test_init_ddp_seeds_rngs_from_config():
