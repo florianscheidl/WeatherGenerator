@@ -23,7 +23,12 @@ Example usage:
     uv run python packages/science/plot_train_metrics.py \\
         --run-ids run1 run2 run3 \\
         --metrics loss_avg_mean LossPhysical.ERA5.mse.avg "LossPhysical.ERA5.mse.z_500.*" \\
+        --metrics-sample-normalized loss_avg_mean \\
         --results-dir results
+
+Metrics passed to ``--metrics-sample-normalized`` are divided by the ``num_samples`` of
+their own record and written to ``<metric>.per_sample.<stage>.png``, so a metric may appear
+in both lists to get a raw and a normalized figure. At least one of the two is required.
 
 Plots are written to ``<results-dir>/<run-id>/`` for a single run and to
 ``<results-dir>/metric_plots/`` when comparing several runs (override with --out-dir).
@@ -97,15 +102,22 @@ def resolve_metric_names(
 
 
 def extract_series(
-    records: list[dict[str, float | int]], metric: str
+    records: list[dict[str, float | int]], metric: str, normalize: bool = False
 ) -> tuple[list[float], list[float]]:
-    """Return (num_samples, values) for records that contain both keys, in file order."""
+    """Return (num_samples, values) for records that contain both keys, in file order.
+
+    With ``normalize``, each value is divided by the ``num_samples`` of its own record;
+    records logged at ``num_samples == 0`` are dropped, having no defined ratio.
+    """
     xs: list[float] = []
     ys: list[float] = []
     for rec in records:
         if "num_samples" in rec and metric in rec:
-            xs.append(float(rec["num_samples"]))
-            ys.append(float(rec[metric]))
+            num_samples = float(rec["num_samples"])
+            if normalize and num_samples == 0.0:
+                continue
+            xs.append(num_samples)
+            ys.append(float(rec[metric]) / num_samples if normalize else float(rec[metric]))
     return xs, ys
 
 
@@ -115,12 +127,17 @@ def plot_metric(
     out_dir: Path,
     stage: str,
     logy: bool,
+    normalize: bool = False,
 ) -> Path | None:
-    """Plot one metric for all runs and save the figure; returns the path or None if no data."""
+    """Plot one metric for all runs and save the figure; returns the path or None if no data.
+
+    With ``normalize``, values are plotted per sample (divided by ``num_samples``) and the
+    figure is written to a separate ``.per_sample.`` file so it never overwrites the raw one.
+    """
     fig, ax = plt.subplots(figsize=(8, 4.5))
     plotted = False
     for idx, (run_id, records) in enumerate(runs.items()):
-        xs, ys = extract_series(records, metric)
+        xs, ys = extract_series(records, metric, normalize)
         if not xs:
             logger.warning("Run %s has no values for metric %s", run_id, metric)
             continue
@@ -138,8 +155,8 @@ def plot_metric(
         return None
 
     ax.set_xlabel("num_samples")
-    ax.set_ylabel(metric)
-    ax.set_title(f"{metric} ({stage})")
+    ax.set_ylabel(f"{metric} / num_samples" if normalize else metric)
+    ax.set_title(f"{metric} per sample ({stage})" if normalize else f"{metric} ({stage})")
     if logy:
         ax.set_yscale("log")
     ax.grid(True, color="#dddddd", linewidth=0.6)
@@ -150,7 +167,8 @@ def plot_metric(
     fig.tight_layout()
 
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", metric)
-    out_path = out_dir / f"{safe_name}.{stage}.png"
+    suffix = ".per_sample" if normalize else ""
+    out_path = out_dir / f"{safe_name}{suffix}.{stage}.png"
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return out_path
@@ -204,9 +222,17 @@ def main() -> None:
     parser.add_argument("--run-ids", required=True, nargs="+", help="Run ids to plot")
     parser.add_argument(
         "--metrics",
-        required=True,
         nargs="+",
+        default=[],
         help="Metric names or fnmatch patterns (quote patterns to avoid shell globbing)",
+    )
+    parser.add_argument(
+        "--metrics-sample-normalized",
+        nargs="+",
+        default=[],
+        help="Metric names or fnmatch patterns to plot divided by num_samples; written to "
+        "<metric>.per_sample.<stage>.png. May repeat names given to --metrics, which then "
+        "yields both a raw and a normalized figure",
     )
     parser.add_argument(
         "--results-dir",
@@ -228,6 +254,9 @@ def main() -> None:
     )
     parser.add_argument("--logy", action="store_true", help="Use a logarithmic y-axis")
     args = parser.parse_args()
+
+    if not args.metrics and not args.metrics_sample_normalized:
+        parser.error("at least one of --metrics or --metrics-sample-normalized is required")
 
     runs: dict[str, list[dict[str, float | int]]] = {}
     for run_id in args.run_ids:
@@ -254,12 +283,19 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metric_names = resolve_metric_names(args.metrics, runs)
-    if not metric_names:
+    normalized_names = resolve_metric_names(args.metrics_sample_normalized, runs)
+    if not metric_names and not normalized_names:
         raise SystemExit("No requested metric matched any key in the metrics files.")
 
     written = 0
     for metric in metric_names:
         out_path = plot_metric(metric, runs, out_dir, args.stage, args.logy)
+        if out_path is not None:
+            logger.info("Wrote %s", out_path)
+            written += 1
+
+    for metric in normalized_names:
+        out_path = plot_metric(metric, runs, out_dir, args.stage, args.logy, normalize=True)
         if out_path is not None:
             logger.info("Wrote %s", out_path)
             written += 1
