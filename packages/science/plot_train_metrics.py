@@ -15,6 +15,9 @@ Reads the JSON-lines metrics files written during training for one or more runs
 requested metric, with one curve per run, plotted over the logged ``num_samples``.
 Metric names may be exact keys or fnmatch patterns (e.g. ``"LossPhysical.ERA5.mse.z_500.*"``).
 
+Alongside the metric figures, a bar plot ``num_samples.<stage>.png`` compares the total
+``num_samples`` each run reached, read from its last logged record.
+
 Example usage:
 
     uv run python packages/science/plot_train_metrics.py \\
@@ -153,6 +156,47 @@ def plot_metric(
     return out_path
 
 
+def plot_num_samples(
+    runs: dict[str, list[dict[str, float | int]]],
+    out_dir: Path,
+    stage: str,
+) -> Path | None:
+    """Bar-plot the total num_samples per run, taken from each run's last logged record."""
+    run_ids: list[str] = []
+    totals: list[float] = []
+    colors: list[str] = []
+    for idx, (run_id, records) in enumerate(runs.items()):
+        last = next((rec for rec in reversed(records) if "num_samples" in rec), None)
+        if last is None:
+            logger.warning("Run %s has no num_samples record", run_id)
+            continue
+        run_ids.append(run_id)
+        totals.append(float(last["num_samples"]))
+        # Keep bar colors aligned with the line plots, which index the palette by run order.
+        colors.append(_SERIES_COLORS[idx % len(_SERIES_COLORS)])
+    if not run_ids:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    bars = ax.bar(run_ids, totals, color=colors, width=0.6)
+    ax.bar_label(bars, fmt="%.0f", padding=2, fontsize=8)
+
+    ax.set_ylabel("num_samples")
+    ax.set_title(f"total num_samples ({stage})")
+    ax.grid(True, axis="y", color="#dddddd", linewidth=0.6)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(axis="x", labelrotation=45 if len(run_ids) > 3 else 0)
+    for label in ax.get_xticklabels():
+        label.set_horizontalalignment("right" if len(run_ids) > 3 else "center")
+    fig.tight_layout()
+
+    out_path = out_dir / f"num_samples.{stage}.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Plot training metrics of one or more runs against num_samples."
@@ -219,6 +263,12 @@ def main() -> None:
         if out_path is not None:
             logger.info("Wrote %s", out_path)
             written += 1
+
+    samples_path = plot_num_samples(runs, out_dir, args.stage)
+    if samples_path is not None:
+        logger.info("Wrote %s", samples_path)
+        written += 1
+
     logger.info("Wrote %d plot(s) to %s", written, out_dir)
 
 
