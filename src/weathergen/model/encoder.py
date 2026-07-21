@@ -226,7 +226,7 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(toks, cell_lens_cur)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
