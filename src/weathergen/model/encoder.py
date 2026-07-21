@@ -169,7 +169,8 @@ class EncoderModule(torch.nn.Module):
         )
 
         # local assimilation model on the full token set
-        toks = checkpoint(self.ae_local_engine, tokens, cell_lens_cur, use_reentrant=False)
+        # NOTE: no checkpoint here, LocalAssimilationEngine checkpoints per block
+        toks = self.ae_local_engine(tokens, cell_lens_cur)
         toks, posteriors = self.interpolate_latents(toks)
 
         # keep only non-empty cells for the local->global adapter
@@ -181,12 +182,13 @@ class EncoderModule(torch.nn.Module):
         q_cells_lens_unmasked = torch.cat([zero_pad, q_cells_lens_cur[1:][mask]])
         cell_lens_unmasked = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
 
-        toks_global_unmasked = checkpoint(self.ae_local_global_engine,
+        toks_global_unmasked = checkpoint(
+            self.ae_local_global_engine,
             toks,
             toks_global_unmasked,
             q_cells_lens_unmasked,
             cell_lens_unmasked,
-            use_reentrant=False
+            use_reentrant=False,
         )
 
         return toks_global_unmasked, [posteriors]
@@ -349,11 +351,13 @@ class EncoderModule(torch.nn.Module):
         )
 
         # apply aggregation engine on unmasked tokens
-        tokens_global_unmasked = self.aggregation_engine_unmasked(
+        tokens_global_unmasked = checkpoint(
+            self.aggregation_engine_unmasked,
             tokens_global_unmasked,
             tokens_global_register_class,
             batch.tokens_lens,
             rope_cell_coords=model_params.rope_cell_coords,
+            use_reentrant=False,
         )
 
         # final processing

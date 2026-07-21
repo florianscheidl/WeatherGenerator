@@ -240,7 +240,7 @@ class LocalAssimilationEngine(torch.nn.Module):
 
     def forward(self, tokens_c, cell_lens_c):
         for block in self.ae_local_blocks:
-            tokens_c = block(tokens_c, cell_lens_c)
+            tokens_c = checkpoint(block, tokens_c, cell_lens_c, use_reentrant=False)
         return tokens_c
 
 
