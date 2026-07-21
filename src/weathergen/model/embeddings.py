@@ -104,12 +104,26 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        # NOTE: no checkpoint on self.embed, a single Linear whose input is x_in (alive
+        # regardless) and whose output is retained as the first block's checkpoint input
+        x = peh(self.embed(x_in.transpose(-2, -1)))
 
-        for layer in self.layers:
-            x = checkpoint(layer, x, use_reentrant=False)
+        # checkpoint attention and MLP jointly so only one activation per block is retained
+        # (grouping in __init__ instead would rename the parameters and break existing
+        # model checkpoints)
+        for attn, mlp in zip(self.layers[::2], self.layers[1::2], strict=True):
+            x = checkpoint(lambda t, a=attn, m=mlp: m(a(t)), x, use_reentrant=False)
 
-        # read out
+        return checkpoint(self.readout, x, use_reentrant=False)
+
+    def readout(self, x):
+        """
+        Map the per-channel embeddings onto the output tokens.
+
+        Checkpointed by forward: in 'full' mode ln_final alone materialises a tensor as
+        large as x, which is otherwise held until the backward pass.
+        """
+
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
@@ -139,6 +153,7 @@ class StreamEmbedLinear(torch.nn.Module):
         self.layer = torch.nn.Linear(dim_in, dim_out)
 
     def forward(self, x):
-        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
+        # NOTE: no checkpoint, a single Linear whose input is the argument itself
+        x = self.layer(x.flatten(-2, -1)).unsqueeze(0)
 
         return x
