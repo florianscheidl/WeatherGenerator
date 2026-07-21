@@ -30,13 +30,6 @@ from weathergen.utils.performance import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def _no_cuda_sync():
-    """Disable cuda.synchronize globally — tests run on CPU."""
-    with patch("weathergen.utils.performance.torch.cuda.synchronize"):
-        yield
-
-
 def _make_mock_source_samples(tensor_shapes: list[list[tuple]]):
     """Build a minimal mock of the source_samples object.
 
@@ -104,14 +97,14 @@ def tracker():
 
 
 def test_no_metrics_before_any_step(tracker):
-    """compute_metrics returns None until at least one step is recorded."""
-    assert tracker.compute_metrics() is None
+    """compute_metrics reports nothing until at least one step is recorded."""
+    assert tracker.compute_metrics() == {}
 
 
 def test_metrics_available_after_step(tracker):
     """After a step is recorded, metrics become available."""
     tracker.update(source_mb=1.0)
-    assert tracker.compute_metrics() is not None
+    assert tracker.compute_metrics() != {}
 
 
 def test_metrics_keys(tracker):
