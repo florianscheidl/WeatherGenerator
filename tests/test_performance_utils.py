@@ -157,3 +157,79 @@ def test_metrics_report_cumulative_counts(tracker):
     assert metrics["performance.throughput.global.batches"] == pytest.approx(2)
     assert metrics["performance.throughput.global.samples"] == pytest.approx(8)
     assert metrics["performance.throughput.global.mb"] == pytest.approx(3.0)
+
+
+# ---------------------------------------------------------------------------
+# MemoryTracker
+# ---------------------------------------------------------------------------
+
+_GIB = 1024**3
+
+
+@pytest.fixture()
+def fake_cuda_peaks(monkeypatch):
+    """Drive MemoryTracker without CUDA: a mutable [allocated, reserved] in bytes.
+
+    reset_peak_memory_stats is a no-op here, so the test sets the peak the
+    tracker will read for the next window explicitly.
+    """
+    peaks = [0, 0]
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: peaks[0])
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device: peaks[1])
+    return peaks
+
+
+def test_memory_tracker_reports_window_peak(fake_cuda_peaks):
+    """Each collect reports the peak of the window since the previous call."""
+    tracker = MemoryTracker(device=torch.device("cpu"))
+
+    fake_cuda_peaks[:] = [4 * _GIB, 6 * _GIB]
+    metrics = tracker.collect(window="train")
+
+    assert metrics["performance.memory.train.max_allocated_gib"] == pytest.approx(4.0)
+    assert metrics["performance.memory.train.max_reserved_gib"] == pytest.approx(6.0)
+
+
+def test_memory_tracker_running_max_per_window(fake_cuda_peaks):
+    """<window>_global holds the high-water mark of that label, not the last window."""
+    tracker = MemoryTracker(device=torch.device("cpu"))
+
+    fake_cuda_peaks[:] = [8 * _GIB, 9 * _GIB]
+    tracker.collect(window="train")
+    fake_cuda_peaks[:] = [3 * _GIB, 5 * _GIB]
+    metrics = tracker.collect(window="train")
+
+    assert metrics["performance.memory.train.max_allocated_gib"] == pytest.approx(3.0)
+    assert metrics["performance.memory.train_global.max_allocated_gib"] == pytest.approx(8.0)
+    assert metrics["performance.memory.train_global.max_reserved_gib"] == pytest.approx(9.0)
+
+
+def test_memory_tracker_running_max_is_per_label(fake_cuda_peaks):
+    """A peak under one label does not leak into another label's running max."""
+    tracker = MemoryTracker(device=torch.device("cpu"))
+
+    fake_cuda_peaks[:] = [10 * _GIB, 12 * _GIB]
+    tracker.collect(window="save_model")
+    fake_cuda_peaks[:] = [2 * _GIB, 3 * _GIB]
+    metrics = tracker.collect(window="train")
+
+    assert metrics["performance.memory.train_global.max_allocated_gib"] == pytest.approx(2.0)
+
+
+def test_memory_tracker_run_wide_max_spans_windows(fake_cuda_peaks):
+    """The `global` label tracks the run-wide peak across all window labels."""
+    tracker = MemoryTracker(device=torch.device("cpu"))
+
+    fake_cuda_peaks[:] = [10 * _GIB, 12 * _GIB]
+    tracker.collect(window="save_model")
+    fake_cuda_peaks[:] = [2 * _GIB, 3 * _GIB]
+    metrics = tracker.collect(window="train")
+
+    assert metrics["performance.memory.global.max_allocated_gib"] == pytest.approx(10.0)
+    assert metrics["performance.memory.global.max_reserved_gib"] == pytest.approx(12.0)
+
+
+def test_null_memory_tracker_reports_nothing():
+    """The no-op stand-in keeps the same interface and emits no metrics."""
+    assert NullMemoryTracker().collect(window="train") == {}

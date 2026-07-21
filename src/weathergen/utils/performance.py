@@ -121,6 +121,14 @@ class MemoryTracker:
     all ranks with MAX, and resets the peak stats so every call reports the peak
     since the previous one.
 
+    On top of the per-window peak, ``collect()`` also reports running maxima over
+    all windows closed so far: ``<window>_global`` (the high-water mark of that
+    window label alone, e.g. the worst training interval up to now) and ``global``
+    (the run-wide high-water mark across every window label). Both are accumulated
+    from the already-reduced values, so they are identical on all ranks. They are
+    not derivable downstream from a single record — the windows are logged into
+    separate records — which is why they are emitted here.
+
     ``max_memory_allocated`` is the peak of memory occupied by live tensors
     (parameters, gradients, optimizer states, activations) — the model's actual
     demand, comparable to analytic memory estimates. ``max_memory_reserved`` is
@@ -135,6 +143,9 @@ class MemoryTracker:
 
     def __init__(self, device: torch.device) -> None:
         self._device = device
+        # running (allocated, reserved) high-water marks, per window label and run-wide
+        self._window_peaks: dict[str, tuple[int, int]] = {}
+        self._run_peak: tuple[int, int] = (0, 0)
         # start with a clean window so the first step reports its own peak
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -152,8 +163,9 @@ class MemoryTracker:
                     part of the metric key.
 
         Returns:
-            Dict of ``"performance.memory.<window>.max_{allocated,reserved}_gib"``
-            pairs.
+            Dict of ``"performance.memory.<label>.max_{allocated,reserved}_gib"``
+            pairs, for ``<label>`` in ``<window>`` (this window), ``<window>_global``
+            (running max of this window label) and ``global`` (run-wide running max).
         """
         max_allocated = torch.cuda.max_memory_allocated(self._device)
         max_reserved = torch.cuda.max_memory_reserved(self._device)
@@ -166,9 +178,23 @@ class MemoryTracker:
             torch.distributed.all_reduce(peaks, op=torch.distributed.ReduceOp.MAX)
             max_allocated, max_reserved = peaks.tolist()
 
+        # Accumulate after the reduction, so the running maxima stay identical on
+        # all ranks without any further collective.
+        window_peak = self._window_peaks.get(window, (0, 0))
+        window_peak = (max(window_peak[0], max_allocated), max(window_peak[1], max_reserved))
+        self._window_peaks[window] = window_peak
+        self._run_peak = (
+            max(self._run_peak[0], max_allocated),
+            max(self._run_peak[1], max_reserved),
+        )
+
         return {
             f"performance.memory.{window}.max_allocated_gib": max_allocated / _GIB,
             f"performance.memory.{window}.max_reserved_gib": max_reserved / _GIB,
+            f"performance.memory.{window}_global.max_allocated_gib": window_peak[0] / _GIB,
+            f"performance.memory.{window}_global.max_reserved_gib": window_peak[1] / _GIB,
+            "performance.memory.global.max_allocated_gib": self._run_peak[0] / _GIB,
+            "performance.memory.global.max_reserved_gib": self._run_peak[1] / _GIB,
         }
 
 
