@@ -1017,7 +1017,8 @@ class ProfilingTrainer(Trainer):
             export_memory_snapshot(cf)
             stop_record_memory_history()
 
-        torch.distributed.barrier()
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
         if is_root():
             logger.info("Training loop profiling is complete.")
