@@ -7,7 +7,7 @@ profiling:
   # Its memory-timeline export is skipped on aarch64 (GH200) anyway, so it would add
   # overhead without adding a memory artifact. Turn on only for per-operator attribution.
   pytorch_profiling: False
-  only_profiling: False
+  only_profiling: True
 
   # With pytorch_profiling: False no torch.profiler.schedule is built, so the split
   # between these four is meaningless — only the product
@@ -43,3 +43,5 @@ data_loading:
 
 training_config:
   start_date: 2017-06-01T00:00
+
+norm_type: "RMSNorm" # "LayerNorm" or "RMSNorm"
