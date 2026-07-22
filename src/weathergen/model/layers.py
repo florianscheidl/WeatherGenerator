@@ -65,7 +65,7 @@ class MLP(torch.nn.Module):
             self.layers.append(
                 norm(dim_in, eps=norm_eps)
                 if dim_aux is None
-                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps)
+                else AdaLayerNorm(dim_in, dim_aux, norm_eps=norm_eps, norm_type=norm_type)
             )
 
         self.layers.append(torch.nn.Linear(dim_in, dim_hidden))

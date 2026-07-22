@@ -13,9 +13,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# from https://github.com/meta-llama/llama/blob/main/llama/model.py
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+    """Root-mean-square normalisation, on `torch.nn.functional.rms_norm`.
+
+    Two properties of that op are the reason for preferring it over both a hand-rolled
+    implementation and `LayerNorm`, and both concern what the backward pass has to keep:
+
+    * `aten::rms_norm` carries no autocast registration, so it runs in the dtype it is
+      given. `layer_norm` instead has a float32 cast policy, and under autocast it
+      materialises a float32 copy of a bfloat16 input -- twice the bytes of the tensor
+      itself -- which the graph then holds until the backward pass.
+    * Where a fused kernel is available it dispatches to `aten::_fused_rms_norm`, whose
+      backward takes `(grad_out, input, normalized_shape, rstd, weight)`. The graph keeps
+      the bfloat16 input and a per-row `rstd`, and the float32 upcast is redone inside the
+      backward rather than stored. Without a fused kernel the composite fallback runs
+      instead, which does save float32 copies and gives up most of the benefit.
+
+    `weight` is cast to the dtype of the input on every call because a mismatch between the
+    two drops the call back onto the composite path -- with only a warning to say so -- and
+    master weights are float32 under mixed precision. Whether a given build has the fused
+    kernel at all is a property of the backend, and there the fallback is silent, so
+    measure it where it matters with `tests/rms_norm_memory.py` rather than assuming.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
         """
         Initialize the RMSNorm normalization layer.
 
@@ -23,30 +44,29 @@ class RMSNorm(torch.nn.Module):
             dim (int): The dimension of the input tensor.
             eps (float, optional): A small value added to the denominator for numerical stability.
             Default is 1e-6.
+            elementwise_affine (bool, optional): Whether to learn a scaling parameter. Set this
+            to False to mirror the parameter-free `LayerNorm` used in the attention blocks.
 
         Attributes:
             eps (float): A small value added to the denominator for numerical stability.
-            weight (nn.Parameter): Learnable scaling parameter.
+            weight (nn.Parameter | None): Learnable scaling parameter, absent when
+            `elementwise_affine` is False.
 
         """
         super().__init__()
         self.eps = eps
-        self.weight = torch.nn.Parameter(torch.ones(dim))
+        self.normalized_shape = (dim,)
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = torch.nn.Parameter(torch.ones(dim))
+        else:
+            self.register_parameter("weight", None)
 
-    def _norm(self, x):
-        """
-        Apply the RMSNorm normalization to the input tensor.
+    def reset_parameters(self) -> None:
+        if self.weight is not None:
+            nn.init.ones_(self.weight)
 
-        Args:
-            x (torch.Tensor): The input tensor.
-
-        Returns:
-            torch.Tensor: The normalized tensor.
-
-        """
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the RMSNorm layer.
 
@@ -54,11 +74,11 @@ class RMSNorm(torch.nn.Module):
             x (torch.Tensor): The input tensor.
 
         Returns:
-            torch.Tensor: The output tensor after applying RMSNorm.
+            torch.Tensor: The output tensor after applying RMSNorm, in the dtype of `x`.
 
         """
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+        weight = None if self.weight is None else self.weight.to(x.dtype)
+        return F.rms_norm(x, self.normalized_shape, weight, self.eps)
 
 
 class AdaLayerNorm(torch.nn.Module):
@@ -67,7 +87,12 @@ class AdaLayerNorm(torch.nn.Module):
     """
 
     def __init__(
-        self, dim_embed_x, dim_aux, norm_elementwise_affine: bool = False, norm_eps: float = 1e-5
+        self,
+        dim_embed_x,
+        dim_aux,
+        norm_elementwise_affine: bool = False,
+        norm_eps: float = 1e-5,
+        norm_type: str = "LayerNorm",
     ):
         super().__init__()
 
@@ -77,7 +102,12 @@ class AdaLayerNorm(torch.nn.Module):
         self.embed_aux.append(torch.nn.SiLU())
         self.embed_aux.append(torch.nn.Linear(4 * dim_aux, 2 * dim_embed_x))
 
-        self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
+        # follows the caller's norm_type so the conditioned blocks are not left on
+        # LayerNorm, and with it the float32 promotion, when the rest moves to RMSNorm
+        if norm_type == "LayerNorm":
+            self.norm = torch.nn.LayerNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
+        else:
+            self.norm = RMSNorm(dim_embed_x, norm_eps, norm_elementwise_affine)
 
     def forward(self, x: torch.Tensor, aux: torch.Tensor | None = None) -> torch.Tensor:
         for block in self.embed_aux:
