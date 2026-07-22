@@ -62,6 +62,8 @@ from weathergen.utils.performance import (
     nvtx_range,
 )
 from weathergen.utils.profiling import (
+    MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
+    AutocastPromotionAudit,
     export_memory_snapshot,
     start_record_memory_history,
     stop_record_memory_history,
@@ -904,6 +906,13 @@ class ProfilingTrainer(Trainer):
         # forward against the recompute. Only useful when chasing a CheckpointError; it is
         # slow and very verbose, so leave it off otherwise.
         "checkpoint_debug": False,
+        # Records which operations autocast promotes to float32 and what each costs in
+        # bytes, written next to the snapshot. Intercepts every dispatch, so it is a
+        # profiling-run tool; see utils/profiling.py:AutocastPromotionAudit.
+        "autocast_audit": False,
+        # ring buffer of allocator events; too small and the snapshot covers only the tail
+        # of the profiling phase and the per-site attribution is incomplete
+        "max_mem_events": MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT,
     }
 
     def init(self, cf: Config, devices: list):
@@ -914,6 +923,8 @@ class ProfilingTrainer(Trainer):
         self.memory_profiling = profiling_cfg.memory_profiling
         self.pytorch_profiling = profiling_cfg.pytorch_profiling
         self.checkpoint_debug = profiling_cfg.checkpoint_debug
+        self.autocast_audit = profiling_cfg.autocast_audit
+        self.max_mem_events = profiling_cfg.max_mem_events
 
         self.max_profile_steps = (
             profiling_cfg.wait_iteration
@@ -986,14 +997,15 @@ class ProfilingTrainer(Trainer):
         self.t_start = time.time()
 
         if self.memory_profiling and is_root():
-            start_record_memory_history()
+            start_record_memory_history(self.max_mem_events)
 
         # names the op whose forward and recompute disagree, rather than just the position
         checkpoint_debug_ctx = (
             set_checkpoint_debug_enabled(True) if self.checkpoint_debug else nullcontext()
         )
+        autocast_audit = AutocastPromotionAudit() if self.autocast_audit else None
 
-        with checkpoint_debug_ctx, self.prof:
+        with checkpoint_debug_ctx, autocast_audit or nullcontext(), self.prof:
             for bidx, batch in enumerate(islice(dataset_iter, self.max_profile_steps)):
                 self._train_batch(batch, bidx, mini_epoch)
                 if self.pytorch_profiling and hasattr(self.prof, "step"):
@@ -1027,6 +1039,9 @@ class ProfilingTrainer(Trainer):
         if self.memory_profiling and is_root():
             export_memory_snapshot(cf)
             stop_record_memory_history()
+
+        if autocast_audit is not None and is_root():
+            autocast_audit.write_report(cf)
 
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
