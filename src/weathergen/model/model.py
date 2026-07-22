@@ -687,8 +687,12 @@ class Model(torch.nn.Module):
 
         # recover batch dimension and separate input_steps
         shape = (len(batch), batch.get_num_source_steps(), *tokens.shape[1:])
-        # collapse along input step dimension
-        tokens = tokens.reshape(shape).sum(axis=1)
+        # collapse along input step dimension. `sum` carries an autocast float32 cast policy,
+        # so the result comes back float32 and, without the cast, stays float32 for the whole
+        # rollout: the forecast engine's residual stream and the decoder then hold activations
+        # at twice the bytes they need. The float32 accumulation is worth keeping, the float32
+        # storage is not. No-op outside autocast, where `tokens` is already float32.
+        tokens = tokens.reshape(shape).sum(axis=1).to(tokens.dtype)
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
