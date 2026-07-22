@@ -29,7 +29,7 @@ profiling:
   # forward against the recompute, naming the operation whose output disagrees instead of
   # reporting only a position. Slow and extremely verbose -- enable only to chase a
   # CheckpointError, and drop active_iteration to 0 so it covers a single step.
-  checkpoint_debug: False
+  checkpoint_debug: True
 
 train_logging:
   memory_tracking: True
