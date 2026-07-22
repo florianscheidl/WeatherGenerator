@@ -90,25 +90,25 @@ class AdaLayerNorm(torch.nn.Module):
 
 
 def norm_in_input_dtype(norm: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """Apply a parameter-free `norm` to `x` in the dtype of `x`.
+    """Apply `norm` to `x` and return the result in the dtype of `x`.
 
-    Under autocast, `layer_norm` carries a float32 cast policy: handed a bfloat16 tensor it
-    materialises a float32 copy of the input -- which the backward pass then holds on to --
-    and a float32 output, four times the bytes of the tensor it was given, only for the
-    result to be cast straight back down for the following projection or for attention. The
-    kernels accumulate in float32 whatever the input dtype, so the sole numerical effect of
-    normalising in bfloat16 is the rounding of the final scaling, which happens on the way
-    out regardless. `RMSNorm` upcasts internally and needs no such protection, but its
-    float32 weight promotes the result, so the output is cast back here too.
+    Under autocast, `layer_norm` carries a float32 cast policy, so its result comes back as
+    float32 even for a bfloat16 input. Where that result feeds more than one projection --
+    q, k and v off the same normalised tensor -- every projection would otherwise make and
+    retain its own bfloat16 copy of it. Casting once here leaves a single copy for all of
+    them to share, which is bit-identical to the cast autocast would have applied to each.
 
-    Outside autocast this is a no-op: the norm already runs in the dtype of its input.
+    Outside autocast this is a no-op: the norm already returns the dtype of its input.
 
-    Only use this on norms without a `Linear` inside (i.e. not `AdaLayerNorm`), which with
-    autocast off would run in float32 rather than in the autocast dtype.
+    Note this deliberately does *not* stop the norm itself from running in float32. Doing
+    that needs `torch.autocast(enabled=False)`, i.e. mutating thread-local autocast state
+    inside the module, and every one of these prologues runs inside `torch.utils.checkpoint`
+    -- which replays the function under an autocast context it *reconstructs* from
+    `is_autocast_enabled(device_type)` sampled at checkpoint-call time. The two passes then
+    disagree about what the norm saved and the recompute fails its metadata check.
     """
 
-    with torch.autocast(device_type=x.device.type, enabled=False):
-        return norm(x).to(x.dtype)
+    return norm(x).to(x.dtype)
 
 
 def modulate(x, shift, scale):
