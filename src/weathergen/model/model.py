@@ -766,10 +766,14 @@ class Model(torch.nn.Module):
         batch_size = len(batch)
         s = [batch_size, self.num_healpix_cells, self.cf.ae_local_num_queries, tokens.shape[-1]]
         idxs = model_params.hp_nbours.unsqueeze(0).repeat((batch_size, 1, 1)).flatten(0, 1)
-        tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
+        # NOTE: the gathered neighbourhood is 9x the latent state. It is not materialized
+        # here: the decoder gathers it inside its per-block checkpoints, so backward
+        # retains only tokens_cells (a view/copy of tokens, alive regardless) instead.
+        tokens_cells = tokens.reshape(s).flatten(0, 1)
+        nbors_idxs = idxs.flatten()
         # TODO: precompute in model_params?
         tokens_nbors_lens = torch.full(
-            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
+            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens.device
         )
         tokens_nbors_lens[0] = 0
 
@@ -822,11 +826,12 @@ class Model(torch.nn.Module):
                     ).unsqueeze(0)  # add ensemble dim: shape is then [1, preds_per_coord, channels]
                 else:
                     tc_tokens = self.target_token_engines[stream_name](
-                        latent=tokens_nbors,
+                        latent=tokens_cells,
                         output=tc_tokens,
                         latent_lens=tokens_nbors_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
+                        latent_idx=nbors_idxs,
                     )
 
                     # final prediction head to map back to physical space

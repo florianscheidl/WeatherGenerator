@@ -691,6 +691,18 @@ class EnsPredictionHead(torch.nn.Module):
         return preds
 
 
+def _block_with_gathered_kv(block, x_q, latent, latent_idx, x_q_lens, latent_lens, aux):
+    """Run a decoder block, gathering its key/value neighbourhood from `latent` first.
+
+    Meant to be called inside a checkpoint: the gathered neighbourhood is 9x the latent
+    state, so recomputing it in backward is much cheaper than saving it, while `latent`
+    itself is alive regardless. `latent_idx = None` passes `latent` through unchanged,
+    for blocks that ignore the key/value argument.
+    """
+    x_kv = latent if latent_idx is None else latent[latent_idx].flatten(0, 1)
+    return block(x_q, x_kv, x_q_lens, latent_lens, aux)
+
+
 class TargetPredictionEngineClassic(nn.Module):
     def __init__(
         self,
@@ -775,7 +787,14 @@ class TargetPredictionEngineClassic(nn.Module):
                 )
             )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(self, latent, output, latent_lens, output_lens, coordinates, latent_idx=None):
+        """
+        :param latent: latent state used as key/value. Ungathered when `latent_idx` is given.
+        :param latent_idx: optional gather index selecting the 1-ring neighbourhood from
+            `latent`. When given, the gather happens inside each cross-attention block's
+            checkpoint, so the 9x larger gathered tensor is recomputed in backward instead
+            of being retained.
+        """
         tc_tokens = output
         tcs_lens = output_lens
         tokens_stream = latent
@@ -786,10 +805,15 @@ class TargetPredictionEngineClassic(nn.Module):
             if self.cf.pred_self_attention and ib % 3 == 1:
                 tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
             else:
+                # only the cross-attention blocks consume the key/value argument; MLP blocks
+                # ignore it, so they take the latent through unchanged (no gather)
+                is_cross = isinstance(block, MultiCrossAttentionHeadVarlen)
                 tc_tokens = checkpoint(
+                    _block_with_gathered_kv,
                     block,
                     tc_tokens,
                     tokens_stream,
+                    latent_idx if is_cross else None,
                     tcs_lens,
                     tokens_lens,
                     tcs_aux,
@@ -939,7 +963,12 @@ class TargetPredictionEngine(nn.Module):
                     f"{self.cf.decoder_type} is not implemented for prediction heads"
                 )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(self, latent, output, latent_lens, output_lens, coordinates, latent_idx=None):
+        # this engine conditions on the gathered neighbourhood itself (`pos_embed`, and
+        # `latent[:, 0]` as aux), so unlike TargetPredictionEngineClassic it cannot defer
+        # the gather into the per-block checkpoints; materialize it here instead.
+        if latent_idx is not None:
+            latent = latent[latent_idx].flatten(0, 1)
         latent = (
             self.dropout(self.latent_in_norm(latent + self.pos_embed))
             if self.cf.decoder_type != "PerceiverIOCoordConditioning"
