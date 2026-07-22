@@ -13,6 +13,10 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
+# "python" keeps Python/TorchScript/inductor frames; torch's default "all" adds C++
+# frames, which dominate the pickle without helping attribution — neither memory_viz nor
+# scripts/memory_snapshot_report.py needs them to name the allocating line.
+MEMORY_HISTORY_STACKS: str = "python"
 
 
 def start_record_memory_history() -> None:
@@ -21,7 +25,9 @@ def start_record_memory_history() -> None:
         return
 
     logger.info("Starting snapshot record_memory_history")
-    torch.cuda.memory._record_memory_history(max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT)
+    torch.cuda.memory._record_memory_history(
+        stacks=MEMORY_HISTORY_STACKS, max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+    )
 
 
 def stop_record_memory_history() -> None:
