@@ -66,6 +66,9 @@ class StreamEmbedTransformer(torch.nn.Module):
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
                     with_flash=True,
+                    # without this the blocks silently keep the default LayerNorm, so
+                    # norm_type reached only ln_final and never the attention prologue
+                    norm_type=norm_type,
                 )
             )
             self.layers.append(
@@ -75,6 +78,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     hidden_factor=2,
                     dropout_rate=dropout_rate,
                     with_residual=True,
+                    norm_type=norm_type,
                 )
             )
 
