@@ -9,9 +9,13 @@
 
 """Does swapping LayerNorm for RMSNorm actually save activation memory on this backend?
 
-Run it on the target hardware -- the answer is a property of the build, not of the model:
+Run it on the target hardware -- the answer is a property of the build, not of the model.
+Use the environment that is already synced rather than `uv run --extra gpu`, which may go
+off and re-resolve (and rebuild flash-attn) before it prints anything:
 
-    uv run --extra gpu python tests/rms_norm_memory.py
+    srun -n1 .venv/bin/python tests/rms_norm_memory.py
+
+Nothing here imports flash_attn, so it needs only torch and a visible GPU.
 
 `aten::rms_norm` has no autocast registration, so unlike `layer_norm` it is not promoted
 to float32. That alone only helps if the call also reaches the *fused* kernel: the backward
@@ -67,7 +71,7 @@ class RecordOps(TorchDispatchMode):
         return func(*args, **(kwargs or {}))
 
 
-def dispatched_fused(fn) -> bool:
+def dispatched_ops(fn) -> list[str]:
     """Did the call reach `aten::_fused_rms_norm`, or decompose into the composite fallback?
 
     The fallback also emits a "Cannot dispatch to fused implementation" warning, but only
@@ -79,14 +83,15 @@ def dispatched_fused(fn) -> bool:
         warnings.simplefilter("ignore")
         with RecordOps() as rec:
             fn()
-    return any("_fused_rms_norm" in op for op in rec.ops)
+    return rec.ops
 
 
 def measure(label: str, module: torch.nn.Module, x: torch.Tensor, unit: int, device: str) -> None:
     acct = SavedBytes(ignore=(x, *module.parameters()))
     with torch.autocast(device_type=device, dtype=torch.bfloat16), acct:
         out = module(x)
-    fused = dispatched_fused(lambda: module(x)) if isinstance(module, RMSNorm) else None
+    ops = dispatched_ops(lambda: module(x)) if isinstance(module, RMSNorm) else None
+    fused = None if ops is None else any("_fused_rms_norm" in op for op in ops)
     _logger.info(
         "  %-38s retained %5.2fu  out %-8s %s",
         label,
@@ -94,10 +99,16 @@ def measure(label: str, module: torch.nn.Module, x: torch.Tensor, unit: int, dev
         str(out.dtype).replace("torch.", ""),
         "" if fused is None else f"fused={fused}",
     )
+    if fused is False:
+        # the composite fallback is what makes the swap a regression, so name what ran
+        _logger.info("      fell back to: %s", ", ".join(dict.fromkeys(ops)))
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+    # emitted before anything touches the GPU, so a silent run means the environment is
+    # still resolving rather than the measurement being slow
+    _logger.info("torch %s, cuda available: %s", torch.__version__, torch.cuda.is_available())
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
         _logger.warning(
