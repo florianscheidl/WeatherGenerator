@@ -89,6 +89,28 @@ class AdaLayerNorm(torch.nn.Module):
         return x
 
 
+def norm_in_input_dtype(norm: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """Apply a parameter-free `norm` to `x` in the dtype of `x`.
+
+    Under autocast, `layer_norm` carries a float32 cast policy: handed a bfloat16 tensor it
+    materialises a float32 copy of the input -- which the backward pass then holds on to --
+    and a float32 output, four times the bytes of the tensor it was given, only for the
+    result to be cast straight back down for the following projection or for attention. The
+    kernels accumulate in float32 whatever the input dtype, so the sole numerical effect of
+    normalising in bfloat16 is the rounding of the final scaling, which happens on the way
+    out regardless. `RMSNorm` upcasts internally and needs no such protection, but its
+    float32 weight promotes the result, so the output is cast back here too.
+
+    Outside autocast this is a no-op: the norm already runs in the dtype of its input.
+
+    Only use this on norms without a `Linear` inside (i.e. not `AdaLayerNorm`), which with
+    autocast off would run in float32 rather than in the autocast dtype.
+    """
+
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        return norm(x).to(x.dtype)
+
+
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
