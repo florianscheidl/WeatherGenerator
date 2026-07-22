@@ -25,6 +25,7 @@ from omegaconf import OmegaConf
 # FSDP2
 from torch.distributed.tensor import DTensor
 from torch.profiler import ProfilerActivity, profile
+from torch.utils.checkpoint import set_checkpoint_debug_enabled
 
 import weathergen.common.config as config
 from weathergen.common.config import Config
@@ -899,6 +900,10 @@ class ProfilingTrainer(Trainer):
         "only_profiling": False,  # True shuts down after profiling, False continues training
         "memory_profiling": False,
         "pytorch_profiling": False,
+        # Turns torch.utils.checkpoint's recompute check into a full op-by-op log of the
+        # forward against the recompute. Only useful when chasing a CheckpointError; it is
+        # slow and very verbose, so leave it off otherwise.
+        "checkpoint_debug": False,
     }
 
     def init(self, cf: Config, devices: list):
@@ -908,6 +913,7 @@ class ProfilingTrainer(Trainer):
         self.only_profiling = profiling_cfg.only_profiling
         self.memory_profiling = profiling_cfg.memory_profiling
         self.pytorch_profiling = profiling_cfg.pytorch_profiling
+        self.checkpoint_debug = profiling_cfg.checkpoint_debug
 
         self.max_profile_steps = (
             profiling_cfg.wait_iteration
@@ -982,7 +988,12 @@ class ProfilingTrainer(Trainer):
         if self.memory_profiling and is_root():
             start_record_memory_history()
 
-        with self.prof:
+        # names the op whose forward and recompute disagree, rather than just the position
+        checkpoint_debug_ctx = (
+            set_checkpoint_debug_enabled(True) if self.checkpoint_debug else nullcontext()
+        )
+
+        with checkpoint_debug_ctx, self.prof:
             for bidx, batch in enumerate(islice(dataset_iter, self.max_profile_steps)):
                 self._train_batch(batch, bidx, mini_epoch)
                 if self.pytorch_profiling and hasattr(self.prof, "step"):
