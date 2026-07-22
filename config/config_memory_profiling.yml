@@ -25,6 +25,12 @@ profiling:
   active_iteration: 4
   repeat: 1
 
+  # Off by default: turns the checkpoint recompute check into an op-by-op log of the
+  # forward against the recompute, naming the operation whose output disagrees instead of
+  # reporting only a position. Slow and extremely verbose -- enable only to chase a
+  # CheckpointError, and drop active_iteration to 0 so it covers a single step.
+  checkpoint_debug: False
+
 train_logging:
   memory_tracking: True
   # Off: this run is for memory only. Enable if you want the per-step source-MB deltas
