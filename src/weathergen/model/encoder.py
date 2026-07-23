@@ -25,6 +25,7 @@ from weathergen.model.engines import (
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
+from weathergen.utils.utils import get_dtype
 
 
 class EncoderModule(torch.nn.Module):
@@ -332,10 +333,26 @@ class EncoderModule(torch.nn.Module):
         num_steps_input = batch.get_num_source_steps()
         rs = num_steps_input * len(batch)
 
+        # Both latent seeds below are built from the float32 master parameter `q_cells` and
+        # the float32 `pe_global` buffer, and none of `repeat`/`add`/the harmonic encoding
+        # carries an autocast policy -- so without this cast the latent is *born* float32 and
+        # stays float32 through the encoder, the rollout and the decoder, at twice the bytes
+        # in each. FSDP used to hide it by casting forward inputs at every shard boundary;
+        # `fsdp_cast_forward_inputs` no longer does, and nothing else narrows it. Every
+        # downstream matmul runs in this dtype under autocast anyway, so seeding in it costs
+        # nothing beyond rounding the seed.
+        latent_dtype = (
+            get_dtype(self.cf.mixed_precision_dtype)
+            if self.cf.with_mixed_precision
+            else self.q_cells.dtype
+        )
+
         # create register and latent tokens and prepend to latent spatial tokens
         num_extra_tokens = self.num_register_tokens + self.num_class_tokens
         pos_enc = positional_encoding_harmonic
-        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1))
+        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1)).to(
+            latent_dtype
+        )
 
         # TODO: re-enable or remove ae_local_queries_per_cell
         if self.cf.ae_local_queries_per_cell:
@@ -344,6 +361,7 @@ class EncoderModule(torch.nn.Module):
             num_tokens = self.num_healpix_cells
             tokens_global = self.q_cells.repeat(num_tokens, 1, 1) + model_params.pe_global
             tokens_global = tokens_global.repeat(rs, 1, 1)
+        tokens_global = tokens_global.to(latent_dtype)
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors = self.assimilate_local_project_all(
