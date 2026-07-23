@@ -112,11 +112,15 @@ class StreamEmbedTransformer(torch.nn.Module):
         # regardless) and whose output is retained as the first block's checkpoint input
         x = peh(self.embed(x_in.transpose(-2, -1)))
 
-        # checkpoint attention and MLP jointly so only one activation per block is retained
-        # (grouping in __init__ instead would rename the parameters and break existing
-        # model checkpoints)
-        for attn, mlp in zip(self.layers[::2], self.layers[1::2], strict=True):
-            x = checkpoint(lambda t, a=attn, m=mlp: m(a(t)), x, use_reentrant=False)
+        # One checkpoint per layer, not one per (attention, MLP) pair. Pairing them retains
+        # one boundary activation per block instead of two, but the recompute then has to
+        # rebuild a whole block's graph before the backward consumes any of it, and every
+        # intermediate is live at once. Measured on run fy0tazen: that burst was 14.7 GiB
+        # over the surrounding plateau and set the run's peak, against ~1.2 GiB of boundary
+        # activations saved by pairing. The finer split trades the cheaper quantity for the
+        # expensive one; it does not change how much is recomputed.
+        for layer in self.layers:
+            x = checkpoint(layer, x, use_reentrant=False)
 
         return checkpoint(self.readout, x, use_reentrant=False)
 
