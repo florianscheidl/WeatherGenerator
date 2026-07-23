@@ -7,8 +7,8 @@ from pathlib import Path
 
 import torch
 from omegaconf import OmegaConf
+from torch.overrides import TorchFunctionMode
 from torch.profiler import record_function
-from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_flatten
 
 import weathergen.common.config as config
@@ -64,8 +64,8 @@ def export_memory_snapshot(cfg: dict | OmegaConf) -> None:
         return
 
 
-class AutocastPromotionAudit(TorchDispatchMode):
-    """Log operations that autocast promotes to float32, and what that costs in bytes.
+class AutocastPromotionAudit(TorchFunctionMode):
+    """Log the operations autocast promotes to float32, and what each costs in bytes.
 
     Autocast keeps a list of operations it runs in float32 whatever dtype it is handed
     (`layer_norm`, `sum`, `softmax`, `cumsum`, `norm`, ...). Handed a bfloat16 activation,
@@ -73,32 +73,44 @@ class AutocastPromotionAudit(TorchDispatchMode):
     four times the bytes -- and the result then stays float32 until something casts it
     back. Three separate instances of this have dominated the training-step memory peak,
     each found only after it caused a crash or a confusing profile, so this maps them
-    directly instead, charging each promotion to the operation and model call site
-    responsible.
+    directly instead: any call handed reduced precision that hands back float32, charged to
+    the model call site that made it.
+
+    This is a `TorchFunctionMode`, which sits *above* autocast, so it sees the dtypes the
+    model actually passed rather than the ones autocast rewrote them to. An earlier version
+    used a `TorchDispatchMode`, below autograd, where a promotion appears only as an
+    anonymous `_to_copy` and the backward pass -- which autocast never touches -- swamps the
+    report with gradient casts attributed to whatever ran next. If this ever reports `add`,
+    `detach` or `stack` against `<no weathergen frame>`, it has regressed to that.
+
+    Consequences of the level it runs at, both intended:
+
+    - Forward only. Autograd is C++ and does not route through `__torch_function__`, which
+      is correct here because autocast only applies to the forward.
+    - Python-level calls only. An operation issued from inside a C++ kernel is invisible;
+      everything in the fp32 list is reachable from Python, so this has not mattered.
 
     Reports where promotion *happens*, not whether it propagates. A promoted result that is
-    cast straight back down still appears here -- correctly, since it was still
-    materialised -- so a site staying in the report after a fix is not a failed fix. What
-    the fix changes is how long the float32 lives, which is a question for the allocator
-    snapshot.
+    cast straight back down still appears -- correctly, it was still materialised -- so a
+    site remaining after a fix is not a failed fix. Whether the float32 then survives is a
+    question for the allocator snapshot.
 
-    Not free -- it intercepts every dispatch -- so it belongs in a profiling run over a
-    couple of steps, not in training. Report is written by `write_report`, sorted by total
-    bytes promoted, which is the order worth fixing them in.
+    Report is written by `write_report`, sorted by bytes promoted, which is the order worth
+    fixing them in.
     """
 
     #: below this an individual promoted result is noise, not an activation
     DEFAULT_MIN_BYTES: int = 1 << 20
 
     _REDUCED = (torch.bfloat16, torch.float16)
+    #: deliberate casts: the caller asked for float32, so it is not a surprise worth logging
+    _EXPLICIT_CASTS = frozenset({"to", "float", "double", "type", "type_as", "_to_copy"})
 
     def __init__(self, min_bytes: int = DEFAULT_MIN_BYTES):
         super().__init__()
         self.min_bytes = min_bytes
         # (op, call site) -> [count, total bytes]
         self.hits: dict[tuple[str, str], list[int]] = {}
-        self._pending_bytes: int = 0
-        self._pending_site: str = ""
 
     def _call_site(self) -> str:
         """The innermost weathergen frames that led here, outermost first."""
@@ -110,42 +122,29 @@ class AutocastPromotionAudit(TorchDispatchMode):
         ]
         return " > ".join(frames[-3:]) if frames else "<no weathergen frame>"
 
-    def _float32_bytes(self, tensors) -> int:
-        return sum(
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        out = func(*args, **kwargs)
+
+        if getattr(func, "__name__", "") in self._EXPLICIT_CASTS:
+            return out
+
+        flat_in = tree_flatten((args, kwargs))[0]
+        if not any(isinstance(t, torch.Tensor) and t.dtype in self._REDUCED for t in flat_in):
+            return out
+
+        promoted = sum(
             t.nbytes
-            for t in tensors
+            for t in tree_flatten(out)[0]
             if isinstance(t, torch.Tensor)
             and t.dtype is torch.float32
             and t.nbytes >= self.min_bytes
         )
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        out = func(*args, **(kwargs or {}))
-
-        name = str(func)
-        flat_in = tree_flatten((args, kwargs))[0]
-        flat_out = tree_flatten(out)[0]
-
-        # A promotion reaches this mode as two dispatches: autocast's own `_to_copy` upcast,
-        # then the operation it was inserted for. Naming the `_to_copy` would be useless --
-        # the report needs to say `layer_norm` or `sum` -- so the upcast is held back and
-        # charged to whatever consumes it next, together with that op's float32 result.
-        if name.startswith("aten._to_copy"):
-            if any(isinstance(t, torch.Tensor) and t.dtype in self._REDUCED for t in flat_in):
-                upcast = self._float32_bytes(flat_out)
-                if upcast:
-                    self._pending_bytes += upcast
-                    self._pending_site = self._pending_site or self._call_site()
-            return out
-
-        promoted = self._pending_bytes
         if promoted:
-            promoted += self._float32_bytes(flat_out)
-            entry = self.hits.setdefault((name, self._pending_site), [0, 0])
+            name = getattr(func, "__qualname__", None) or getattr(func, "__name__", str(func))
+            entry = self.hits.setdefault((name, self._call_site()), [0, 0])
             entry[0] += 1
             entry[1] += promoted
-            self._pending_bytes = 0
-            self._pending_site = ""
         return out
 
     def write_report(self, cfg: dict | OmegaConf) -> None:
@@ -156,14 +155,14 @@ class AutocastPromotionAudit(TorchDispatchMode):
         rows = sorted(self.hits.items(), key=lambda kv: -kv[1][1])
         total = sum(v[1] for v in self.hits.values())
         lines = [
-            "Operations autocast promoted to float32 from reduced-precision inputs.",
-            f"Threshold: results >= {self.min_bytes / 2**20:.1f} MiB. "
+            "Calls handed reduced precision that returned float32 (autocast fp32 policy).",
+            f"Forward pass only. Threshold: results >= {self.min_bytes / 2**20:.1f} MiB. "
             f"Total promoted: {total / 2**30:.2f} GiB over {len(rows)} sites.",
             "",
             f"{'promoted MiB':>13}  {'n':>7}  {'op':<34} call site",
         ]
         lines += [
-            f"{nbytes / 2**20:13.1f}  {count:7d}  {op.replace('aten.', '')[:34]:<34} {site}"
+            f"{nbytes / 2**20:13.1f}  {count:7d}  {op[:34]:<34} {site}"
             for (op, site), (count, nbytes) in rows
         ]
         path.write_text("\n".join(lines) + "\n")
