@@ -1,0 +1,10 @@
+train_logging:
+  throughput_tracking: True
+  memory_tracking: True
+data_loading:
+  # fixed so the data order is comparable across runs; note this makes runs
+  # numerically comparable, not bitwise reproducible, and does not reduce timing
+  # variance (profiled runs must not be timed at all)
+  rng_seed: 26
+training_config:
+  start_date: 2017-06-01T00:00

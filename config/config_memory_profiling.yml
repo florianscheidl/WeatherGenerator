@@ -1,0 +1,45 @@
+# Memory-focused profiling: CUDA allocator snapshot + peak-memory metrics.
+# Deliberately does NOT enable the torch profiler — see pytorch_profiling below.
+profiling:
+  memory_profiling: True
+  # Left off on purpose: the torch profiler wraps every custom module's forward in
+  # record_function and records shapes/stacks, which perturbs what we are measuring.
+  # Its memory-timeline export is skipped on aarch64 (GH200) anyway, so it would add
+  # overhead without adding a memory artifact. Turn on only for per-operator attribution.
+  pytorch_profiling: False
+  only_profiling: False
+
+  # With pytorch_profiling: False no torch.profiler.schedule is built, so the split
+  # between these four is meaningless — only the product
+  # (wait + warmup + active) * repeat = number of training steps the profiling phase
+  # runs, here 6, has any effect. Sized so that:
+  #   - step 0 (grad buffers + lazy AdamW exp_avg/exp_avg_sq allocation, allocator
+  #     growth, NCCL buffers) is not the only step in the snapshot;
+  #   - steps 1..5 show the steady-state allocate/free cycle, enough to read the
+  #     activation high-water mark off memory_viz;
+  #   - the snapshot stays under MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT (100k events in
+  #     utils/profiling.py). Raise only after checking the pickle did not hit that cap;
+  #     when it overflows you lose events and the trace becomes misleading.
+  wait_iteration: 1
+  warmup_iteration: 1
+  active_iteration: 4
+  repeat: 1
+
+train_logging:
+  memory_tracking: True
+  # Off: this run is for memory only. Enable if you want the per-step source-MB deltas
+  # to tell a genuine memory regression apart from a step that simply carried more
+  # observation tokens (the counters are cumulative, so read them as differences).
+  throughput_tracking: False
+  # Must be 1 for this config: the trackers are only drained when
+  # bidx % train_logging.metrics == 0, so at the default 20 a 6-step profiling phase
+  # would log exactly one record — from step 0, the least representative step.
+  metrics: 1
+
+data_loading:
+  # fixed so the data order, and hence per-batch token counts and activation sizes,
+  # are identical across the arms of the ablation
+  rng_seed: 1
+
+training_config:
+  start_date: 2017-06-01T00:00
