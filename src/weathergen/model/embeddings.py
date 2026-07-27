@@ -66,6 +66,9 @@ class StreamEmbedTransformer(torch.nn.Module):
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
                     with_flash=True,
+                    # without this the blocks silently keep the default LayerNorm, so
+                    # norm_type reached only ln_final and never the attention prologue
+                    norm_type=norm_type,
                 )
             )
             self.layers.append(
@@ -75,6 +78,7 @@ class StreamEmbedTransformer(torch.nn.Module):
                     hidden_factor=2,
                     dropout_rate=dropout_rate,
                     with_residual=True,
+                    norm_type=norm_type,
                 )
             )
 
@@ -104,12 +108,30 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        # NOTE: no checkpoint on self.embed, a single Linear whose input is x_in (alive
+        # regardless) and whose output is retained as the first block's checkpoint input
+        x = peh(self.embed(x_in.transpose(-2, -1)))
 
+        # One checkpoint per layer, not one per (attention, MLP) pair. Pairing them retains
+        # one boundary activation per block instead of two, but the recompute then has to
+        # rebuild a whole block's graph before the backward consumes any of it, and every
+        # intermediate is live at once. Measured on run fy0tazen: that burst was 14.7 GiB
+        # over the surrounding plateau and set the run's peak, against ~1.2 GiB of boundary
+        # activations saved by pairing. The finer split trades the cheaper quantity for the
+        # expensive one; it does not change how much is recomputed.
         for layer in self.layers:
             x = checkpoint(layer, x, use_reentrant=False)
 
-        # read out
+        return checkpoint(self.readout, x, use_reentrant=False)
+
+    def readout(self, x):
+        """
+        Map the per-channel embeddings onto the output tokens.
+
+        Checkpointed by forward: in 'full' mode ln_final alone materialises a tensor as
+        large as x, which is otherwise held until the backward pass.
+        """
+
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
@@ -139,6 +161,7 @@ class StreamEmbedLinear(torch.nn.Module):
         self.layer = torch.nn.Linear(dim_in, dim_out)
 
     def forward(self, x):
-        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
+        # NOTE: no checkpoint, a single Linear whose input is the argument itself
+        x = self.layer(x.flatten(-2, -1)).unsqueeze(0)
 
         return x

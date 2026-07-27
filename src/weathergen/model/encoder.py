@@ -25,6 +25,7 @@ from weathergen.model.engines import (
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
 from weathergen.model.positional_encoding import positional_encoding_harmonic
+from weathergen.utils.utils import get_dtype
 
 
 class EncoderModule(torch.nn.Module):
@@ -126,9 +127,7 @@ class EncoderModule(torch.nn.Module):
             self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
         )
 
-        tokens_global, posteriors = checkpoint(
-            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
-        )
+        tokens_global, posteriors = self.assimilate_local(model_params, stream_cell_tokens, batch)
 
         tokens_global = checkpoint(
             self.ae_global_engine,
@@ -152,6 +151,48 @@ class EncoderModule(torch.nn.Module):
             posteriors = torch.zeros((1,), device=tokens.device)
 
         return tokens, posteriors
+
+    def assimilate_local_project_all(self, tokens, tokens_global, cell_lens, q_cells_lens):
+        """
+        Apply the local assimilation engine and then the local-to-global adapter
+        to all tokens in a single flash-attention pass.
+        """
+
+        zero_pad = torch.zeros(1, device=tokens.device, dtype=torch.int32)
+        cell_lens_cur = torch.cat([zero_pad, cell_lens])
+
+        # q_cells_lens covers a single healpix grid while cell_lens spans
+        # batch samples x input steps, so tile it to match
+        num_cells_grid = q_cells_lens.shape[0] - 1
+        assert cell_lens.shape[0] % num_cells_grid == 0
+        q_cells_lens_cur = torch.cat(
+            [zero_pad, q_cells_lens[1:].repeat(cell_lens.shape[0] // num_cells_grid)]
+        )
+
+        # local assimilation model on the full token set
+        # NOTE: no checkpoint here, LocalAssimilationEngine checkpoints per block
+        toks = self.ae_local_engine(tokens, cell_lens_cur)
+        toks, posteriors = self.interpolate_latents(toks)
+
+        # keep only non-empty cells for the local->global adapter
+        mask = cell_lens_cur[1:].to(torch.bool)
+        if not torch.any(mask):
+            assert False, "Not yet implemented"
+
+        toks_global_unmasked = tokens_global[mask]
+        q_cells_lens_unmasked = torch.cat([zero_pad, q_cells_lens_cur[1:][mask]])
+        cell_lens_unmasked = torch.cat([zero_pad, cell_lens_cur[1:][mask]])
+
+        toks_global_unmasked = checkpoint(
+            self.ae_local_global_engine,
+            toks,
+            toks_global_unmasked,
+            q_cells_lens_unmasked,
+            cell_lens_unmasked,
+            use_reentrant=False,
+        )
+
+        return toks_global_unmasked, [posteriors]
 
     def assimilate_local_project_chunked(self, tokens, tokens_global, cell_lens, q_cells_lens):
         """
@@ -188,7 +229,7 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(toks, cell_lens_cur)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
@@ -292,10 +333,26 @@ class EncoderModule(torch.nn.Module):
         num_steps_input = batch.get_num_source_steps()
         rs = num_steps_input * len(batch)
 
+        # Both latent seeds below are built from the float32 master parameter `q_cells` and
+        # the float32 `pe_global` buffer, and none of `repeat`/`add`/the harmonic encoding
+        # carries an autocast policy -- so without this cast the latent is *born* float32 and
+        # stays float32 through the encoder, the rollout and the decoder, at twice the bytes
+        # in each. FSDP used to hide it by casting forward inputs at every shard boundary;
+        # `fsdp_cast_forward_inputs` no longer does, and nothing else narrows it. Every
+        # downstream matmul runs in this dtype under autocast anyway, so seeding in it costs
+        # nothing beyond rounding the seed.
+        latent_dtype = (
+            get_dtype(self.cf.mixed_precision_dtype)
+            if self.cf.with_mixed_precision
+            else self.q_cells.dtype
+        )
+
         # create register and latent tokens and prepend to latent spatial tokens
         num_extra_tokens = self.num_register_tokens + self.num_class_tokens
         pos_enc = positional_encoding_harmonic
-        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1))
+        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1)).to(
+            latent_dtype
+        )
 
         # TODO: re-enable or remove ae_local_queries_per_cell
         if self.cf.ae_local_queries_per_cell:
@@ -304,18 +361,21 @@ class EncoderModule(torch.nn.Module):
             num_tokens = self.num_healpix_cells
             tokens_global = self.q_cells.repeat(num_tokens, 1, 1) + model_params.pe_global
             tokens_global = tokens_global.repeat(rs, 1, 1)
+        tokens_global = tokens_global.to(latent_dtype)
 
         # apply local assimilation engine and project onto global latent vectors
-        tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
+        tokens_global_unmasked, posteriors = self.assimilate_local_project_all(
             tokens, tokens_global, cell_lens, model_params.q_cells_lens
         )
 
         # apply aggregation engine on unmasked tokens
-        tokens_global_unmasked = self.aggregation_engine_unmasked(
+        tokens_global_unmasked = checkpoint(
+            self.aggregation_engine_unmasked,
             tokens_global_unmasked,
             tokens_global_register_class,
             batch.tokens_lens,
             rope_cell_coords=model_params.rope_cell_coords,
+            use_reentrant=False,
         )
 
         # final processing
