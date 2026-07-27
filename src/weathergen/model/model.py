@@ -687,8 +687,14 @@ class Model(torch.nn.Module):
 
         # recover batch dimension and separate input_steps
         shape = (len(batch), batch.get_num_source_steps(), *tokens.shape[1:])
-        # collapse along input step dimension
-        tokens = tokens.reshape(shape).sum(axis=1)
+        # collapse along input step dimension. `sum` carries an autocast float32 cast policy,
+        # so it would otherwise widen a bfloat16 latent here; the accumulation is worth doing
+        # in float32, the storage is not.
+        # NOTE: currently a no-op. The latent already arrives float32 -- it is seeded from a
+        # float32 parameter in `encoder.py:Encoder.assimilate_local` and nothing narrows it
+        # since FSDP stopped casting forward inputs -- so this only guards against the
+        # promotion, it does not narrow the rollout. Fix the source, not this line.
+        tokens = tokens.reshape(shape).sum(axis=1).to(tokens.dtype)
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
