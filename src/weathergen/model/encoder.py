@@ -14,6 +14,7 @@ from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
+from weathergen.datasets.healpix_domain import get_local_healpix_cell_range
 from weathergen.model.engines import (
     EmbeddingEngine,
     GlobalAssimilationEngine,
@@ -51,17 +52,17 @@ class EncoderModule(torch.nn.Module):
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
         self.spatial_parallel_size = get_encoder_spatial_parallel_size(cf)
-        if self.num_healpix_cells % self.spatial_parallel_size:
-            raise ValueError(
-                f"number of HEALPix cells ({self.num_healpix_cells}) must be divisible by "
-                f"encoder_spatial_parallel_size ({self.spatial_parallel_size})"
-            )
         self.spatial_parallel_group, self.spatial_parallel_rank = (
             get_encoder_spatial_parallel_group(cf)
         )
-        self.local_num_healpix_cells = self.num_healpix_cells // self.spatial_parallel_size
-        self.local_cell_start = self.spatial_parallel_rank * self.local_num_healpix_cells
-        self.local_cell_end = self.local_cell_start + self.local_num_healpix_cells
+        self.spatial_parent_level = cf.get("encoder_spatial_parallel_parent_level", 1)
+        self.local_cell_start, self.local_cell_end = get_local_healpix_cell_range(
+            self.healpix_level,
+            self.spatial_parallel_size,
+            self.spatial_parallel_rank,
+            self.spatial_parent_level,
+        )
+        self.local_num_healpix_cells = self.local_cell_end - self.local_cell_start
 
         self.cf = cf
         self.sources_size = sources_size

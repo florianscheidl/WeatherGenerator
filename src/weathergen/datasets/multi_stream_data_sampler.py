@@ -26,6 +26,7 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
 )
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.healpix_domain import get_local_healpix_cell_range
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -112,14 +113,14 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # initialise healpic
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
-        if self.num_healpix_cells % spatial_parallel_size:
-            raise ValueError(
-                f"number of HEALPix cells ({self.num_healpix_cells}) must be divisible by "
-                f"encoder_spatial_parallel_size ({spatial_parallel_size})"
-            )
-        self.local_num_healpix_cells = self.num_healpix_cells // spatial_parallel_size
-        self.local_cell_start = self.spatial_parallel_rank * self.local_num_healpix_cells
-        self.local_cell_end = self.local_cell_start + self.local_num_healpix_cells
+        self.spatial_parent_level = cf.get("encoder_spatial_parallel_parent_level", 1)
+        self.local_cell_start, self.local_cell_end = get_local_healpix_cell_range(
+            self.healpix_level,
+            spatial_parallel_size,
+            self.spatial_parallel_rank,
+            self.spatial_parent_level,
+        )
+        self.local_num_healpix_cells = self.local_cell_end - self.local_cell_start
         self.masker = Masker(cf.healpix_level, stage, cf.streams, self.mode_cfg)
         self.tokenizer = TokenizerMasking(
             cf.healpix_level,
@@ -128,10 +129,17 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             self.local_cell_end,
         )
         if spatial_parallel_size > 1:
+            descendants_per_parent = 4 ** (self.healpix_level - self.spatial_parent_level)
+            parent_start = self.local_cell_start // descendants_per_parent
+            parent_end = self.local_cell_end // descendants_per_parent
             logger.info(
-                "Encoder spatial rank %d/%d constructs source HEALPix cells [%d, %d)",
+                "Encoder spatial rank %d/%d owns level-%d parents [%d, %d) "
+                "and constructs source HEALPix cells [%d, %d)",
                 self.spatial_parallel_rank,
                 spatial_parallel_size,
+                self.spatial_parent_level,
+                parent_start,
+                parent_end,
                 self.local_cell_start,
                 self.local_cell_end,
             )
