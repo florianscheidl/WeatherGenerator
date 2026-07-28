@@ -30,6 +30,7 @@ from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
 from weathergen.datasets.utils import (
+    cell_partition_mask,
     get_tokens_lens,
 )
 from weathergen.readers_extra.registry import get_extra_reader
@@ -85,6 +86,39 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
     return IOReaderData.combine(rdatas)
 
 
+def cells_with_tokens(tokens_windows: list, num_cells: int) -> np.typing.NDArray:
+    """
+    Occupancy over healpix cells: True where any of the windows holds at least one token.
+
+    tokens_windows is what TokenizerMasking.get_tokens_windows returns, i.e. one
+    (idxs_cells, idxs_cells_lens) pair per time window, with (None, None) for empty ones.
+    Tokenization happens before masking, so this describes the data as loaded.
+    """
+    occupied = np.zeros(num_cells, dtype=bool)
+
+    for _, idxs_cells_lens in tokens_windows:
+        if idxs_cells_lens is None:
+            continue
+        occupied |= np.fromiter(
+            (len(lens) > 0 for lens in idxs_cells_lens), dtype=bool, count=num_cells
+        )
+
+    return occupied
+
+
+def windows_all_nan(windows: list[IOReaderData]) -> bool:
+    """
+    Whether every window that holds data holds only NaN.
+
+    Mirrors the intent of StreamData.source_nan/target_nan, but evaluated on the reader
+    output rather than on tokens, so that the verdict does not depend on which cells a
+    rank owns. Windows without data are ignored -- emptiness is judged separately.
+    """
+    values = [w.data for w in windows if w.data.size > 0]
+
+    return len(values) > 0 and all(np.isnan(v).all() for v in values)
+
+
 @dataclasses.dataclass
 class _Stream:
     info: Config
@@ -109,6 +143,18 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.num_healpix_cells = 12 * 4**self.healpix_level
         self.masker = Masker(cf.healpix_level, stage, cf.streams, self.mode_cfg)
         self.tokenizer = TokenizerMasking(cf.healpix_level, self.masker)
+
+        # spatial parallelism: keep mask for the healpix cells this rank owns (None = off)
+        self.cell_partition = self._init_cell_partition(cf)
+
+        # How the temporal index range is split. Without spatial parallelism every rank is
+        # its own data shard, as before. With it, the ranks are spatial shards of one and
+        # the same sample, so they must all walk the *same* temporal indices and there is
+        # a single data shard. A future data-parallel dimension would set these from the
+        # mesh coordinates instead of from the rank.
+        spatially_parallel = self.cell_partition is not None
+        self.num_data_shards = 1 if spatially_parallel else self.world_size
+        self.data_shard_idx = 0 if spatially_parallel else self.rank
 
         forecast_cfg = FORECAST_DEFAULTS | OmegaConf.to_object(mode_cfg.get("forecast", {}))
         self.output_offset = forecast_cfg["offset"]
@@ -146,11 +192,13 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.check_samples(self._get_fsm())
         self.streams_datasets = self._init_stream_datasets(cf)
 
-        # base seed; the seed actually used is derived from it per rank/worker/mini epoch
-        # in _derive_rng_seed()
+        # base seed; the seed actually used is derived from it per data shard/worker/mini
+        # epoch in _derive_rng_seed()
         self.rng_base_seed = cf.data_loading.rng_seed
 
+        # data draws and schedule/mask draws, split in reset()
         self.rng = None
+        self.rng_schedule = None
 
     def check_samples(self, fsm: int):
         """Check if samples_per_mini_epoch is suitable
@@ -188,23 +236,23 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         # streamlined calculation of length
         epoch_len = self.samples_per_mini_epoch
 
-        # ensure epoch_len is large enough to produce at least one batch per rank
-        min_samples = self.world_size * self.batch_size
+        # ensure epoch_len is large enough to produce at least one batch per data shard
+        min_samples = self.num_data_shards * self.batch_size
         if epoch_len < min_samples:
             logger.warning(
                 f"samples_per_mini_epoch={epoch_len} is too small for "
-                f"world_size={self.world_size} and batch_size={self.batch_size}. "
+                f"num_data_shards={self.num_data_shards} and batch_size={self.batch_size}. "
                 f"samples_per_mini_epoch has to be equal to or larger than"
-                f"world_size*batch_size to ensure that each rank can produce at least one sample. "
-                f"Automatically increasing to {min_samples}."
+                f"num_data_shards*batch_size to ensure that each data shard can produce at "
+                f"least one sample. Automatically increasing to {min_samples}."
             )
             epoch_len = min_samples
             self.samples_per_mini_epoch = min_samples
 
         # adjust len to split loading across all workers and ensure it is multiple of batch_size
-        self.len = ((epoch_len // self.world_size) // self.batch_size) * self.batch_size
+        self.len = ((epoch_len // self.num_data_shards) // self.batch_size) * self.batch_size
 
-        n_duplicates = self.len * self.world_size - available_samples
+        n_duplicates = self.len * self.num_data_shards - available_samples
         if not self.repeat_data:
             assert n_duplicates <= 0
 
@@ -278,16 +326,45 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return streams_datasets
 
+    def _init_cell_partition(self, cf: Config) -> torch.Tensor | None:
+        """
+        Build the keep mask for the healpix cells this rank owns, or None when spatial
+        parallelism is disabled.
+
+        The option is read with a default rather than from default_config.yml so that
+        existing run configs keep working unchanged.
+        """
+        healpix_level_split = cf.get("spatial_parallel", {}).get("healpix_level_split", None)
+        if healpix_level_split is None:
+            return None
+
+        partition = cell_partition_mask(
+            self.healpix_level, healpix_level_split, self.world_size, self.rank
+        )
+        logger.info(
+            f"Spatial parallelism: rank {self.rank}/{self.world_size} owns "
+            f"{int(partition.sum())}/{self.num_healpix_cells} healpix cells "
+            f"(split at level {healpix_level_split})."
+        )
+
+        return partition
+
     def _derive_rng_seed(self) -> np.random.SeedSequence:
         """
         Derive this worker's RNG seed for the current mini epoch.
 
         The base seed is hashed together with the identifiers that must yield
-        independent streams: DDP rank, data loader worker id, and mini epoch.
+        independent streams: data shard, data loader worker id, and mini epoch.
         SeedSequence hashing is order-sensitive and collision-free over distinct
         tuples, unlike a multiplicative derivation, where distinct
-        (rank, worker, mini_epoch) triples can share a product and thus silently
+        (shard, worker, mini_epoch) triples can share a product and thus silently
         draw identical data orderings.
+
+        Keyed on the *data shard*, not the rank. Without spatial parallelism the two
+        are identical. With it, all ranks are spatial shards of one and the same
+        sample, so they must draw the same temporal indices, the same masks and the
+        same per-reader subsampling -- only then do their cell partitions tile one
+        coherent sample rather than four unrelated ones.
 
         The result is a pure function of those identifiers, so it does not
         accumulate across mini epochs. That matters when num_workers == 0: no
@@ -297,7 +374,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         """
         worker_info = torch.utils.data.get_worker_info()
         worker_id = 0 if worker_info is None else worker_info.id
-        return np.random.SeedSequence([self.rng_base_seed, self.rank, worker_id, self.mini_epoch])
+        return np.random.SeedSequence(
+            [self.rng_base_seed, self.data_shard_idx, worker_id, self.mini_epoch]
+        )
 
     def reset(self) -> tuple[Sequence[int], Sequence[int]]:
         """
@@ -308,7 +387,17 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         Returns: permutation index, forecast steps index
         """
-        self.rng = np.random.default_rng(self._derive_rng_seed())
+        # Two independent streams off one seed. rng_schedule drives everything that has
+        # to agree across spatially parallel ranks -- which temporal indices are visited,
+        # how many forecast steps, and the cell masks -- while self.rng drives the
+        # data-dependent draws (per-reader shuffling/subsampling, spoofing). Keeping them
+        # apart matters because the number of draws self.rng makes depends on how many
+        # points a reader returned; once ranks load different amounts of data, a shared
+        # generator would silently desynchronise the schedule and the masks.
+        seed_data, seed_schedule = self._derive_rng_seed().spawn(2)
+        self.rng = np.random.default_rng(seed_data)
+        self.rng_schedule = np.random.default_rng(seed_schedule)
+
         fsm = self._get_fsm()
         self.check_samples(fsm)
         perms = self._calc_baseperms(fsm)
@@ -317,7 +406,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         n_requested_idxs = self.samples_per_mini_epoch // self.batch_size
         if self.repeat_data and len(perms) < n_requested_idxs:
             perms = np.tile(perms, n_requested_idxs // len(perms))
-            filler = self.rng.choice(
+            filler = self.rng_schedule.choice(
                 perms,
                 size=n_requested_idxs - len(perms),
                 replace=False,
@@ -326,7 +415,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         # shuffle
         if self.shuffle:
-            perms = self.rng.permutation(perms)
+            perms = self.rng_schedule.permutation(perms)
 
         len_dt = len(self) // self.batch_size
 
@@ -337,7 +426,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             fs = fsm * np.ones(len_dt, dtype=np.int64)
 
         elif self.forecast_policy in ("random", "sequential_random"):
-            fs = self.rng.integers(
+            fs = self.rng_schedule.integers(
                 low=self.list_num_forecast_steps.min(),
                 high=fsm + 1,
                 size=len_dt,
@@ -346,8 +435,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         else:
             raise ValueError(f"Unknown forecast policy {self.forecast_policy}")
 
-        # reset tokenizer RNG
-        self.tokenizer.reset_rng(self.rng)
+        # masks must be identical across spatially parallel ranks, so they are drawn from
+        # the schedule stream rather than the data stream
+        self.tokenizer.reset_rng(self.rng_schedule)
         return (perms, fs)
 
     def _get_fsm(self) -> int:
@@ -635,8 +725,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
     def _get_source_target_masks(self, training_mode):
         """
         Generate source and target masks for all streams.
+
+        Returns the masks, the unrestricted masks (None without spatial parallelism), and
+        the sample counts. The unrestricted copies describe the whole sphere and are
+        therefore identical on every spatially parallel rank, which is what lets
+        __iter__ agree on whether to skip a temporal index.
         """
         masks = {}
+        masks_global = None if self.cell_partition is None else {}
         for stream_name, stream_data in self.streams_datasets.items():
             stream_info = stream_data.info
             # Build source and target sample masks
@@ -645,11 +741,21 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 self.num_healpix_cells,
                 stream_info,
             )
+            # restrict to the cells this rank owns; after build_samples_for_stream so that
+            # the source/target relationships are resolved on the unrestricted masks
+            if masks_global is not None:
+                (target_masks, source_masks, _) = masks[stream_name]
+                masks_global[stream_name] = (
+                    [m.clone() for m in target_masks.masks],
+                    [m.clone() for m in source_masks.masks],
+                )
+                target_masks.restrict(self.cell_partition)
+                source_masks.restrict(self.cell_partition)
             # identical for all streams
             num_target_samples = len(masks[stream_name][0])
             num_source_samples = len(masks[stream_name][1])
 
-        return masks, num_source_samples, num_target_samples
+        return masks, masks_global, num_source_samples, num_target_samples
 
     def _get_output_length(self, num_forecast_steps):
         # max(1, ...) : self.output_offset and num_forecast_steps are zero for pure masking
@@ -671,9 +777,13 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return batch
 
-    def _get_batch(self, idx: int, num_forecast_steps: int):
+    def _get_batch(self, idx: int, num_forecast_steps: int) -> tuple[ModelBatch, bool | None]:
         """
         Assemble a batch using the sample corresponding to idx
+
+        Returns the batch and, under spatial parallelism, whether the *unrestricted*
+        batch is usable; None otherwise, in which case the caller judges the batch it
+        was handed. See _batch_valid_globally.
         """
 
         mode = self.mode_cfg.get("training_mode")
@@ -681,7 +791,16 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         target_cfgs = self.mode_cfg.get("target_input", {})
 
         # get/coordinate masks
-        masks_streams, num_source_samples, num_target_samples = self._get_source_target_masks(mode)
+        (
+            masks_streams,
+            masks_global,
+            num_source_samples,
+            num_target_samples,
+        ) = self._get_source_target_masks(mode)
+
+        # occupancy of the whole sphere, accumulated per stream below and used for the
+        # rank-independent validity verdict
+        global_occupancy = [] if masks_global is not None else None
 
         source_select, target_select = [], []
         if "masking" in mode:
@@ -727,6 +846,21 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
             input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
             output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
+
+            # record what this stream contributes over the whole sphere, before the cell
+            # partition is taken into account
+            if global_occupancy is not None:
+                (g_target_masks, g_source_masks) = masks_global[stream_name]
+                src_cells = cells_with_tokens(input_tokens, self.num_healpix_cells)
+                tgt_cells = cells_with_tokens(output_tokens, self.num_healpix_cells)
+                global_occupancy += [
+                    (
+                        any(bool((m.numpy() & src_cells).any()) for m in g_source_masks),
+                        any(bool((m.numpy() & tgt_cells).any()) for m in g_target_masks),
+                        windows_all_nan(input_data),
+                        windows_all_nan(output_data),
+                    )
+                ]
 
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target
@@ -778,7 +912,40 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         target_in_steps = 1 if len(target_in_steps) == 0 else target_in_steps.max().item()
         batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
 
-        return batch
+        return batch, self._batch_valid_globally(global_occupancy, mode)
+
+    def _batch_valid_globally(self, global_occupancy: list | None, mode: str) -> bool | None:
+        """
+        Whether the batch would be usable if no cell partition had been applied.
+
+        Under spatial parallelism the per-rank predicates on ModelBatch cannot drive the
+        skip loop in __iter__: a rank whose region happens to hold no observations would
+        advance to a different temporal index than its peers, and the ranks would then
+        deadlock at the first collective. This verdict is a function of the loaded data
+        and the unrestricted masks only, both of which are identical on every spatially
+        parallel rank, so all ranks skip in lockstep without needing to communicate.
+
+        The cost is that a batch which is non-empty globally but empty on this rank is
+        let through, so the model needs a path for an empty shard.
+
+        Returns None when spatial parallelism is off, leaving today's per-rank checks in
+        charge.
+        """
+        if global_occupancy is None:
+            return None
+        if len(global_occupancy) == 0:
+            return False
+
+        sources_nonempty, targets_nonempty, sources_nan, targets_nan = zip(
+            *global_occupancy, strict=True
+        )
+
+        # any() over streams for emptiness, all() for NaN -- mirrors BatchSamples
+        valid = any(sources_nonempty) and not (all(sources_nan) or all(targets_nan))
+        if "masking" in mode:
+            valid = valid and any(targets_nonempty)
+
+        return valid
 
     def __iter__(self) -> ModelBatch:
         """
@@ -808,13 +975,17 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 idx: TIndex = perms[idx_raw % perms.shape[0]]
                 idx_raw += 1
 
-                batch = self._get_batch(idx, num_forecast_steps)
+                batch, valid_globally = self._get_batch(idx, num_forecast_steps)
 
                 # ensure the batch is valid, i.e. not completely empty and no NaN values
                 # student teacher has no classical targets
                 mode = self.mode_cfg.get("training_mode")
-                not_valid = batch.sources_empty() or batch.is_nan()
-                not_valid = not_valid or (batch.targets_empty() if "masking" in mode else False)
+                if valid_globally is not None:
+                    # spatial parallelism: the decision has to be the same on every rank
+                    not_valid = not valid_globally
+                else:
+                    not_valid = batch.sources_empty() or batch.is_nan()
+                    not_valid = not_valid or (batch.targets_empty() if "masking" in mode else False)
 
                 # skip completely empty batch item or when all targets are empty -> no grad
                 if not_valid:
@@ -828,12 +999,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         return self.len
 
     def worker_workset(self):
-        local_start, local_end = self.rank * self.len, (self.rank + 1) * self.len
+        # sharded over data shards, not ranks: under spatial parallelism all ranks are
+        # shards of the same sample and must walk the same temporal indices
+        local_start = self.data_shard_idx * self.len
+        local_end = (self.data_shard_idx + 1) * self.len
 
         worker_info = torch.utils.data.get_worker_info()
 
         if worker_info is None:
-            assert self.world_size == 1, self.world_size
+            assert self.num_data_shards == 1, self.num_data_shards
             iter_start = 0
             iter_end = len(self)
 

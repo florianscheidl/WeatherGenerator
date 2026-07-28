@@ -229,6 +229,60 @@ def coords_to_hpyidxs(hl, thetas, phis):
 
 
 ####################################################################################################
+def cell_partition_mask(
+    healpix_level: int,
+    healpix_level_split: int,
+    num_shards: int,
+    shard_idx: int,
+) -> torch.Tensor:
+    """Keep mask selecting the healpix cells owned by one shard of a spatial partition.
+
+    The partition is defined on the coarser grid at ``healpix_level_split`` and projected
+    onto the data grid at ``healpix_level``: coarse cell ``p`` is owned by shard
+    ``p % num_shards`` and, in the nested healpix ordering used throughout the pipeline,
+    covers exactly the contiguous block of children
+    ``[p * 4**level_diff, (p+1) * 4**level_diff)``.
+
+    The stride (rather than contiguous blocks) spreads each shard's cells over the whole
+    sphere, so every shard sees a climatologically mixed region. Over all shards the masks
+    are disjoint and cover the grid, which is what makes the per-shard results
+    recombinable.
+
+    Parameters
+    ----------
+    healpix_level :
+        Level of the data grid, i.e. cf.healpix_level.
+    healpix_level_split :
+        Level at which cells are assigned to shards; must be <= healpix_level.
+    num_shards :
+        Number of shards to partition into.
+    shard_idx :
+        Index of the shard to build the mask for.
+
+    Returns
+    -------
+    Boolean tensor of shape [12 * 4**healpix_level], True where the cell is owned.
+    """
+
+    assert 0 <= healpix_level_split <= healpix_level, (
+        f"healpix_level_split={healpix_level_split} must be in [0, {healpix_level}]."
+    )
+    assert 0 <= shard_idx < num_shards, f"shard_idx={shard_idx} out of range for {num_shards}."
+
+    num_split_cells = 12 * 4**healpix_level_split
+    assert num_split_cells % num_shards == 0, (
+        f"Cannot partition {num_split_cells} cells at healpix level {healpix_level_split} "
+        f"evenly across {num_shards} shards. Choose a different healpix_level_split."
+    )
+
+    owned = (np.arange(num_split_cells) % num_shards) == shard_idx
+
+    # project onto the data level: nested ordering makes the children of a coarse cell a
+    # contiguous block, so the mask is a plain repeat
+    return torch.from_numpy(np.repeat(owned, 4 ** (healpix_level - healpix_level_split)))
+
+
+####################################################################################################
 def add_local_vert_coords(hl, a, verts, tcs, zi, dx, dy, geoinfo_offset):
     ref = torch.tensor([1.0, 0.0, 0.0])
     aa = locs_to_cell_coords(hl, verts.unsqueeze(1), dx, dy)

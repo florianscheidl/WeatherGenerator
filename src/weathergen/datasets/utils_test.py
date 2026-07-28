@@ -1,7 +1,11 @@
+import astropy_healpix as hp
+import numpy as np
+import pytest
 import torch
 from torch import tensor
 
 from weathergen.datasets.utils import (
+    cell_partition_mask,
     locs_to_cell_coords_ctrs,
     locs_to_ctr_coords,
     vecs_to_rots,
@@ -149,3 +153,72 @@ def test_locs_to_ctr_coords():
         locs_to_ctr_coords(ctrs_r3, locs),
         _locs_to_ctr_coords(ctrs_r3, locs),
     )
+
+
+def test_cell_partition_mask_is_a_partition():
+    """Over all shards the masks must be disjoint and cover the grid."""
+    hl_data, hl_split, num_shards = 5, 3, 4
+
+    masks = [
+        cell_partition_mask(hl_data, hl_split, num_shards, i).numpy() for i in range(num_shards)
+    ]
+
+    assert np.array(masks).sum(axis=0).tolist() == [1] * (12 * 4**hl_data)
+
+
+def test_cell_partition_mask_balances_cells():
+    hl_data, hl_split, num_shards = 5, 3, 4
+    num_cells = 12 * 4**hl_data
+
+    for i in range(num_shards):
+        mask = cell_partition_mask(hl_data, hl_split, num_shards, i)
+        assert int(mask.sum()) == num_cells // num_shards
+
+
+def test_cell_partition_mask_matches_nested_child_ordering():
+    """The projection to the data level assumes nested ordering -- check it holds."""
+    hl_data, hl_split, num_shards, shard_idx = 5, 3, 4, 1
+
+    mask = cell_partition_mask(hl_data, hl_split, num_shards, shard_idx)
+
+    # map the selected data-level cells back to their coarse cell via astropy, rather than
+    # by repeating the index arithmetic the implementation itself uses
+    data_cells = np.flatnonzero(mask.numpy())
+    lon, lat = hp.healpix_to_lonlat(data_cells, nside=2**hl_data, order="nested")
+    parents = hp.lonlat_to_healpix(lon, lat, nside=2**hl_split, order="nested")
+
+    expected = np.flatnonzero(np.arange(12 * 4**hl_split) % num_shards == shard_idx)
+    assert sorted(set(np.unique(parents).tolist())) == expected.tolist()
+
+
+def test_cell_partition_mask_split_at_data_level():
+    """healpix_level_split == healpix_level selects every num_shards-th cell."""
+    mask = cell_partition_mask(3, 3, num_shards=4, shard_idx=2)
+
+    assert np.flatnonzero(mask.numpy()).tolist() == list(range(2, 12 * 4**3, 4))
+
+
+def test_cell_partition_mask_split_at_base_resolution():
+    """healpix_level_split == 0 partitions the 12 base cells."""
+    mask = cell_partition_mask(2, 0, num_shards=4, shard_idx=0)
+
+    # base cells 0, 4, 8, each covering 4**2 children
+    assert np.flatnonzero(mask.numpy()).tolist() == (
+        list(range(0, 16)) + list(range(64, 80)) + list(range(128, 144))
+    )
+
+
+def test_cell_partition_mask_rejects_split_finer_than_data():
+    with pytest.raises(AssertionError, match="healpix_level_split"):
+        cell_partition_mask(3, 5, num_shards=4, shard_idx=0)
+
+
+def test_cell_partition_mask_rejects_uneven_partition():
+    # 12 * 4**3 = 768 cells do not divide evenly across 5 shards
+    with pytest.raises(AssertionError, match="evenly"):
+        cell_partition_mask(5, 3, num_shards=5, shard_idx=0)
+
+
+def test_cell_partition_mask_rejects_out_of_range_shard():
+    with pytest.raises(AssertionError, match="shard_idx"):
+        cell_partition_mask(5, 3, num_shards=4, shard_idx=4)

@@ -45,6 +45,19 @@ class MaskData:
     def get_mask(self, idx: int) -> np.typing.NDArray:
         return self.masks[idx]
 
+    def restrict(self, keep: torch.Tensor) -> None:
+        """Restrict all masks to the cells kept by `keep`.
+
+        Applied after all source/target relationships have been resolved, so that
+        `complement`/`subset`/`disjoint` keep describing the relationship between the
+        strategies rather than between already-restricted masks. Replaces the masks
+        out of place because `identity` makes a source mask alias its target mask.
+        """
+        for i, mask in enumerate(self.masks):
+            restricted = mask & keep
+            self.masks[i] = restricted
+            self.metadata[i].mask = restricted
+
 
 def get_num_samples(config) -> np.typing.NDArray:
     """
