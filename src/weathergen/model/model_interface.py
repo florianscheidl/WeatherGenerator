@@ -79,11 +79,20 @@ def init_model_and_shard(
 
     elif with_ddp and with_fsdp:
         # with DDP *and() FSDP
+        # FSDP casts a module's floating-point forward inputs to param_dtype on entry, as
+        # part of the pre-forward hook. torch.utils.checkpoint does not replay that hook on
+        # recompute, so a checkpointed region spanning a shard boundary computes in
+        # param_dtype on the way in and in the ambient autocast dtype on the way back --
+        # different values, and for a dtype-preserving norm a CheckpointError. LayerNorm hid
+        # this by returning float32 whatever it was handed. Off by default so autocast picks
+        # the dtype per operation, identically in both passes.
+        cast_forward_inputs = cf.get("fsdp_cast_forward_inputs", False)
         fsdp_kwargs = {
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
                     reduce_dtype=torch.float32,
+                    cast_forward_inputs=cast_forward_inputs,
                 )
                 if cf.with_mixed_precision
                 else None
@@ -121,11 +130,14 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **fsdp_kwargs)
 
+        # this is the policy the mismatch was observed under: param_dtype float32 against
+        # bfloat16 activations, so the entry cast is a full float32 copy of the activation
         full_precision_fsdp_kwargs = {
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
                     reduce_dtype=torch.float32,
+                    cast_forward_inputs=cast_forward_inputs,
                 )
                 if cf.with_mixed_precision
                 else None

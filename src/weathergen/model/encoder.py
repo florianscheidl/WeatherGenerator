@@ -31,6 +31,7 @@ from weathergen.utils.distributed import (
     get_encoder_spatial_parallel_group,
     get_encoder_spatial_parallel_size,
 )
+from weathergen.utils.utils import get_dtype
 
 
 class EncoderModule(torch.nn.Module):
@@ -152,13 +153,8 @@ class EncoderModule(torch.nn.Module):
             self.local_cell_end,
         )
 
-        tokens_global, posteriors = checkpoint(
-            self.assimilate_local,
-            model_params,
-            stream_cell_tokens,
-            batch,
-            local_cell_lens,
-            use_reentrant=False,
+        tokens_global, posteriors = self.assimilate_local(
+            model_params, stream_cell_tokens, batch, local_cell_lens
         )
 
         tokens_global = checkpoint(
@@ -231,7 +227,7 @@ class EncoderModule(torch.nn.Module):
                 # zero dependency so its backward hooks also execute.
                 dummy_lens = torch.tensor([0, 1], device=tokens.device, dtype=torch.int32)
                 dummy_tokens = tokens.new_zeros((1, tokens.shape[-1]))
-                dummy_tokens = self.ae_local_engine(dummy_tokens, dummy_lens, use_reentrant=False)
+                dummy_tokens = self.ae_local_engine(dummy_tokens, dummy_lens)
                 dummy_tokens, _ = self.interpolate_latents(dummy_tokens)
                 dummy_global = self.ae_local_global_engine(
                     dummy_tokens,
@@ -247,7 +243,7 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(toks, cell_lens_cur)
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
@@ -358,10 +354,26 @@ class EncoderModule(torch.nn.Module):
         num_steps_input = batch.get_num_source_steps()
         rs = num_steps_input * len(batch)
 
+        # Both latent seeds below are built from the float32 master parameter `q_cells` and
+        # the float32 `pe_global` buffer, and none of `repeat`/`add`/the harmonic encoding
+        # carries an autocast policy -- so without this cast the latent is *born* float32 and
+        # stays float32 through the encoder, the rollout and the decoder, at twice the bytes
+        # in each. FSDP used to hide it by casting forward inputs at every shard boundary;
+        # `fsdp_cast_forward_inputs` no longer does, and nothing else narrows it. Every
+        # downstream matmul runs in this dtype under autocast anyway, so seeding in it costs
+        # nothing beyond rounding the seed.
+        latent_dtype = (
+            get_dtype(self.cf.mixed_precision_dtype)
+            if self.cf.with_mixed_precision
+            else self.q_cells.dtype
+        )
+
         # create register and latent tokens and prepend to latent spatial tokens
         num_extra_tokens = self.num_register_tokens + self.num_class_tokens
         pos_enc = positional_encoding_harmonic
-        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1))
+        tokens_global_register_class = pos_enc(self.q_cells.repeat(rs, num_extra_tokens, 1)).to(
+            latent_dtype
+        )
 
         # Direct calls retain the old API and perform the shard selection here.
         # ``forward`` passes an already-sharded stream_cell_tokens tensor.
@@ -385,6 +397,7 @@ class EncoderModule(torch.nn.Module):
                 self.q_cells.repeat(self.local_num_healpix_cells, 1, 1) + pe_global_local
             )
             tokens_global = tokens_global.repeat(rs, 1, 1)
+        tokens_global = tokens_global.to(latent_dtype)
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors, empty_chunk_dependency = (
@@ -419,11 +432,13 @@ class EncoderModule(torch.nn.Module):
         tokens_global_unmasked = tokens_global[cell_mask]
 
         # apply aggregation engine on unmasked tokens
-        tokens_global_unmasked = self.aggregation_engine_unmasked(
+        tokens_global_unmasked = checkpoint(
+            self.aggregation_engine_unmasked,
             tokens_global_unmasked,
             tokens_global_register_class,
             batch.tokens_lens,
             rope_cell_coords=model_params.rope_cell_coords,
+            use_reentrant=False,
         )
 
         # final processing

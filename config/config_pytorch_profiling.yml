@@ -1,0 +1,9 @@
+profiling:
+  memory_profiling: True
+  pytorch_profiling: True
+  only_profiling: False
+train_logging:
+  memory_tracking: True
+  throughput_tracking: True
+data_loading:
+  rng_seed: 42

@@ -149,10 +149,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.check_samples(self._get_fsm())
         self.streams_datasets = self._init_stream_datasets(cf)
 
-        # RNG seed setup
-        rs = cf.data_loading.rng_seed
-        nw = cf.data_loading.num_workers
-        self.data_loader_rng_seed = rs if rs > nw else rs * 97
+        # base seed; the seed actually used is derived from it per rank/worker/mini epoch
+        # in _derive_rng_seed()
+        self.rng_base_seed = cf.data_loading.rng_seed
 
         self.rng = None
 
@@ -282,6 +281,27 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         return streams_datasets
 
+    def _derive_rng_seed(self) -> np.random.SeedSequence:
+        """
+        Derive this worker's RNG seed for the current mini epoch.
+
+        The base seed is hashed together with the identifiers that must yield
+        independent streams: DDP rank, data loader worker id, and mini epoch.
+        SeedSequence hashing is order-sensitive and collision-free over distinct
+        tuples, unlike a multiplicative derivation, where distinct
+        (rank, worker, mini_epoch) triples can share a product and thus silently
+        draw identical data orderings.
+
+        The result is a pure function of those identifiers, so it does not
+        accumulate across mini epochs. That matters when num_workers == 0: no
+        worker process is forked, so the sampler instance is re-iterated in place
+        and any in-place seed update would compound -- making a single-process
+        debug run diverge from the multi-worker run it is meant to reproduce.
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = 0 if worker_info is None else worker_info.id
+        return np.random.SeedSequence([self.rng_base_seed, self.rank, worker_id, self.mini_epoch])
+
     def reset(self) -> tuple[Sequence[int], Sequence[int]]:
         """
         Reset RNG, return shuffled perms adn forecast steps for this mini epoch.
@@ -291,7 +311,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         Returns: permutation index, forecast steps index
         """
-        self.rng = np.random.default_rng(self.data_loader_rng_seed)
+        self.rng = np.random.default_rng(self._derive_rng_seed())
         fsm = self._get_fsm()
         self.check_samples(fsm)
         perms = self._calc_baseperms(fsm)
@@ -584,6 +604,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
                     len(stream_ds[0].mean[stream_ds[0].source_idx]),
+                    self.rng,
                 )
                 rdata.is_spoof = True
 
@@ -606,6 +627,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
                     len(stream_ds[0].mean[stream_ds[0].target_idx]),
+                    self.rng,
                 )
                 rdata.is_spoof = True
 
@@ -819,15 +841,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             iter_end = len(self)
 
         else:
-            # ensure the rng seed is fully unique across workers and mini_epochs
-            # the worker processes are generated as bit-wise copy of the "template" (the actual
-            # instance of the present class that is created) whenever __iter__ is started. This
-            # happens for each mini_epoch, for train and validation, and independently for each DDP
-            # worker. After the bit-wise copy, the rng seed needs to be made unique for
-            # DDP workers, loader process, mini_epoch.
-            self.data_loader_rng_seed *= (
-                ((self.rank + 1) * 73) * ((worker_info.id + 1) * 37) * (self.mini_epoch + 13) * 7
-            )
+            # note the rng seed is not touched here: each worker derives its own seed from
+            # the base seed in _derive_rng_seed(), keyed by rank, worker id and mini epoch
             # split workload
             per_worker = (local_end - local_start) // worker_info.num_workers
             iter_start = local_start + worker_info.id * per_worker
