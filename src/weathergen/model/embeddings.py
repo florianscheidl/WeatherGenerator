@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import torch
+import torch.distributed.nn  # autograd-aware all_gather; not pulled in by `import torch`
 from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
@@ -112,6 +113,24 @@ class StreamEmbedTransformer(torch.nn.Module):
         # regardless) and whose output is retained as the first block's checkpoint input
         x = peh(self.embed(x_in.transpose(-2, -1)))
 
+        # x is replicated across ranks, so each rank runs the blocks on one shard of dim 0
+        # (a batch dimension the blocks never mix across) and the shards are gathered back
+        # afterwards. NCCL's all-gather requires equal-sized contributions, so the shards
+        # are uniform and the last one is zero-padded; the padding is trimmed after the
+        # gather. Without a process group this degenerates to world_size 1, i.e. no split.
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            local_rank = torch.distributed.get_rank()
+        else:
+            world_size, local_rank = 1, 0
+
+        num_rows = x.shape[0]
+        shard_rows = (num_rows + world_size - 1) // world_size
+        x_slice = x[local_rank * shard_rows : (local_rank + 1) * shard_rows]
+        pad_rows = shard_rows - x_slice.shape[0]
+        if pad_rows > 0:
+            x_slice = torch.nn.functional.pad(x_slice, [0, 0] * (x.ndim - 1) + [0, pad_rows])
+
         # One checkpoint per layer, not one per (attention, MLP) pair. Pairing them retains
         # one boundary activation per block instead of two, but the recompute then has to
         # rebuild a whole block's graph before the backward consumes any of it, and every
@@ -120,7 +139,15 @@ class StreamEmbedTransformer(torch.nn.Module):
         # activations saved by pairing. The finer split trades the cheaper quantity for the
         # expensive one; it does not change how much is recomputed.
         for layer in self.layers:
-            x = checkpoint(layer, x, use_reentrant=False)
+            x_slice = checkpoint(layer, x_slice, use_reentrant=False)
+
+        if world_size > 1:
+            # autograd-aware all-gather: the plain torch.distributed one is an in-place
+            # collective with no backward, which would strand the blocks without gradients
+            x = torch.cat(torch.distributed.nn.functional.all_gather(x_slice), dim=0)
+            x = x[:num_rows]
+        else:
+            x = x_slice
 
         return checkpoint(self.readout, x, use_reentrant=False)
 
