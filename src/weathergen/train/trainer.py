@@ -53,7 +53,7 @@ from weathergen.train.utils import (
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
 )
-from weathergen.utils.distributed import is_root
+from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 from weathergen.utils.performance import (
     MemoryTracker,
     NullMemoryTracker,
@@ -116,7 +116,7 @@ class Trainer(TrainerBase):
         """
         Get total, effective batch size across all DDP ranks
         """
-        return self.world_size_original * batch_size_per_gpu
+        return self.data_parallel_world_size_original * batch_size_per_gpu
 
     def init(self, cf: Config, devices):
         # pylint: disable=attribute-defined-outside-init
@@ -172,6 +172,19 @@ class Trainer(TrainerBase):
         # world_size gets overwritten by current setting during init_ddp()
         self.world_size_original = cf.get("world_size_original", cf.get("world_size", None))
         cf.world_size_original = self.world_size_original
+        spatial_parallel_size = get_encoder_spatial_parallel_size(cf)
+        cf.data_parallel_world_size = cf.world_size // spatial_parallel_size
+        spatial_parallel_size_original = cf.get(
+            "encoder_spatial_parallel_size_original", spatial_parallel_size
+        )
+        if self.world_size_original % spatial_parallel_size_original:
+            raise ValueError(
+                "world_size_original must be divisible by encoder_spatial_parallel_size_original"
+            )
+        self.data_parallel_world_size_original = (
+            self.world_size_original // spatial_parallel_size_original
+        )
+        cf.encoder_spatial_parallel_size_original = spatial_parallel_size_original
 
         self.log_grad_norms = cf.train_logging.get("log_grad_norms", False)
 
@@ -371,7 +384,7 @@ class Trainer(TrainerBase):
         self.lr_scheduler = LearningRateScheduler(
             self.optimizer,
             self.batch_size_per_gpu,
-            cf.world_size,
+            cf.data_parallel_world_size,
             cf.general.istep,
             lr_steps,
             self.training_cfg.learning_rate_scheduling,
@@ -390,13 +403,17 @@ class Trainer(TrainerBase):
             mini_epoch_base = int(self.cf.general.istep / len(self.data_loader))
         else:
             len_per_rank = (
-                max(1, len(self.dataset) // (self.world_size_original * self.batch_size_per_gpu))
+                max(
+                    1,
+                    len(self.dataset)
+                    // (self.data_parallel_world_size_original * self.batch_size_per_gpu),
+                )
             ) * self.batch_size_per_gpu
             mini_epoch_base = int(
                 self.cf.general.istep
                 / (
                     min(len_per_rank, self.training_cfg.samples_per_mini_epoch)
-                    * self.world_size_original
+                    * self.data_parallel_world_size_original
                 )
             )
 
