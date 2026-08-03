@@ -671,19 +671,21 @@ class Trainer(TrainerBase):
             # gradient clipping
             for optimizer in self.optimizers:
                 self.grad_scaler.unscale_(optimizer)
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
-                )
+            total_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=self.training_cfg.optimizer.grad_clip
+            )
 
-                # log gradient norms
-                if self.log_grad_norms:
-                    if bidx % self.train_logging.terminal == 0:
-                        self.last_grad_norm = self._get_tensor_item(total_norm)
-                    if bidx % self.train_logging.metrics == 0:
-                        self._log_instant_grad_norms(TRAIN)
+            # log gradient norms
+            if self.log_grad_norms:
+                if bidx % self.train_logging.terminal == 0:
+                    self.last_grad_norm = self._get_tensor_item(total_norm)
+                if bidx % self.train_logging.metrics == 0:
+                    self._log_instant_grad_norms(TRAIN)
 
+            # optimizer step
+            for optimizer in self.optimizers:
                 self.grad_scaler.step(optimizer)
-                self.grad_scaler.update()
+            self.grad_scaler.update()
 
             # update learning rate
             for lr_scheduler in self.lr_schedulers:
@@ -965,7 +967,8 @@ class ProfilingTrainer(Trainer):
 
         dataset_iter = iter(self.data_loader)
 
-        self.optimizer.zero_grad()
+        for optimizer in self.optimizers:
+            optimizer.zero_grad()
 
         # training loop
         self.t_start = time.time()
