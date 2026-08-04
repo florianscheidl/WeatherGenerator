@@ -927,7 +927,7 @@ class Plotter:
 
         # render points
         if opts["use_datashader"] and HAS_DATASHADER:
-            artist = self._render_datashader(
+            self._render_datashader(
                 ax, proj, data, opts["norm"], opts["cmap"], opts["marker_size_base"]
             )
         else:
@@ -945,7 +945,7 @@ class Plotter:
                 lat=data["lat"],
             )
 
-            artist = self._render_scatter(
+            self._render_scatter(
                 ax, data, opts["norm"], opts["cmap"], marker_size, opts["marker"], opts["extra"]
             )
 
@@ -963,7 +963,7 @@ class Plotter:
             ax.gridlines(draw_labels=False, linestyle="--", color="gray", linewidth=0.6, alpha=0.7)
 
         cbar = plt.colorbar(
-            artist,
+            mpl.cm.ScalarMappable(norm=opts["norm"], cmap=opts["cmap"]),
             ax=ax,
             fraction=0.03,
             pad=0.02,

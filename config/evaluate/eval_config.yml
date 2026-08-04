@@ -31,9 +31,23 @@
 evaluation:
   metrics  : ["rmse"]
   # regions: ["global", "nhem"] # Have regions here, if you want for them to apply to all streams (scores calculation)
-  summary_plots : true
-  ratio_plots : false
-  heat_maps : false
+
+  # ── Score visualisations (new list-based config) ──
+  # Supported values: lead_time, ratio, heatmap, scorecard, bar, qq,
+  #                   rank_histogram, score_map, score_animation, timeseries
+  # NOTE: PSD plots are produced automatically when psd is in metrics.
+  score_plots: [lead_time, timeseries]
+
+  # Legacy boolean flags (deprecated — use score_plots list above instead):
+  # summary_plots : true
+  # ratio_plots : false
+  # heat_maps : false
+  # score_cards: false
+  # bar_plots: false
+  # plot_score_maps: false
+  # plot_score_animations: false
+  # plot_score_init_timeseries: true
+
   summary_dir: "./plots/"
   plot_ensemble: "members" #supported: false, "std", "minmax", "members"
   plot_score_maps: false #plot scores on a 2D maps. it slows down score computation 
