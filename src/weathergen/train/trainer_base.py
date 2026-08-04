@@ -136,6 +136,25 @@ class TrainerBase:
                     dist.all_reduce(l_seed, op=torch.distributed.ReduceOp.SUM)
                     cf.data_loader_rng_seed = l_seed.item()
 
+        if dist.is_initialized():
+            # Data sharding derives from cf.rank while encoder cell ownership derives
+            # from the distributed rank (spatial groups are built from global ranks).
+            # If the two ever disagree, a rank's data loader and its encoder work on
+            # different HEALPix domains, which corrupts results silently rather than
+            # failing. Note this is reachable: the branch above is skipped when the
+            # process group was already initialized elsewhere, leaving rank at 0.
+            if rank != dist.get_rank():
+                raise RuntimeError(
+                    f"cf.rank ({rank}) does not match the torch.distributed rank "
+                    f"({dist.get_rank()}); encoder spatial parallelism and data "
+                    "sharding would disagree about this rank's HEALPix domain"
+                )
+            if world_size != dist.get_world_size():
+                raise RuntimeError(
+                    f"cf.world_size ({world_size}) does not match the torch.distributed "
+                    f"world size ({dist.get_world_size()})"
+                )
+
         cf.world_size = world_size
         cf.rank = rank
         cf.local_rank = local_rank
