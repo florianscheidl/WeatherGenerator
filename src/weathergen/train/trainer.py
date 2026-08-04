@@ -55,7 +55,7 @@ from weathergen.train.utils import (
     get_target_idxs_from_cfg,
 )
 from weathergen.utils.distributed import is_root
-from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker
+from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
 from weathergen.utils.profiling import (
     export_memory_snapshot,
     start_record_memory_history,
@@ -118,6 +118,7 @@ class Trainer(TrainerBase):
         self.loss_spike_cfg = None
         self.loss_spike_file = None
         self.loss_spike_history = deque()
+        self.training_loop_annotation_context = nullcontext
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -220,6 +221,8 @@ class Trainer(TrainerBase):
                 warmup_steps=cf.train_logging.get("performance_tracking_warmup_steps", 2),
                 batch_size_per_gpu=self.batch_size_per_gpu,
             )
+        if cf.get("profiling", {}).get("nvtx_annotate", False):
+            self.training_loop_annotation_context = nvtx_range
 
     def get_target_aux_calculators(self, mode_cfg):
         """
