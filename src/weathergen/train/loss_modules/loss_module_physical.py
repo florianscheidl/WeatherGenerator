@@ -12,14 +12,20 @@
 
 import logging
 from collections import defaultdict
+from functools import partial
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig
 
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.utils import TRAIN, VAL, Stage
+from weathergen.utils.distributed import (
+    get_encoder_spatial_parallel_group,
+    get_encoder_spatial_parallel_size,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -105,21 +111,38 @@ class LossPhysical(LossModuleBase):
         self.stage = stage
         self.device = device
         self.name = "LossPhysical"
+        self.spatial_local_loss = self.stage == TRAIN and bool(
+            cf.get("spatial_local_physical_loss", False)
+        )
+        self.spatial_parallel_size = (
+            get_encoder_spatial_parallel_size(cf) if self.spatial_local_loss else 1
+        )
+        self.spatial_parallel_group = None
+        if self.spatial_local_loss and self.spatial_parallel_size > 1:
+            self.spatial_parallel_group, _ = get_encoder_spatial_parallel_group(cf)
 
         # Dynamic Loss state (extract it before parsing the actual loss functions)
         self.dynamic_loss_cfg = loss_fcts.get("dynamic_loss")
         self.forecast_offset = self.mode_cfg.forecast.offset
 
         # dynamically load loss functions based on configuration and stage
-        self.loss_fcts = [
-            [
-                getattr(loss_fns, name),
-                params.get("weight", 1.0),
-                name,
-            ]
-            for name, params in loss_fcts.items()
-            if name != "dynamic_loss"
-        ]
+        self.loss_fcts = []
+        for name, params in loss_fcts.items():
+            if name == "dynamic_loss":
+                continue
+            loss_fct = getattr(loss_fns, name)
+            if self.spatial_local_loss and self.spatial_parallel_size > 1:
+                spatial_loss_fct = getattr(loss_fns, f"spatial_{name}", None)
+                if spatial_loss_fct is None:
+                    raise NotImplementedError(f"rank-local physical loss does not support {name!r}")
+                loss_fct = partial(
+                    spatial_loss_fct,
+                    spatial_group=self.spatial_parallel_group,
+                    # FSDP/DDP averages over data and spatial ranks. Spatial ranks
+                    # hold shards of one sample, so restore their summed gradient.
+                    local_gradient_scale=float(self.spatial_parallel_size),
+                )
+            self.loss_fcts.append([loss_fct, params.get("weight", 1.0), name])
 
         self.dynamic_loss_ema = DynamicLossEMA(
             self.dynamic_loss_cfg if self.stage == TRAIN else None,
@@ -187,15 +210,35 @@ class LossPhysical(LossModuleBase):
         Find substeps and create corresponding masks (reused across loss functions)
         """
 
-        tok_spacetime = stream_info.get("tokenize_spacetime", None)
-        target_times_unique = np.unique(target_times) if tok_spacetime else [target_times]
-        substep_masks = []
-        for t in target_times_unique:
-            # find substep
-            mask_t = torch.tensor(t == target_times).to(self.device, non_blocking=True)
-            substep_masks.append(mask_t)
+        target_times_ns = np.asarray(target_times, dtype="datetime64[ns]").astype(np.int64)
+        target_times_tensor = torch.as_tensor(target_times_ns, device=self.device)
+        if not stream_info.get("tokenize_spacetime", None):
+            return [torch.ones(len(target_times_tensor), dtype=torch.bool, device=self.device)]
 
-        return substep_masks
+        target_times_unique = torch.unique(target_times_tensor)
+        if self.spatial_local_loss and self.spatial_parallel_size > 1:
+            target_times_unique = self._gather_unique_substep_times(target_times_unique)
+        return [target_times_tensor == time for time in target_times_unique]
+
+    def _gather_unique_substep_times(self, local_times: torch.Tensor) -> torch.Tensor:
+        """Return the sorted union of local times on every spatial rank."""
+
+        count = torch.tensor([len(local_times)], dtype=torch.int64, device=self.device)
+        counts = [torch.empty_like(count) for _ in range(self.spatial_parallel_size)]
+        dist.all_gather(counts, count, group=self.spatial_parallel_group)
+        max_count = max(int(value.item()) for value in counts)
+        if max_count == 0:
+            return local_times
+
+        padded = torch.zeros(max_count, dtype=local_times.dtype, device=local_times.device)
+        padded[: len(local_times)] = local_times
+        gathered = [torch.empty_like(padded) for _ in range(self.spatial_parallel_size)]
+        dist.all_gather(gathered, padded, group=self.spatial_parallel_group)
+        return torch.unique(
+            torch.cat(
+                [values[: int(size.item())] for values, size in zip(gathered, counts, strict=True)]
+            )
+        )
 
     @staticmethod
     def _loss_per_loss_function(
@@ -295,7 +338,9 @@ class LossPhysical(LossModuleBase):
             if self.dynamic_loss_ema.enabled and weights_channels is not None:
                 losses_all[stream_name][str(self.forecast_offset)]["mse_ema_weight"] = {}
                 for ch_n, w in zip(target_channels, weights_channels, strict=True):
-                    losses_all[stream_name][str(self.forecast_offset)]["mse_ema_weight"][ch_n] = w.item()
+                    losses_all[stream_name][str(self.forecast_offset)]["mse_ema_weight"][ch_n] = (
+                        w.item()
+                    )
 
             # TODO: make nicer
             output_step_loss_weights = self._get_output_step_weights(len(targets.output_idxs))
@@ -365,8 +410,15 @@ class LossPhysical(LossModuleBase):
                         sw = 0.0 if is_spoof else 1.0
                         spoof_weight = torch.tensor(sw, device=self.device, requires_grad=False)
 
-                        # skip if either target or prediction has no data points
-                        if not (target.shape[0] > 0 and pred.shape[0] > 0):
+                        # In the local path an empty rank must still enter the same
+                        # loss collectives as peers that own points.
+                        if self.spatial_local_loss:
+                            if pred.shape[1] != target.shape[0]:
+                                raise ValueError(
+                                    "rank-local prediction and target lengths differ: "
+                                    f"{pred.shape[1]} != {target.shape[0]}"
+                                )
+                        elif not (target.shape[0] > 0 and pred.shape[1] > 0):
                             continue
 
                         # reshape prediction tensor to match target's dimensions: extract

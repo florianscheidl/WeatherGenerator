@@ -33,7 +33,7 @@ from weathergen.datasets.utils import (
     get_tokens_lens,
 )
 from weathergen.readers_extra.registry import get_extra_reader
-from weathergen.train.utils import Stage, get_batch_size_from_config
+from weathergen.train.utils import TRAIN, Stage, get_batch_size_from_config
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 from weathergen.utils.spatial_shard import SpatialShard
 
@@ -126,6 +126,9 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             cf.healpix_level,
             self.masker,
             self.spatial_shard,
+            local_target_values=(
+                stage == TRAIN and bool(cf.get("spatial_local_physical_loss", False))
+            ),
         )
         if spatial_parallel_size > 1:
             logger.info(

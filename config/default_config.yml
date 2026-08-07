@@ -69,6 +69,9 @@ healpix_level: 5
 # Split the encoder's HEALPix/location dimension across this many consecutive
 # distributed ranks through local assimilation.
 encoder_spatial_parallel_size: 4
+# Diagnostic/future-work path: keep physical targets and decoder predictions rank-local
+# during training and reduce sufficient loss statistics across the spatial group.
+spatial_local_physical_loss: False
 
 # Use 2D RoPE instead of traditional global positional encoding
 # When True: uses 2D RoPE based on healpix cell coordinates (lat/lon)

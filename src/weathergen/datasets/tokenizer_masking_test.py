@@ -91,6 +91,45 @@ def test_rank_local_target_coords_match_global_oracle_while_values_remain_global
     torch.testing.assert_close(torch.cat(local_coords), global_coords)
 
 
+def test_rank_local_target_values_reassemble_to_global_oracle() -> None:
+    rdata, token_data, cell_mask = _target_fixture()
+    stream_info = {"stream_id": 7}
+    time_win = (np.datetime64("2026-01-01"), np.datetime64("2026-01-02"))
+    oracle = TokenizerMasking(healpix_level=0, masker=Mock())
+    global_values, global_times, global_coords, global_inverse = oracle.get_target_values(
+        stream_info,
+        rdata,
+        token_data,
+        time_win,
+        cell_mask,
+    )
+
+    local_values, local_times, local_coords = [], [], []
+    for spatial_rank in range(4):
+        local = TokenizerMasking(
+            healpix_level=0,
+            masker=Mock(),
+            spatial_shard=SpatialShard(0, 4, spatial_rank),
+            local_target_values=True,
+        )
+        values, times, coords, inverse = local.get_target_values(
+            stream_info,
+            rdata,
+            token_data,
+            time_win,
+            cell_mask,
+        )
+        local_values.append(values)
+        local_times.append(times)
+        local_coords.append(coords)
+        assert inverse is None
+
+    torch.testing.assert_close(torch.cat(local_values), global_values)
+    torch.testing.assert_close(torch.cat(local_coords), global_coords)
+    assert np.array_equal(np.concatenate(local_times), global_times)
+    assert global_inverse is not None
+
+
 def test_tokenizer_rejects_shard_from_another_healpix_level() -> None:
     with pytest.raises(ValueError, match="does not match tokenizer level"):
         TokenizerMasking(

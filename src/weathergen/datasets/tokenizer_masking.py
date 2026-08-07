@@ -46,6 +46,7 @@ class TokenizerMasking(Tokenizer):
         healpix_level: int,
         masker: Masker,
         spatial_shard: SpatialShard | None = None,
+        local_target_values: bool = False,
     ):
         super().__init__(healpix_level)
         self.masker = masker
@@ -59,6 +60,7 @@ class TokenizerMasking(Tokenizer):
             )
         self.source_cell_start = self.spatial_shard.cell_start
         self.source_cell_end = self.spatial_shard.cell_end
+        self.local_target_values = local_target_values
 
     def reset_rng(self, rng) -> None:
         """
@@ -235,10 +237,14 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            cell_start=self.source_cell_start if self.local_target_values else 0,
+            cell_end=(
+                self.source_cell_end if self.local_target_values else self.num_healpix_cells_source
+            ),
         )
 
         idxs_ord_inv = None
-        if data.numel() > 0:
+        if data.numel() > 0 and not self.local_target_values:
             # flatten per-token indices into one flat list
             idxs_flat = torch.cat([idxs for idxs_cell in idxs_cells for idxs in idxs_cell])
             # compute indices for inversion

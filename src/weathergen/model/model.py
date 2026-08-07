@@ -346,6 +346,7 @@ class Model(torch.nn.Module):
         self.decoder_local_num_healpix_cells = self.num_healpix_cells
         self.decoder_local_cell_start = 0
         self.decoder_local_cell_end = self.num_healpix_cells
+        self.spatial_local_physical_loss = bool(cf.get("spatial_local_physical_loss", False))
 
         assert cf.get("forecast", {}).get("att_dense_rate", 1.0) == 1.0, (
             "Local attention not adapted for register tokens"
@@ -897,7 +898,10 @@ class Model(torch.nn.Module):
             if local_coords_empty:
                 pred = pred[:, :0]
 
-            pred = self._gather_decoder_predictions(pred, tcls_global)
+            if self.training and self.spatial_local_physical_loss:
+                t_coords_lens = tcls.reshape(batch_size, -1).sum(dim=1).tolist()
+            else:
+                pred = self._gather_decoder_predictions(pred, tcls_global)
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)
             output.add_physical_prediction(step, stream_name, pred)
