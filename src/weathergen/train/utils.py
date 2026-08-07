@@ -28,6 +28,14 @@ SYSTEM: Stage = "system"
 cfg_keys_to_filter = ["losses", "model_input", "target_input"]
 
 
+def validation_sample_limit_reached(
+    batch_index: int, batch_size: int, samples_per_mini_epoch: int
+) -> bool:
+    """Return whether the completed validation batch reaches the sample limit."""
+
+    return (batch_index + 1) * batch_size >= samples_per_mini_epoch
+
+
 # TODO: remove this definition, it should directly using common.
 get_run_id = config.get_run_id
 
