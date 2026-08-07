@@ -49,7 +49,7 @@ from weathergen.train.utils import (
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
 )
-from weathergen.utils.cgroup_memory import CgroupMemoryTimeline
+from weathergen.utils.cgroup_memory import CgroupMemoryTimeline, read_cuda_allocator_snapshot
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
@@ -115,6 +115,15 @@ class Trainer(TrainerBase):
         Get total, effective batch size across all DDP ranks
         """
         return self.data_parallel_world_size_original * batch_size_per_gpu
+
+    def _record_memory_stage(self, name: str, *, reset_peak: bool = False, **values) -> None:
+        if self.cgroup_memory_timeline is None:
+            return
+        if reset_peak and self.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(self.device)
+        self.cgroup_memory_timeline.record_stage(
+            name, **values, **read_cuda_allocator_snapshot(self.device)
+        )
 
     def init(self, cf: Config, devices):
         # pylint: disable=attribute-defined-outside-init
@@ -558,8 +567,9 @@ class Trainer(TrainerBase):
                         )
 
                 if self.cgroup_memory_timeline is not None:
-                    self.cgroup_memory_timeline.record_stage(
+                    self._record_memory_stage(
                         "h2d_start",
+                        reset_peak=True,
                         mini_epoch=mini_epoch,
                         batch_index=bidx,
                         **batch_timeline_values,
@@ -568,7 +578,7 @@ class Trainer(TrainerBase):
                 if self.cgroup_memory_timeline is not None:
                     h2d_enqueued_ns = time.monotonic_ns()
                     batch_timeline_values = _batch_timeline_values(batch)
-                    self.cgroup_memory_timeline.record_stage(
+                    self._record_memory_stage(
                         "h2d_enqueued",
                         monotonic_ns=h2d_enqueued_ns,
                         mini_epoch=mini_epoch,
@@ -593,7 +603,7 @@ class Trainer(TrainerBase):
                         batch=batch.get_source_samples(),
                     )
                     if self.cgroup_memory_timeline is not None:
-                        self.cgroup_memory_timeline.record_stage(
+                        self._record_memory_stage(
                             "forward_end",
                             mini_epoch=mini_epoch,
                             batch_index=bidx,
@@ -617,6 +627,12 @@ class Trainer(TrainerBase):
                     targets_and_aux=targets_and_auxs,
                     metadata=extract_batch_metadata(batch),
                 )
+                self._record_memory_stage(
+                    "loss_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
 
                 # TODO re-enable this, need to think on how to make it compatible with
                 # student-teacher training
@@ -637,7 +653,7 @@ class Trainer(TrainerBase):
                 self.optimizer.zero_grad()
                 self.grad_scaler.scale(loss).backward()
                 if self.cgroup_memory_timeline is not None:
-                    self.cgroup_memory_timeline.record_stage(
+                    self._record_memory_stage(
                         "backward_end",
                         mini_epoch=mini_epoch,
                         batch_index=bidx,
@@ -661,7 +677,7 @@ class Trainer(TrainerBase):
                 self.grad_scaler.step(self.optimizer)
                 self.grad_scaler.update()
                 if self.cgroup_memory_timeline is not None:
-                    self.cgroup_memory_timeline.record_stage(
+                    self._record_memory_stage(
                         "optimizer_end",
                         mini_epoch=mini_epoch,
                         batch_index=bidx,
@@ -731,6 +747,10 @@ class Trainer(TrainerBase):
         cf = self.cf
         self.model.eval()
 
+        if self.cgroup_memory_timeline is not None:
+            self.cgroup_memory_timeline.start()
+            self._record_memory_stage("validation_start", mini_epoch=mini_epoch)
+
         dataset_val_iter = iter(self.data_loader_validation)
 
         num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
@@ -741,7 +761,21 @@ class Trainer(TrainerBase):
                 total=len(self.data_loader_validation), disable=self.cf.with_ddp
             ) as pbar:
                 for bidx, batch in enumerate(dataset_val_iter):
+                    batch_timeline_values = _batch_timeline_values(batch)
+                    self._record_memory_stage(
+                        "validation_h2d_start",
+                        reset_peak=True,
+                        mini_epoch=mini_epoch,
+                        batch_index=bidx,
+                        **batch_timeline_values,
+                    )
                     batch.to_device(self.device)
+                    self._record_memory_stage(
+                        "validation_h2d_enqueued",
+                        mini_epoch=mini_epoch,
+                        batch_index=bidx,
+                        **batch_timeline_values,
+                    )
 
                     # evaluate model
                     with torch.autocast(
@@ -760,6 +794,13 @@ class Trainer(TrainerBase):
                                 batch.get_source_samples(),
                             )
 
+                        self._record_memory_stage(
+                            "validation_forward_end",
+                            mini_epoch=mini_epoch,
+                            batch_index=bidx,
+                            **batch_timeline_values,
+                        )
+
                         targets_and_auxs = {}
                         for loss_name, target_aux in self.target_and_aux_calculators_val.items():
                             target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
@@ -775,6 +816,12 @@ class Trainer(TrainerBase):
                         targets_and_aux=targets_and_auxs,
                         metadata=extract_batch_metadata(batch),
                     )
+                    self._record_memory_stage(
+                        "validation_loss_end",
+                        mini_epoch=mini_epoch,
+                        batch_index=bidx,
+                        **batch_timeline_values,
+                    )
 
                     # log output
                     if bidx < num_samples_write:
@@ -784,6 +831,17 @@ class Trainer(TrainerBase):
                             if mode_cfg.get("output", {}).get("normalized_samples", False)
                             else self.dataset_val.denormalize_target_channels
                         )
+
+                        def record_output_stage(
+                            name, batch_index=bidx, values=batch_timeline_values
+                        ):
+                            self._record_memory_stage(
+                                name,
+                                mini_epoch=mini_epoch,
+                                batch_index=batch_index,
+                                **values,
+                            )
+
                         # write output
                         write_output(
                             self.cf,
@@ -795,6 +853,7 @@ class Trainer(TrainerBase):
                             batch,
                             preds,
                             targets_and_auxs,
+                            stage_callback=record_output_stage,
                         )
 
                     pbar.update(batch_size)
@@ -807,6 +866,9 @@ class Trainer(TrainerBase):
 
         # avoid that there is a systematic bias in the validation subset
         self.dataset_val.advance()
+        if self.cgroup_memory_timeline is not None:
+            self._record_memory_stage("validation_end", mini_epoch=mini_epoch)
+            self.cgroup_memory_timeline.stop()
 
     def _get_full_model_state_dict(self):
         maybe_sharded_sd = (

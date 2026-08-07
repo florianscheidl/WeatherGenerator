@@ -72,6 +72,7 @@ encoder_spatial_parallel_size: 4
 # Diagnostic/future-work path: keep physical targets and decoder predictions rank-local
 # during training and reduce sufficient loss statistics across the spatial group.
 spatial_local_physical_loss: False
+spatial_local_validation: False
 
 # Use 2D RoPE instead of traditional global positional encoding
 # When True: uses 2D RoPE based on healpix cell coordinates (lat/lon)

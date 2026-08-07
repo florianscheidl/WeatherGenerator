@@ -375,8 +375,8 @@ def tokenize_apply_mask_target(
         do = torch.zeros([0, rdata.data.shape[-1]])
         coords = torch.zeros([0, rdata.coords.shape[-1]])
         dt = np.array([], dtype=np.datetime64)
-        # data, datetimes, coords, coords_local, masked_points_per_cell
-        return do, dt, coords, coords, masked_points_per_cell
+        # data, datetimes, coords, coords_local, masked_points_per_cell, stable row ids
+        return do, dt, coords, coords, masked_points_per_cell, torch.zeros(0, dtype=torch.int64)
 
     # apply spatial masking on a per token level
     if mask_tokens is None:
@@ -448,7 +448,7 @@ def tokenize_apply_mask_target(
     else:
         coords_local = torch.tensor([])
 
-    return data, datetimes, coords, coords_local, masked_points_per_cell
+    return data, datetimes, coords, coords_local, masked_points_per_cell, idxs_data
 
 
 def get_source_coords_local(

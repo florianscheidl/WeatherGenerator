@@ -33,7 +33,7 @@ from weathergen.datasets.utils import (
     get_tokens_lens,
 )
 from weathergen.readers_extra.registry import get_extra_reader
-from weathergen.train.utils import TRAIN, Stage, get_batch_size_from_config
+from weathergen.train.utils import TRAIN, VAL, Stage, get_batch_size_from_config
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 from weathergen.utils.spatial_shard import SpatialShard
 
@@ -127,7 +127,8 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
             self.masker,
             self.spatial_shard,
             local_target_values=(
-                stage == TRAIN and bool(cf.get("spatial_local_physical_loss", False))
+                (stage == TRAIN and bool(cf.get("spatial_local_physical_loss", False)))
+                or (stage == VAL and bool(cf.get("spatial_local_validation", False)))
             ),
         )
         if spatial_parallel_size > 1:
@@ -507,7 +508,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 stream_data.add_target_coords(self._stage, timestep_idx, tc, tc_l, rdata.is_spoof)
 
             if "target_values" in mode:
-                (tt_cells, tt_t, tt_c, idxs_inv) = self.tokenizer.get_target_values(
+                (tt_cells, tt_t, tt_c, idxs_inv, row_ids) = self.tokenizer.get_target_values(
                     stream_info,
                     rdata,
                     token_data,
@@ -516,7 +517,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 )
 
                 stream_data.add_target_values(
-                    self._stage, timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof
+                    self._stage,
+                    timestep_idx,
+                    tt_cells,
+                    tt_c,
+                    tt_t,
+                    idxs_inv,
+                    row_ids,
+                    rdata.is_spoof,
                 )
 
         return stream_data

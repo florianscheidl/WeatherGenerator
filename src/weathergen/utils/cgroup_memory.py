@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import psutil
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,19 @@ _PROCESS_STAT_FIELDS = {
     "Rss": "rss_bytes",
     "Private_Dirty": "private_dirty_bytes",
 }
+
+
+def read_cuda_allocator_snapshot(device: torch.device) -> dict[str, int]:
+    """Read PyTorch CUDA allocator current and peak bytes without synchronizing."""
+
+    if device is None or device.type != "cuda":
+        return {}
+    return {
+        "cuda_memory.allocated_bytes": torch.cuda.memory_allocated(device),
+        "cuda_memory.reserved_bytes": torch.cuda.memory_reserved(device),
+        "cuda_memory.max_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "cuda_memory.max_reserved_bytes": torch.cuda.max_memory_reserved(device),
+    }
 
 
 def resolve_cgroup_v2_path(

@@ -190,7 +190,7 @@ class TokenizerMasking(Tokenizer):
         )
 
         # TODO: split up
-        _, _, _, coords_local, coords_per_cell = tokenize_apply_mask_target(
+        _, _, _, coords_local, coords_per_cell, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -224,7 +224,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        data, datetimes, coords, _, _ = tokenize_apply_mask_target(
+        data, datetimes, coords, _, _, row_ids = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -245,9 +245,7 @@ class TokenizerMasking(Tokenizer):
 
         idxs_ord_inv = None
         if data.numel() > 0 and not self.local_target_values:
-            # flatten per-token indices into one flat list
-            idxs_flat = torch.cat([idxs for idxs_cell in idxs_cells for idxs in idxs_cell])
-            # compute indices for inversion
-            _, idxs_ord_inv = torch.sort(idxs_flat)
+            # Restore packed cell/token data to its original ReaderData row order.
+            idxs_ord_inv = torch.argsort(row_ids, stable=True)
 
-        return (data, datetimes, coords, idxs_ord_inv)
+        return (data, datetimes, coords, idxs_ord_inv, row_ids)

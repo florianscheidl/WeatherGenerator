@@ -9,12 +9,34 @@
 
 from pathlib import Path
 
+import torch
+
 from weathergen.utils.cgroup_memory import (
     CgroupMemoryTimeline,
     read_cgroup_memory_snapshot,
+    read_cuda_allocator_snapshot,
     read_process_memory_snapshot,
     resolve_cgroup_v2_path,
 )
+
+
+def test_cuda_allocator_snapshot_reports_current_and_peak(monkeypatch) -> None:
+    device = torch.device("cuda:2")
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda value: 1)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda value: 2)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda value: 3)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda value: 4)
+
+    assert read_cuda_allocator_snapshot(device) == {
+        "cuda_memory.allocated_bytes": 1,
+        "cuda_memory.reserved_bytes": 2,
+        "cuda_memory.max_allocated_bytes": 3,
+        "cuda_memory.max_reserved_bytes": 4,
+    }
+
+
+def test_cuda_allocator_snapshot_skips_cpu() -> None:
+    assert read_cuda_allocator_snapshot(torch.device("cpu")) == {}
 
 
 def _write_cgroup_files(path: Path) -> None:

@@ -111,9 +111,9 @@ class LossPhysical(LossModuleBase):
         self.stage = stage
         self.device = device
         self.name = "LossPhysical"
-        self.spatial_local_loss = self.stage == TRAIN and bool(
-            cf.get("spatial_local_physical_loss", False)
-        )
+        self.spatial_local_loss = (
+            self.stage == TRAIN and bool(cf.get("spatial_local_physical_loss", False))
+        ) or (self.stage == VAL and bool(cf.get("spatial_local_validation", False)))
         self.spatial_parallel_size = (
             get_encoder_spatial_parallel_size(cf) if self.spatial_local_loss else 1
         )
@@ -140,7 +140,9 @@ class LossPhysical(LossModuleBase):
                     spatial_group=self.spatial_parallel_group,
                     # FSDP/DDP averages over data and spatial ranks. Spatial ranks
                     # hold shards of one sample, so restore their summed gradient.
-                    local_gradient_scale=float(self.spatial_parallel_size),
+                    local_gradient_scale=(
+                        float(self.spatial_parallel_size) if self.stage == TRAIN else 1.0
+                    ),
                 )
             self.loss_fcts.append([loss_fct, params.get("weight", 1.0), name])
 
