@@ -9,6 +9,7 @@
 
 """Diagnostic cgroup-v2 host-memory timeline collection."""
 
+import faulthandler
 import logging
 import os
 import queue
@@ -156,11 +157,19 @@ class CgroupMemoryTimeline:
         rank: int = 0,
         proc_root: Path = Path("/proc"),
         trainer_process: psutil.Process | None = None,
+        watchdog_timeout_seconds: float | None = None,
+        watchdog_output_path: Path | None = None,
     ) -> None:
         if sampling_interval_ms <= 0:
             raise ValueError("sampling_interval_ms must be greater than zero")
         if process_sampling_interval_ms is not None and process_sampling_interval_ms <= 0:
             raise ValueError("process_sampling_interval_ms must be greater than zero")
+        if watchdog_timeout_seconds is not None and watchdog_timeout_seconds <= 0:
+            raise ValueError("watchdog_timeout_seconds must be greater than zero")
+        if (watchdog_timeout_seconds is None) != (watchdog_output_path is None):
+            raise ValueError(
+                "watchdog_timeout_seconds and watchdog_output_path must be configured together"
+            )
 
         self._log_fn = log_fn
         self._sampling_interval_s = sampling_interval_ms / 1_000
@@ -179,6 +188,14 @@ class CgroupMemoryTimeline:
         self._pending_events: queue.SimpleQueue[dict[str, float]] = queue.SimpleQueue()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._watchdog_timeout_ns = (
+            None
+            if watchdog_timeout_seconds is None
+            else int(watchdog_timeout_seconds * 1_000_000_000)
+        )
+        self._watchdog_output_path = watchdog_output_path
+        self._last_progress = (time.monotonic_ns(), "timeline_initialized")
+        self._watchdog_dump_progress_ns: int | None = None
 
         # Validate the source before starting a background thread, so configuration
         # errors fail visibly in the trainer process.
@@ -195,6 +212,8 @@ class CgroupMemoryTimeline:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._last_progress = (time.monotonic_ns(), "timeline_started")
+        self._watchdog_dump_progress_ns = None
         self._thread = threading.Thread(
             target=self._run,
             name=f"memory-timeline-rank-{self._rank}",
@@ -220,9 +239,11 @@ class CgroupMemoryTimeline:
         **values: int | float,
     ) -> None:
         """Queue a timestamped marker without performing file I/O in the training path."""
+        progress_ns = time.monotonic_ns()
+        self._last_progress = (progress_ns, name)
         marker = {
             "diagnostic.timeline.monotonic_ns": float(
-                time.monotonic_ns() if monotonic_ns is None else monotonic_ns
+                progress_ns if monotonic_ns is None else monotonic_ns
             ),
             "diagnostic.timeline.rank": float(self._rank),
             f"diagnostic.timeline.stage.{name}": 1.0,
@@ -252,6 +273,7 @@ class CgroupMemoryTimeline:
                         next_process_sample += self._process_sampling_interval_s
 
                 self._drain_pending_events()
+                self._maybe_dump_watchdog(monotonic_ns)
                 if self._stop_event.is_set():
                     break
                 wait_s = self._sampling_interval_s
@@ -261,6 +283,41 @@ class CgroupMemoryTimeline:
             self._drain_pending_events()
         except Exception:
             logger.exception("Memory timeline stopped after an unexpected error")
+
+    def _maybe_dump_watchdog(self, monotonic_ns: int) -> None:
+        if self._watchdog_timeout_ns is None or self._watchdog_output_path is None:
+            return
+
+        progress_ns, last_stage = self._last_progress
+        if monotonic_ns - progress_ns < self._watchdog_timeout_ns:
+            return
+        if self._watchdog_dump_progress_ns == progress_ns:
+            return
+
+        stalled_seconds = (monotonic_ns - progress_ns) / 1_000_000_000
+        try:
+            with self._watchdog_output_path.open("ab", buffering=0) as output:
+                output.write(
+                    (
+                        f"\n=== trainer watchdog rank={self._rank} "
+                        f"last_stage={last_stage} stalled_seconds={stalled_seconds:.1f} ===\n"
+                    ).encode()
+                )
+                faulthandler.dump_traceback(file=output, all_threads=True)
+        except (OSError, RuntimeError):
+            logger.exception("Could not write trainer watchdog stack dump")
+        finally:
+            self._watchdog_dump_progress_ns = progress_ns
+
+        self._log_fn(
+            {
+                "diagnostic.timeline.monotonic_ns": float(monotonic_ns),
+                "diagnostic.timeline.rank": float(self._rank),
+                "diagnostic.timeline.watchdog_dump": 1.0,
+                "diagnostic.timeline.watchdog_stalled_seconds": stalled_seconds,
+                f"diagnostic.timeline.watchdog_last_stage.{last_stage}": 1.0,
+            }
+        )
 
     def _sample_process_memory(self, monotonic_ns: int) -> None:
         try:

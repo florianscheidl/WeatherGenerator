@@ -140,6 +140,9 @@ train_logging:
     enabled: False
     sampling_interval_ms: 100
     process_sampling_interval_ms: 1000
+    # Dump all trainer-process Python thread stacks once when no stage advances for this long.
+    # Set to a positive number only for diagnostic runs.
+    watchdog_timeout_seconds: null
 
 # parameters for data loading
 data_loading :

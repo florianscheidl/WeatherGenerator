@@ -9,6 +9,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from weathergen.utils.cgroup_memory import (
     CgroupMemoryTimeline,
     read_cgroup_memory_snapshot,
@@ -171,3 +173,49 @@ def test_worker_slot_generation_increments_after_respawn(tmp_path: Path) -> None
     assert timeline._update_worker_metadata({(11, 2.0)})[(11, 2.0)] == (0, 0)
     timeline._update_worker_metadata(set())
     assert timeline._update_worker_metadata({(12, 3.0)})[(12, 3.0)] == (0, 1)
+
+
+def test_watchdog_configuration_requires_timeout_and_output_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="configured together"):
+        CgroupMemoryTimeline(
+            lambda _record: None,
+            sample_cgroup=False,
+            watchdog_timeout_seconds=1,
+        )
+    with pytest.raises(ValueError, match="greater than zero"):
+        CgroupMemoryTimeline(
+            lambda _record: None,
+            sample_cgroup=False,
+            watchdog_timeout_seconds=0,
+            watchdog_output_path=tmp_path / "watchdog.log",
+        )
+
+
+def test_watchdog_dumps_once_for_each_stalled_stage(tmp_path: Path) -> None:
+    records: list[dict[str, float]] = []
+    output_path = tmp_path / "watchdog.log"
+    timeline = CgroupMemoryTimeline(
+        records.append,
+        sample_cgroup=False,
+        watchdog_timeout_seconds=1,
+        watchdog_output_path=output_path,
+        rank=2,
+    )
+
+    timeline._last_progress = (1_000_000_000, "ema_start")
+    timeline._maybe_dump_watchdog(2_100_000_000)
+    timeline._maybe_dump_watchdog(3_100_000_000)
+
+    output = output_path.read_text()
+    assert output.count("trainer watchdog") == 1
+    assert "rank=2 last_stage=ema_start stalled_seconds=1.1" in output
+    assert len(records) == 1
+    assert records[0]["diagnostic.timeline.watchdog_dump"] == 1.0
+    assert records[0]["diagnostic.timeline.watchdog_last_stage.ema_start"] == 1.0
+
+    timeline._last_progress = (4_000_000_000, "ema_end")
+    timeline._maybe_dump_watchdog(5_100_000_000)
+
+    output = output_path.read_text()
+    assert output.count("trainer watchdog") == 2
+    assert "rank=2 last_stage=ema_end stalled_seconds=1.1" in output

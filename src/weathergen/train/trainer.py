@@ -195,6 +195,12 @@ class Trainer(TrainerBase):
 
         timeline_cfg = cf.train_logging.get("cgroup_memory_timeline", {})
         if timeline_cfg.get("enabled", False):
+            watchdog_timeout_seconds = timeline_cfg.get("watchdog_timeout_seconds")
+            watchdog_output_path = (
+                config.get_path_run(cf) / f"{cf.general.run_id}_watchdog_rank{cf.rank:04d}.log"
+                if watchdog_timeout_seconds is not None
+                else None
+            )
             self.cgroup_memory_timeline = CgroupMemoryTimeline(
                 log_fn=lambda metrics: self.train_logger.log_diagnostic_metrics(
                     SYSTEM, metrics, rank=cf.rank
@@ -203,6 +209,8 @@ class Trainer(TrainerBase):
                 sample_cgroup=is_root(),
                 process_sampling_interval_ms=timeline_cfg.get("process_sampling_interval_ms", 1000),
                 rank=cf.rank,
+                watchdog_timeout_seconds=watchdog_timeout_seconds,
+                watchdog_output_path=watchdog_output_path,
             )
             if is_root():
                 logger.info(
@@ -215,6 +223,12 @@ class Trainer(TrainerBase):
                 cf.rank,
                 timeline_cfg.get("process_sampling_interval_ms", 1000),
             )
+            if watchdog_timeout_seconds is not None:
+                logger.info(
+                    "Trainer watchdog will dump rank %d stacks after %.1f seconds without a stage",
+                    cf.rank,
+                    watchdog_timeout_seconds,
+                )
 
         # Initialize collapse monitor for SSL training
         collapse_config = cf.train_logging.get("collapse_monitoring", {})
@@ -670,6 +684,13 @@ class Trainer(TrainerBase):
 
                 # update learning rate
                 self.lr_scheduler.step()
+                if self.cgroup_memory_timeline is not None:
+                    self.cgroup_memory_timeline.record_stage(
+                        "lr_scheduler_end",
+                        mini_epoch=mini_epoch,
+                        batch_index=bidx,
+                        **batch_timeline_values,
+                    )
 
                 batch_size_total = self.get_batch_size_total(self.batch_size_per_gpu)
                 step = batch_size_total * self.cf.general.istep
@@ -682,10 +703,31 @@ class Trainer(TrainerBase):
                     target_aux.update_state_post_opt_step(step, batch, self.model)
                     for _, target_aux in self.target_and_aux_calculators_val.items()
                 ]
+                if self.cgroup_memory_timeline is not None:
+                    self.cgroup_memory_timeline.record_stage(
+                        "target_aux_post_end",
+                        mini_epoch=mini_epoch,
+                        batch_index=bidx,
+                        **batch_timeline_values,
+                    )
 
             # EMA update
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "ema_start",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
             if self.validate_with_ema:
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "ema_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
 
             self.perf_tracker.step(
                 batch,
@@ -694,6 +736,13 @@ class Trainer(TrainerBase):
                     TRAIN, m, step=self.cf.general.istep
                 ),
             )
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "performance_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
             # Compute collapse monitoring metrics
             if self.collapse_monitor.should_compute(self.cf.general.istep):
                 self.collapse_monitor._compute_collapse_metrics(
@@ -703,6 +752,13 @@ class Trainer(TrainerBase):
                     preds,
                     targets_and_auxs,
                 )
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "collapse_monitor_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
 
             self._log_terminal(bidx, mini_epoch, TRAIN)
             if bidx % self.train_logging.metrics == 0:
@@ -710,12 +766,33 @@ class Trainer(TrainerBase):
                 # Log collapse metrics
                 if self.collapse_monitor.should_log(self.cf.general.istep):
                     self._log_collapse_metrics(TRAIN)
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "logging_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
 
             # save model checkpoint (with designation _latest)
             if bidx % self.train_logging.checkpoint == 0 and bidx > 0:
                 self.save_model(-1)
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "checkpoint_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
 
             self.cf.general.istep += 1
+            if self.cgroup_memory_timeline is not None:
+                self.cgroup_memory_timeline.record_stage(
+                    "step_end",
+                    mini_epoch=mini_epoch,
+                    batch_index=bidx,
+                    **batch_timeline_values,
+                )
             bidx += 1
 
         self.dataset.advance()
