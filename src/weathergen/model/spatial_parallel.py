@@ -10,6 +10,15 @@
 import torch
 
 
+def zero_gradient_module_dependency(
+    module: torch.nn.Module,
+    dummy_input: torch.Tensor,
+) -> torch.Tensor:
+    """Run a module while contributing exactly zero to the surrounding graph."""
+
+    return module(dummy_input).sum() * 0
+
+
 def select_packed_cell_shard(
     tokens: torch.Tensor,
     cell_lens: torch.Tensor,

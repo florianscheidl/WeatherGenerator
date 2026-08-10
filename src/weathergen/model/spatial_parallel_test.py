@@ -10,7 +10,21 @@
 import pytest
 import torch
 
-from weathergen.model.spatial_parallel import ensure_packed_cell_shard
+from weathergen.model.spatial_parallel import (
+    ensure_packed_cell_shard,
+    zero_gradient_module_dependency,
+)
+
+
+def test_zero_gradient_module_dependency_visits_parameters_without_changing_gradient() -> None:
+    module = torch.nn.Linear(2, 3)
+
+    dependency = zero_gradient_module_dependency(module, torch.zeros((1, 2)))
+    dependency.backward()
+
+    for parameter in module.parameters():
+        assert parameter.grad is not None
+        assert torch.count_nonzero(parameter.grad) == 0
 
 
 def test_ensure_packed_cell_shard_selects_global_input() -> None:
