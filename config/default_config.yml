@@ -141,6 +141,11 @@ train_logging:
     enabled: False
     sampling_interval_ms: 100
     process_sampling_interval_ms: 1000
+    # Diagnostic-only exact source-tensor content comparison at the final CPU
+    # ModelBatch boundary. Hashing is synchronous and can materially reduce throughput.
+    batch_content_fingerprints:
+      enabled: False
+      max_batches: 1
 
 # parameters for data loading
 data_loading :

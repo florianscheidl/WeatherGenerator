@@ -77,6 +77,18 @@ def _batch_timeline_values(batch: ModelBatch) -> dict[str, int]:
     return values
 
 
+def _batch_content_fingerprint_values(batch: ModelBatch) -> dict[str, int]:
+    values = {"batch_content_fingerprint.version": 1}
+    for component, words in batch.source_tensor_content_fingerprints().items():
+        values.update(
+            {
+                f"batch_content_fingerprint.source.{component}.word{index}": word
+                for index, word in enumerate(words)
+            }
+        )
+    return values
+
+
 class Trainer(TrainerBase):
     def __init__(self, train_logging: Config):
         TrainerBase.__init__(self)
@@ -108,6 +120,8 @@ class Trainer(TrainerBase):
         self.collapse_monitor: CollapseMonitor | None = None
         self.perf_tracker: ThroughputTracker | NullThroughputTracker = NullThroughputTracker()
         self.cgroup_memory_timeline: CgroupMemoryTimeline | None = None
+        self.batch_content_fingerprint_max_batches = 0
+        self.batch_content_fingerprint_batches_recorded = 0
         self.t_training_start: float = 0
         self.training_loop_annotation_context = contextlib.nullcontext
 
@@ -205,6 +219,13 @@ class Trainer(TrainerBase):
 
         timeline_cfg = cf.train_logging.get("cgroup_memory_timeline", {})
         if timeline_cfg.get("enabled", False):
+            fingerprint_cfg = timeline_cfg.get("batch_content_fingerprints", {})
+            if fingerprint_cfg.get("enabled", False):
+                self.batch_content_fingerprint_max_batches = fingerprint_cfg.get("max_batches", 1)
+                if self.batch_content_fingerprint_max_batches <= 0:
+                    raise ValueError(
+                        "batch_content_fingerprints.max_batches must be greater than zero"
+                    )
             self.cgroup_memory_timeline = CgroupMemoryTimeline(
                 log_fn=lambda metrics: self.train_logger.log_diagnostic_metrics(
                     SYSTEM, metrics, rank=cf.rank
@@ -538,6 +559,12 @@ class Trainer(TrainerBase):
             if self.cgroup_memory_timeline is not None:
                 batch_dequeued_ns = time.monotonic_ns()
                 batch_timeline_values = _batch_timeline_values(batch)
+                if (
+                    self.batch_content_fingerprint_batches_recorded
+                    < self.batch_content_fingerprint_max_batches
+                ):
+                    batch_timeline_values.update(_batch_content_fingerprint_values(batch))
+                    self.batch_content_fingerprint_batches_recorded += 1
                 self.cgroup_memory_timeline.record_stage(
                     "batch_dequeued",
                     monotonic_ns=batch_dequeued_ns,

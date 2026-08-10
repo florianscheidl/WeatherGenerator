@@ -7,6 +7,8 @@ Provides clean separation between:
 """
 
 import copy
+import hashlib
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -378,6 +380,88 @@ class ModelBatch:
             component = next(iter(components)) if len(components) == 1 else "shared"
             component_bytes[component] = component_bytes.get(component, 0) + storage_bytes[key]
         return dict(sorted(component_bytes.items()))
+
+    def source_tensor_content_fingerprints(self) -> dict[str, tuple[int, int, int, int]]:
+        """Return deterministic BLAKE2b-128 fingerprints of CPU source tensors.
+
+        The four 32-bit words are exactly representable by the float-only diagnostic
+        logger. Tensor names, dtype, shape, order, and logical values contribute to
+        the digest; storage addresses do not.
+        """
+        component_hashers = {}
+
+        def add_value(hasher, value) -> bool:
+            if isinstance(value, torch.Tensor):
+                if value.device.type != "cpu":
+                    raise ValueError("Source content fingerprints require CPU tensors")
+                if value.layout != torch.strided:
+                    raise ValueError("Source content fingerprints require strided tensors")
+                tensor = value.detach().contiguous()
+                hasher.update(b"tensor\0")
+                hasher.update(str(tensor.dtype).encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(struct.pack("<Q", tensor.ndim))
+                for dimension in tensor.shape:
+                    hasher.update(struct.pack("<q", dimension))
+                byte_values = tensor.reshape(-1).view(torch.uint8).numpy()
+                hasher.update(memoryview(byte_values))
+                return True
+            if isinstance(value, dict):
+                found_tensor = False
+                for key in sorted(value, key=str):
+                    hasher.update(b"dict-key\0")
+                    hasher.update(str(key).encode("utf-8"))
+                    hasher.update(b"\0")
+                    found_tensor = add_value(hasher, value[key]) or found_tensor
+                return found_tensor
+            if isinstance(value, list | tuple):
+                found_tensor = False
+                for index, item in enumerate(value):
+                    hasher.update(b"item\0")
+                    hasher.update(struct.pack("<Q", index))
+                    found_tensor = add_value(hasher, item) or found_tensor
+                return found_tensor
+            return False
+
+        def add_component(component: str, sample_index: int, value) -> None:
+            occurrence = hashlib.blake2b(digest_size=16, person=b"WGModelBatch-v1")
+            occurrence.update(b"sample\0")
+            occurrence.update(struct.pack("<Q", sample_index))
+            if add_value(occurrence, value):
+                component_hashers.setdefault(
+                    component,
+                    hashlib.blake2b(digest_size=16, person=b"WGModelBatch-v1"),
+                ).update(occurrence.digest())
+
+        add_component("_batch.tokens_lens", 0, self.source_samples.tokens_lens)
+        for sample_index, sample in enumerate(self.source_samples.samples):
+            for stream_name in sorted(sample.meta_info):
+                add_component(
+                    f"{stream_name}.metadata.mask",
+                    sample_index,
+                    sample.meta_info[stream_name].mask,
+                )
+            for stream_name in sorted(sample.streams_data):
+                stream_data = sample.streams_data[stream_name]
+                if stream_data is None:
+                    continue
+                for field_name, value in sorted(vars(stream_data).items()):
+                    add_component(f"{stream_name}.{field_name}", sample_index, value)
+
+        component_digests = {
+            component: hasher.digest() for component, hasher in sorted(component_hashers.items())
+        }
+        aggregate = hashlib.blake2b(digest_size=16, person=b"WGModelBatch-v1")
+        for component, digest in component_digests.items():
+            aggregate.update(component.encode("utf-8"))
+            aggregate.update(b"\0")
+            aggregate.update(digest)
+        component_digests["_aggregate"] = aggregate.digest()
+
+        return {
+            component: struct.unpack("<4I", digest)
+            for component, digest in component_digests.items()
+        }
 
     def pin_memory(self):
         """Pin all tensors in this batch to CPU pinned memory"""

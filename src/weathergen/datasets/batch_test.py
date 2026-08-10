@@ -49,3 +49,26 @@ def test_model_batch_reports_unique_storage_bytes_by_component() -> None:
         "source.stream.source_tokens_cells": source_tokens.untyped_storage().nbytes(),
     }
     assert sum(component_bytes.values()) == batch.unique_tensor_storage_bytes()
+
+
+def test_source_tensor_content_fingerprints_compare_logical_values() -> None:
+    def make_batch(source_values: torch.Tensor, target_value: float) -> ModelBatch:
+        batch = ModelBatch(["stream"], 1, 1, 0, 1, temporal_index=17)
+        source_data = object.__new__(StreamData)
+        source_data.source_tokens_cells = [source_values]
+        target_data = object.__new__(StreamData)
+        target_data.target_tokens = [torch.tensor([target_value])]
+        batch.source_samples.samples[0].streams_data["stream"] = source_data
+        batch.target_samples.samples[0].streams_data["stream"] = target_data
+        return batch
+
+    reference = make_batch(torch.arange(6, dtype=torch.float32).reshape(2, 3), 1.0)
+    same_values = make_batch(torch.arange(6, dtype=torch.float32).reshape(2, 3), 2.0)
+    changed_source = make_batch(torch.arange(6, dtype=torch.float32).reshape(3, 2), 1.0)
+
+    reference_fingerprints = reference.source_tensor_content_fingerprints()
+
+    assert reference_fingerprints == same_values.source_tensor_content_fingerprints()
+    assert reference_fingerprints != changed_source.source_tensor_content_fingerprints()
+    assert set(reference_fingerprints) == {"_aggregate", "stream.source_tokens_cells"}
+    assert all(0 <= word < 2**32 for words in reference_fingerprints.values() for word in words)
