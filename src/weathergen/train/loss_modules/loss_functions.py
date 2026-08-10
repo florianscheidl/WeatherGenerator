@@ -10,6 +10,7 @@
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 stat_loss_fcts = ["stats", "kernel_crps"]  # Names of loss functions that need std computed
@@ -201,6 +202,167 @@ def lp_loss(
     loss = torch.mean(loss_chs * weights_channels if weights_channels is not None else loss_chs)
 
     return loss, loss_chs
+
+
+def spatial_lp_loss(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    p_norm: int,
+    with_p_root: bool = False,
+    with_mean: bool = True,
+    weights_channels: torch.Tensor | None = None,
+    weights_points: torch.Tensor | None = None,
+    spatial_group: dist.ProcessGroup | None = None,
+    local_gradient_scale: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute an Lp loss from rank-local points without gathering them.
+
+    Pointwise numerators and point counts are summed over ``spatial_group`` before
+    applying the mean, optional p-root, and channel weights. ``None`` deliberately
+    means no spatial reduction, including when another process group is initialized.
+
+    The reduced numerator keeps the global forward value but only the local
+    numerator's gradient, multiplied by ``local_gradient_scale``. The default gives
+    each rank the reference gradient for its local prediction rows. WP6 uses the
+    spatial size as the scale to compensate for FSDP/DDP averaging over spatial ranks.
+    Parameter-gradient reduction remains the model-parallel runtime's responsibility.
+    Every rank in ``spatial_group`` must call this function, including empty ranks.
+    """
+
+    assert type(p_norm) is int, "Only integer p supported for p-norm loss"
+
+    mask_nan = ~torch.isnan(target)
+    pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
+    diff_p = torch.pow(
+        torch.abs(torch.where(mask_nan, target, 0) - torch.where(mask_nan, pred, 0)), p_norm
+    )
+    if weights_points is not None:
+        diff_p = (diff_p.transpose(1, 0) * weights_points).transpose(1, 0)
+
+    local_sum = diff_p.sum(0)
+    global_sum = _spatial_sum_with_local_gradient(
+        local_sum,
+        spatial_group,
+        local_gradient_scale=local_gradient_scale,
+    )
+    if with_mean:
+        point_count = torch.tensor(target.shape[0], dtype=global_sum.dtype, device=target.device)
+        if spatial_group is not None:
+            dist.all_reduce(point_count, op=dist.ReduceOp.SUM, group=spatial_group)
+        loss_chs = global_sum / point_count
+    else:
+        loss_chs = global_sum
+
+    loss_chs = torch.pow(loss_chs, 1.0 / p_norm) if with_p_root else loss_chs
+    weighted_loss_chs = loss_chs * weights_channels if weights_channels is not None else loss_chs
+    return torch.mean(weighted_loss_chs), loss_chs
+
+
+def _spatial_sum_with_local_gradient(
+    local_sum: torch.Tensor,
+    spatial_group: dist.ProcessGroup | None,
+    local_gradient_scale: float = 1.0,
+) -> torch.Tensor:
+    """Return a spatial sum whose backward path is local to this rank."""
+
+    if spatial_group is None:
+        return local_sum.detach() + local_gradient_scale * (local_sum - local_sum.detach())
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError("spatial_group requires initialized torch.distributed")
+
+    global_sum = local_sum.detach().clone()
+    dist.all_reduce(global_sum, op=dist.ReduceOp.SUM, group=spatial_group)
+    return global_sum + local_gradient_scale * (local_sum - local_sum.detach())
+
+
+def spatial_mse(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    *,
+    spatial_group: dist.ProcessGroup | None,
+    local_gradient_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Spatially reduced MSE with the standard physical-loss signature."""
+
+    return spatial_lp_loss(
+        target,
+        pred,
+        p_norm=2,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+        spatial_group=spatial_group,
+        local_gradient_scale=local_gradient_scale,
+    )
+
+
+def spatial_rss(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    *,
+    spatial_group: dist.ProcessGroup | None,
+    local_gradient_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Spatially reduced RSS with the standard physical-loss signature."""
+
+    return spatial_lp_loss(
+        target,
+        pred,
+        p_norm=2,
+        with_mean=False,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+        spatial_group=spatial_group,
+        local_gradient_scale=local_gradient_scale,
+    )
+
+
+def spatial_rmse(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    *,
+    spatial_group: dist.ProcessGroup | None,
+    local_gradient_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Spatially reduced RMSE with the standard physical-loss signature."""
+
+    return spatial_lp_loss(
+        target,
+        pred,
+        p_norm=2,
+        with_p_root=True,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+        spatial_group=spatial_group,
+        local_gradient_scale=local_gradient_scale,
+    )
+
+
+def spatial_mae(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    weights_channels: torch.Tensor | None,
+    weights_points: torch.Tensor | None,
+    *,
+    spatial_group: dist.ProcessGroup | None,
+    local_gradient_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Spatially reduced MAE with the standard physical-loss signature."""
+
+    return spatial_lp_loss(
+        target,
+        pred,
+        p_norm=1,
+        weights_channels=weights_channels,
+        weights_points=weights_points,
+        spatial_group=spatial_group,
+        local_gradient_scale=local_gradient_scale,
+    )
 
 
 def mse(

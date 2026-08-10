@@ -18,13 +18,22 @@ from weathergen.common import config
 from weathergen.common.config import Config, merge_configs
 
 # Run stages
-Stage = Literal["train", "val", "test"]
+Stage = Literal["train", "val", "test", "system"]
 TRAIN: Stage = "train"
 VAL: Stage = "val"
 TEST: Stage = "test"
+SYSTEM: Stage = "system"
 
 # keys to filter using enabled: True/False
 cfg_keys_to_filter = ["losses", "model_input", "target_input"]
+
+
+def validation_sample_limit_reached(
+    batch_index: int, batch_size: int, samples_per_mini_epoch: int
+) -> bool:
+    """Return whether the completed validation batch reaches the sample limit."""
+
+    return (batch_index + 1) * batch_size >= samples_per_mini_epoch
 
 
 # TODO: remove this definition, it should directly using common.

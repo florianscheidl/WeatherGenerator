@@ -5,23 +5,16 @@ from astropy_healpix.healpy import ang2pix
 from torch import Tensor
 
 from weathergen.common.io import IOReaderData
+from weathergen.datasets.healpix_domain import (
+    build_local_healpix_cell_splits,
+    theta_phi_to_standard_coords,
+)
 from weathergen.datasets.utils import (
     locs_to_cell_coords_ctrs,
     locs_to_ctr_coords,
     r3tos2,
     s2tor3,
 )
-
-# on some clusters our numpy version is pinned to be 1.x.x where the np.argsort does not
-# the stable=True argument
-numpy_argsort_args = {"stable": True} if int(np.__version__.split(".")[0]) >= 2 else {}
-
-
-def theta_phi_to_standard_coords(coords):
-    thetas = ((90.0 - coords[:, 0]) / 180.0) * np.pi
-    phis = ((coords[:, 1] + 180.0) / 360.0) * 2.0 * np.pi
-
-    return thetas, phis
 
 
 def encode_times_source(times, time_win) -> torch.tensor:
@@ -95,35 +88,47 @@ def encode_times_target(times, time_win) -> torch.tensor:
     return time_tensor + 0.5
 
 
-def hpy_cell_splits(coords: torch.tensor, hl: int):
+def hpy_cell_splits(
+    coords: torch.tensor,
+    hl: int,
+    cell_start: int = 0,
+    cell_end: int | None = None,
+):
     """Compute healpix cell id for each coordinate on given level hl
 
     Returns
-      hpy_idxs_ord_split : list of per cell indices into thetas,phis,posr3
+      hpy_idxs_ord_split : list of per-local-cell indices into thetas,phis,posr3
       thetas : thetas in rad
       phis : phis in rad
     """
+    num_healpix_cells = 12 * 4**hl
+    cell_end = num_healpix_cells if cell_end is None else cell_end
+
     thetas, phis = theta_phi_to_standard_coords(coords)
     # healpix cells for all points
     hpy_idxs = ang2pix(2**hl, thetas, phis, nest=True)
 
-    # extract information to split according to cells by first sorting and then finding split idxs
-    hpy_idxs_ord = np.argsort(hpy_idxs, **numpy_argsort_args)
-    splits = np.flatnonzero(np.diff(hpy_idxs[hpy_idxs_ord]))
-
-    # extract per cell data
-    hpy_idxs_ord_temp = np.split(hpy_idxs_ord, splits + 1)
-    hpy_idxs_ord_split = [np.array([], dtype=np.int64) for _ in range(12 * 4**hl)]
-    # TODO: split smarter (with a augmented splits list?) so that this loop is not needed
-    for b, x in zip(np.unique(np.unique(hpy_idxs[hpy_idxs_ord])), hpy_idxs_ord_temp, strict=True):
-        hpy_idxs_ord_split[b] = x
+    # Nested HEALPix IDs make a consecutive interval a complete rank-local
+    # domain. The helper applies the point mask and builds only local cells.
+    hpy_idxs_ord_split = build_local_healpix_cell_splits(
+        hpy_idxs,
+        num_healpix_cells,
+        cell_start,
+        cell_end,
+    )
 
     return (hpy_idxs_ord_split, thetas, phis)
 
 
 def hpy_splits(
-    coords: torch.Tensor, hl: int, token_size: int, pad_tokens: bool, offset_step: int = 0
-) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+    coords: torch.Tensor,
+    hl: int,
+    token_size: int,
+    pad_tokens: bool,
+    offset_step: int = 0,
+    cell_start: int = 0,
+    cell_end: int | None = None,
+) -> tuple[list[list[torch.Tensor]], list[list[int]]]:
     """Compute healpix cell for each data point and splitting information per cell;
        when the token_size is exceeded then splitting based on lat is used;
        tokens can be padded
@@ -135,7 +140,9 @@ def hpy_splits(
     """
 
     # list of data points per healpix cell
-    (hpy_idxs_ord_split, thetas, phis) = hpy_cell_splits(coords, hl)
+    (hpy_idxs_ord_split, thetas, phis) = hpy_cell_splits(
+        coords, hl, cell_start=cell_start, cell_end=cell_end
+    )
 
     # if token_size is exceeed split based on latitude
     # TODO: split by hierarchically traversing healpix scheme
@@ -179,11 +186,21 @@ def tokenize_space(
     hl,
     pad_tokens=True,
     offset_step=0,
+    cell_start=0,
+    cell_end=None,
 ):
     """Process one window into tokens"""
 
     # idx_ord_lens is length is number of tokens per healpix cell
-    idxs_ord, idxs_ord_lens = hpy_splits(rdata.coords, hl, token_size, pad_tokens, offset_step)
+    idxs_ord, idxs_ord_lens = hpy_splits(
+        rdata.coords,
+        hl,
+        token_size,
+        pad_tokens,
+        offset_step,
+        cell_start,
+        cell_end,
+    )
 
     return idxs_ord, idxs_ord_lens
 
@@ -193,14 +210,17 @@ def tokenize_spacetime(
     token_size,
     hl,
     pad_tokens=True,
+    cell_start=0,
+    cell_end=None,
 ):
     """Tokenize respecting an intrinsic time step in the data, i.e. each time step is tokenized
     separately
     """
 
     num_healpix_cells = 12 * 4**hl
-    idxs_cells = [[] for _ in range(num_healpix_cells)]
-    idxs_cells_lens = [[] for _ in range(num_healpix_cells)]
+    cell_end = num_healpix_cells if cell_end is None else cell_end
+    idxs_cells = [[] for _ in range(cell_end - cell_start)]
+    idxs_cells_lens = [[] for _ in range(cell_end - cell_start)]
 
     offset_step = 0
     t_unique = np.unique(rdata.datetimes)
@@ -210,7 +230,15 @@ def tokenize_spacetime(
         rdata_cur = IOReaderData(
             rdata.coords[mask], rdata.geoinfos[mask], rdata.data[mask], rdata.datetimes[mask]
         )
-        idxs_cur, idxs_cur_lens = tokenize_space(rdata_cur, token_size, hl, pad_tokens, offset_step)
+        idxs_cur, idxs_cur_lens = tokenize_space(
+            rdata_cur,
+            token_size,
+            hl,
+            pad_tokens,
+            offset_step,
+            cell_start,
+            cell_end,
+        )
 
         # collect data for all time steps
         idxs_cells = [t + tc for t, tc in zip(idxs_cells, idxs_cur, strict=True)]
@@ -320,6 +348,8 @@ def tokenize_apply_mask_target(
     hpy_verts_local,
     hpy_nctrs,
     enc_time,
+    cell_start=0,
+    cell_end=None,
 ):
     """
     Apply masking to the data.
@@ -330,27 +360,58 @@ def tokenize_apply_mask_target(
 
     """
 
-    def return_empty(rdata, idxs_cells_lens):
+    num_cells = len(idxs_cells_lens)
+    cell_end = num_cells if cell_end is None else cell_end
+    if not 0 <= cell_start < cell_end <= num_cells:
+        raise ValueError(
+            f"invalid target HEALPix cell range [{cell_start}, {cell_end}) for {num_cells} cells"
+        )
+
+    def return_empty(rdata, masked_points_per_cell):
         do = torch.zeros([0, rdata.data.shape[-1]])
         coords = torch.zeros([0, rdata.coords.shape[-1]])
         dt = np.array([], dtype=np.datetime64)
-        masked_points_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
-        # data, datetimes, coords, coords_local, masked_points_per_cell
-        return do, dt, coords, coords, masked_points_per_cell
-
-    # convert to token level, forgetting about cells
-    idxs_tokens = [i for t in idxs_cells for i in t]
-    idxs_lens = [i for t in idxs_cells_lens for i in t]
+        # data, datetimes, coords, coords_local, masked_points_per_cell, stable row ids
+        return do, dt, coords, coords, masked_points_per_cell, torch.zeros(0, dtype=torch.int64)
 
     # apply spatial masking on a per token level
     if mask_tokens is None:
-        return return_empty(rdata, idxs_cells_lens)
+        return return_empty(rdata, torch.zeros(num_cells, dtype=torch.int32))
 
-    # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
+    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
+    masked_points_per_cell = torch.tensor(
+        [
+            sum(
+                len(token_idxs)
+                for token_idxs, keep in zip(cell_tokens, cell_token_mask, strict=True)
+                if keep
+            )
+            for cell_tokens, cell_token_mask in zip(
+                idxs_cells,
+                mask_tokens_per_cell,
+                strict=True,
+            )
+        ],
+        dtype=torch.int32,
+    )
+
+    # Select the rank's cells before indexing ReaderData and before allocating
+    # the expanded target-coordinate tensor. The global per-cell lengths remain
+    # available for prediction reassembly while target values are still global.
+    idxs_data = [
+        token_idxs
+        for cell_tokens, cell_token_mask in zip(
+            idxs_cells[cell_start:cell_end],
+            mask_tokens_per_cell[cell_start:cell_end],
+            strict=True,
+        )
+        for token_idxs, keep in zip(cell_tokens, cell_token_mask, strict=True)
+        if keep
+    ]
 
     if len(idxs_data) == 0:
-        return return_empty(rdata, idxs_cells_lens)
+        return return_empty(rdata, masked_points_per_cell)
 
     idxs_data = torch.cat(idxs_data)
 
@@ -365,33 +426,25 @@ def tokenize_apply_mask_target(
         assert False, "to be implemented"
         # data = data_padded[ : channel_mask]
 
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
-
     # compute encoding of target coordinates used in prediction network
-    if torch.tensor(idxs_lens).sum() > 0:
+    if coords.shape[0] > 0:
         coords_local = get_target_coords_local(
             stream_id,
             hl,
-            masked_points_per_cell,
+            masked_points_per_cell[cell_start:cell_end],
             coords,
             geoinfos,
             datetimes_enc,
-            hpy_verts_rots,
-            hpy_verts_local,
-            hpy_nctrs,
+            [rots[cell_start:cell_end] for rots in hpy_verts_rots],
+            hpy_verts_local[cell_start:cell_end],
+            hpy_nctrs[:, cell_start:cell_end],
+            set_stream_id_on_first_row=not masked_points_per_cell[:cell_start].any(),
         )
         coords_local.requires_grad = False
     else:
         coords_local = torch.tensor([])
 
-    return data, datetimes, coords, coords_local, masked_points_per_cell
+    return data, datetimes, coords, coords_local, masked_points_per_cell, idxs_data
 
 
 def get_source_coords_local(
@@ -428,6 +481,7 @@ def get_target_coords_local(
     verts_rots,
     verts_local,
     nctrs,
+    set_stream_id_on_first_row,
 ):
     """Generate local coordinates for target coords w.r.t healpix cell vertices and
     and for healpix cell vertices themselves
@@ -451,7 +505,11 @@ def get_target_coords_local(
             1 + target_geoinfos.shape[1] + target_times.shape[1] + 5 * (3 * 5) + 3 * 8,
         ]
     )
-    a[0] = stream_id
+    # Preserve the existing global packing behavior during rank-local
+    # construction: only the first selected row of the full packed tensor gets
+    # this assignment, not the first row of every shard.
+    if set_stream_id_on_first_row:
+        a[0] = stream_id
     geoinfo_offset = 1
     a[..., geoinfo_offset : geoinfo_offset + target_times.shape[1]] = target_times
     geoinfo_offset += target_times.shape[1]

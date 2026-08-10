@@ -23,6 +23,7 @@ from weathergen.datasets.tokenizer_utils import (
     tokenize_space,
     tokenize_spacetime,
 )
+from weathergen.utils.spatial_shard import SpatialShard
 
 
 def readerdata_to_torch(rdata: IOReaderData) -> IOReaderData:
@@ -40,11 +41,26 @@ def readerdata_to_torch(rdata: IOReaderData) -> IOReaderData:
 
 
 class TokenizerMasking(Tokenizer):
-    def __init__(self, healpix_level: int, masker: Masker):
+    def __init__(
+        self,
+        healpix_level: int,
+        masker: Masker,
+        spatial_shard: SpatialShard | None = None,
+        local_target_values: bool = False,
+    ):
         super().__init__(healpix_level)
         self.masker = masker
         self.rng = None
         self.token_size = None
+        self.spatial_shard = spatial_shard or SpatialShard(healpix_level, 1, 0)
+        if self.spatial_shard.healpix_level != healpix_level:
+            raise ValueError(
+                f"spatial shard HEALPix level ({self.spatial_shard.healpix_level}) does not "
+                f"match tokenizer level ({healpix_level})"
+            )
+        self.source_cell_start = self.spatial_shard.cell_start
+        self.source_cell_end = self.spatial_shard.cell_end
+        self.local_target_values = local_target_values
 
     def reset_rng(self, rng) -> None:
         """
@@ -53,7 +69,7 @@ class TokenizerMasking(Tokenizer):
         self.masker.reset_rng(rng)
         self.rng = rng
 
-    def get_tokens_windows(self, stream_info, data, pad_tokens):
+    def get_tokens_windows(self, stream_info, data, pad_tokens, local_source=False):
         """
         Tokenize data (to amortize over the different views that are generated)
 
@@ -63,6 +79,8 @@ class TokenizerMasking(Tokenizer):
         tok = tokenize_spacetime if tok_spacetime else tokenize_space
         hl = self.healpix_level
         token_size = stream_info["token_size"]
+        cell_start = self.source_cell_start if local_source else 0
+        cell_end = self.source_cell_end if local_source else self.num_healpix_cells_source
 
         tokens = []
         for rdata in data:
@@ -72,7 +90,12 @@ class TokenizerMasking(Tokenizer):
                 continue
             # tokenize data
             idxs_cells, idxs_cells_lens = tok(
-                readerdata_to_torch(rdata), token_size, hl, pad_tokens
+                readerdata_to_torch(rdata),
+                token_size,
+                hl,
+                pad_tokens,
+                cell_start=cell_start,
+                cell_end=cell_end,
             )
             tokens += [(idxs_cells, idxs_cells_lens)]
 
@@ -129,6 +152,7 @@ class TokenizerMasking(Tokenizer):
     ):
         # create tokenization index
         (idxs_cells, idxs_cells_lens) = idxs_cells_data
+        cell_mask = cell_mask[self.source_cell_start : self.source_cell_end]
 
         # select strategy from XXX depending on stream and if student or teacher
 
@@ -144,7 +168,7 @@ class TokenizerMasking(Tokenizer):
             stream_info["stream_id"],
             rdata,
             time_win,
-            self.hpy_verts_rots_source[-1],
+            self.hpy_verts_rots_source[-1][self.source_cell_start : self.source_cell_end],
             encode_times_source,
         )
 
@@ -166,7 +190,7 @@ class TokenizerMasking(Tokenizer):
         )
 
         # TODO: split up
-        _, _, _, coords_local, coords_per_cell = tokenize_apply_mask_target(
+        _, _, _, coords_local, coords_per_cell, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -179,6 +203,8 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            cell_start=self.source_cell_start,
+            cell_end=self.source_cell_end,
         )
 
         return (coords_local, coords_per_cell)
@@ -198,7 +224,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        data, datetimes, coords, _, _ = tokenize_apply_mask_target(
+        data, datetimes, coords, _, _, row_ids = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -211,13 +237,15 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            cell_start=self.source_cell_start if self.local_target_values else 0,
+            cell_end=(
+                self.source_cell_end if self.local_target_values else self.num_healpix_cells_source
+            ),
         )
 
         idxs_ord_inv = None
-        if data.numel() > 0:
-            # flatten per-token indices into one flat list
-            idxs_flat = torch.cat([idxs for idxs_cell in idxs_cells for idxs in idxs_cell])
-            # compute indices for inversion
-            _, idxs_ord_inv = torch.sort(idxs_flat)
+        if data.numel() > 0 and not self.local_target_values:
+            # Restore packed cell/token data to its original ReaderData row order.
+            idxs_ord_inv = torch.argsort(row_ids, stable=True)
 
-        return (data, datetimes, coords, idxs_ord_inv)
+        return (data, datetimes, coords, idxs_ord_inv, row_ids)

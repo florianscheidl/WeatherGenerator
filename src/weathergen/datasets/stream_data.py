@@ -58,6 +58,7 @@ class StreamData:
         input_steps: int,
         output_steps: int,
         healpix_cells: int,
+        source_healpix_cells: int | None = None,
     ) -> None:
         """
         StreamData object
@@ -72,7 +73,10 @@ class StreamData:
             Number of output steps
             Note -- Last input step and first output step always overlap.
         healpix_cells : int
-            Number of healpix cells for source
+            Number of global healpix cells used for targets
+        source_healpix_cells : int | None
+            Number of rank-local healpix cells used for encoder sources. Defaults
+            to ``healpix_cells`` for non-spatial-parallel callers.
 
         Returns
         -------
@@ -84,6 +88,9 @@ class StreamData:
         self.input_steps = input_steps
         self.output_steps = output_steps
         self.healpix_cells = healpix_cells
+        self.source_healpix_cells = (
+            healpix_cells if source_healpix_cells is None else source_healpix_cells
+        )
 
         self.source_is_spoof = [False for _ in range(self.input_steps)]
         self.target_is_spoof = [False for _ in range(self.output_steps)]
@@ -99,12 +106,14 @@ class StreamData:
         ]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
         self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
+        self.target_row_ids = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
 
         # source tokens per cell
         self.source_tokens_cells = [None for _ in range(self.input_steps)]
         # length of source tokens per cell (without padding)
         self.source_tokens_lens = [
-            torch.zeros(self.healpix_cells, dtype=torch.int32) for _ in range(self.input_steps)
+            torch.zeros(self.source_healpix_cells, dtype=torch.int32)
+            for _ in range(self.input_steps)
         ]
         # unprocessed source (for logging)
         self.source_raw = [None for _ in range(self.input_steps)]
@@ -121,6 +130,7 @@ class StreamData:
         self.target_coords_lens = _pin_tensor_list(self.target_coords_lens)
         self.target_tokens = _pin_tensor_list(self.target_tokens)
         self.idxs_inv = _pin_tensor_list(self.idxs_inv)
+        self.target_row_ids = _pin_tensor_list(self.target_row_ids)
         self.target_coords_raw = _pin_tensor_list(self.target_coords_raw)
 
         # Pin source tensors
@@ -253,6 +263,7 @@ class StreamData:
         target_coords_raw: torch.Tensor,
         times_raw: torch.Tensor,
         idxs_inv: torch.Tensor,
+        row_ids: torch.Tensor,
         is_spoof: bool,
     ) -> None:
         """
@@ -275,6 +286,8 @@ class StreamData:
               absolute target times
         idxs_inv:
             Indices to reorder targets back to order in input
+        row_ids:
+            Stable row identities in the original ReaderData
 
         Returns
         -------
@@ -284,11 +297,14 @@ class StreamData:
         if stage == TRAIN:
             del idxs_inv
             idxs_inv = None
+            del row_ids
+            row_ids = None
 
         self.target_tokens[fstep] = targets
         self.target_times_raw[fstep] = times_raw
         self.target_coords_raw[fstep] = target_coords_raw
         self.idxs_inv[fstep] = idxs_inv
+        self.target_row_ids[fstep] = row_ids
 
         self.target_is_spoof[fstep] = is_spoof
 
@@ -459,7 +475,9 @@ class StreamData:
         return len(self.target_tokens)
 
 
-def spoof(healpix_level: int, datetime, geoinfo_size, num_channels) -> IOReaderData:
+def spoof(
+    healpix_level: int, datetime, geoinfo_size, num_channels, rng: np.random.Generator
+) -> IOReaderData:
     """
     Spoof an instance from data_reader_base.ReaderData instance.
     other should be such an instance.
@@ -474,7 +492,7 @@ def spoof(healpix_level: int, datetime, geoinfo_size, num_channels) -> IOReaderD
 
     coords = np.stack([lats.deg, lons.deg], axis=-1, dtype=np.float32)
     # spoof two tokens to avoid unnecessary computational load
-    coords = coords[np.random.choice(coords.shape[0], size=2, replace=False)]
+    coords = coords[rng.choice(coords.shape[0], size=2, replace=False)]
 
     geoinfos = np.zeros((coords.shape[0], geoinfo_size), dtype=np.float32)
     data = np.zeros((coords.shape[0], num_channels), dtype=np.float32)

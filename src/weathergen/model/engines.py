@@ -29,6 +29,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
+from weathergen.model.spatial_parallel import zero_gradient_module_dependency
 from weathergen.model.utils import ActivationFactory
 from weathergen.utils.utils import get_dtype
 
@@ -88,23 +89,43 @@ class EmbeddingEngine(torch.nn.Module):
 
         # iterate over all streams
         x_embeds = []
-        for stream_name in self.streams.keys():
+        empty_stream_dependency = tokens_all.new_zeros(())
+
+        for stream_idx, stream_name in enumerate(self.streams.keys()):
             # collect all source tokens from all input_steps and all samples in the batch
             sdata = []
             for istep in range(num_steps_input):
                 for sample in batch.get_samples():
                     sdata += [sample.streams_data[stream_name].source_tokens_cells[istep]]
 
-            if all(s is None for s in sdata):
+            stream_tensors = [tensor for tensor in sdata if tensor is not None]
+            local_stream_active = any(tensor.numel() > 0 for tensor in stream_tensors)
+
+            if local_stream_active:
+                stream_data = torch.cat(stream_tensors).to(tokens_all.dtype)
+                x_embeds += [self.embeds[stream_name](stream_data).flatten(0, 1)]
                 continue
 
-            sdata = torch.cat(sdata).to(tokens_all.dtype)
-            # skip empty stream
-            if sdata.numel() == 0:
+            if self.sources_size[stream_idx] == 0 or self.streams[stream_name].get(
+                "diagnostic", False
+            ):
                 continue
 
-            # embedding from physical space to per patch latent representation
-            x_embeds += [self.embeds[stream_name](sdata).flatten(0, 1)]
+            # Every rank enters every configured trainable stream embedder in the
+            # same order. A locally empty stream uses one shape-valid token and a
+            # zero dependency so FSDP sees the same parameter set in backward.
+            # The dummy output never enters the packed token tensor.
+            dummy = tokens_all.new_zeros(
+                (
+                    1,
+                    int(self.streams[stream_name]["token_size"]),
+                    int(self.sources_size[stream_idx]),
+                )
+            )
+            empty_stream_dependency = empty_stream_dependency + zero_gradient_module_dependency(
+                self.embeds[stream_name],
+                dummy,
+            )
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
@@ -115,7 +136,12 @@ class EmbeddingEngine(torch.nn.Module):
         )
         " Increase ae_local_max_tokens_per_cell in config."
 
-        if batch.tokens_lens.shape[2] == 1:
+        if not x_embeds:
+            # A spatial rank can legitimately own a domain with no observations
+            # for this sample. Keep an empty tensor so all ranks can continue to
+            # the synchronized local-assimilation path.
+            return tokens_all + empty_stream_dependency
+        elif batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
             tokens_all = torch.cat(x_embeds)
 
@@ -129,7 +155,7 @@ class EmbeddingEngine(torch.nn.Module):
         pe_idxs = self.get_pe_idxs_vectorized(batch)
         tokens_all = tokens_all + pe_embed[pe_idxs]
 
-        return tokens_all
+        return tokens_all + empty_stream_dependency
 
     def get_pe_idxs_vectorized(self, batch):
         """
