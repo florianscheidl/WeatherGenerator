@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import dataclasses
+import inspect
 import logging
 import pathlib
 from collections.abc import Sequence
@@ -121,6 +122,13 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.local_num_healpix_cells = self.spatial_shard.cells_per_rank
         self.local_cell_start = self.spatial_shard.cell_start
         self.local_cell_end = self.spatial_shard.cell_end
+        # Reader-boundary early filtering: fixed-grid readers drop non-local rows
+        # right after decode instead of during tokenization. Off by default; only
+        # meaningful with more than one spatial rank.
+        self.reader_spatial_filtering = (
+            bool(cf.data_loading.get("reader_spatial_filtering", False))
+            and spatial_parallel_size > 1
+        )
         self.masker = Masker(cf.healpix_level, stage, cf.streams, self.mode_cfg)
         self.tokenizer = TokenizerMasking(
             cf.healpix_level,
@@ -271,6 +279,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         msg = f"Unsupported stream type {stream_info['type']}"
                         f"for stream name '{stream_name}'."
                         raise ValueError(msg)
+
+            # Fixed-grid readers that take a spatial_shard support early
+            # filtering (DataReaderAnemoi and subclasses like anemoi_operan);
+            # other readers return global data and rely on the tokenizer's late
+            # filtering.
+            if self.reader_spatial_filtering and (
+                "spatial_shard" in inspect.signature(dataset.__init__).parameters
+            ):
+                kwargs["spatial_shard"] = self.spatial_shard
 
             for fname in stream_info.get("filenames", [pathlib.Path()]):
                 fname = pathlib.Path(fname)

@@ -5,20 +5,16 @@ from astropy_healpix.healpy import ang2pix
 from torch import Tensor
 
 from weathergen.common.io import IOReaderData
-from weathergen.datasets.healpix_domain import build_local_healpix_cell_splits
+from weathergen.datasets.healpix_domain import (
+    build_local_healpix_cell_splits,
+    theta_phi_to_standard_coords,
+)
 from weathergen.datasets.utils import (
     locs_to_cell_coords_ctrs,
     locs_to_ctr_coords,
     r3tos2,
     s2tor3,
 )
-
-
-def theta_phi_to_standard_coords(coords):
-    thetas = ((90.0 - coords[:, 0]) / 180.0) * np.pi
-    phis = ((coords[:, 1] + 180.0) / 360.0) * 2.0 * np.pi
-
-    return thetas, phis
 
 
 def encode_times_source(times, time_win) -> torch.tensor:

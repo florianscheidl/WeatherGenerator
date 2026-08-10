@@ -149,6 +149,11 @@ data_loading :
   rng_seed: ???
   repeat_data_in_mini_epoch : False
 
+  # With encoder spatial parallelism, fixed-grid anemoi readers drop rows outside
+  # the rank's HEALPix cell range right after decode (sources only; targets stay
+  # global). No effect when encoder_spatial_parallel_size is 1.
+  reader_spatial_filtering: False
+
   # pin GPU memory for faster transfer; it is possible that enabling memory_pinning with 
   # FSDP2 + DINOv2 can cause the job to hang and trigger a PyTorch timeout error.
   # If this happens, you can disable the flag, but performance will drop on GH200.
