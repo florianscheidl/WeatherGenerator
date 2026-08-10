@@ -66,6 +66,14 @@ num_register_tokens: 0
 
 healpix_level: 5
 
+# Split each sample's contiguous nested-HEALPix cell range across this many
+# consecutive ranks. Size 1 preserves the non-spatial path.
+encoder_spatial_parallel_size: 1
+# Keep physical targets and decoder predictions rank-local. These switches are
+# independent so the full-target paths remain available as rollout oracles.
+spatial_local_physical_loss: False
+spatial_local_validation: False
+
 # Use 2D RoPE instead of traditional global positional encoding
 # When True: uses 2D RoPE based on healpix cell coordinates (lat/lon)
 # When False: uses traditional pe_global positional encoding
@@ -133,6 +141,10 @@ data_loading :
   num_workers: 12
   rng_seed: ???
   repeat_data_in_mini_epoch : False
+
+  # Fixed-grid Anemoi readers can drop source rows outside this rank's spatial
+  # shard immediately after decode. Targets retain their established semantics.
+  reader_spatial_filtering: False
 
   # pin GPU memory for faster transfer; it is possible that enabling memory_pinning with 
   # FSDP2 + DINOv2 can cause the job to hang and trigger a PyTorch timeout error.
