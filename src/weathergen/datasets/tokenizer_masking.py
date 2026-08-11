@@ -23,6 +23,7 @@ from weathergen.datasets.tokenizer_utils import (
     tokenize_space,
     tokenize_spacetime,
 )
+from weathergen.utils.spatial_shard import SpatialShard
 
 
 def readerdata_to_torch(rdata: IOReaderData) -> IOReaderData:
@@ -44,24 +45,22 @@ class TokenizerMasking(Tokenizer):
         self,
         healpix_level: int,
         masker: Masker,
-        source_cell_start: int = 0,
-        source_cell_end: int | None = None,
+        spatial_shard: SpatialShard | None = None,
+        local_target_values: bool = False,
     ):
         super().__init__(healpix_level)
         self.masker = masker
         self.rng = None
         self.token_size = None
-        self.source_cell_start = source_cell_start
-        self.source_cell_end = (
-            self.num_healpix_cells_source if source_cell_end is None else source_cell_end
-        )
-        if not (
-            0 <= self.source_cell_start < self.source_cell_end <= self.num_healpix_cells_source
-        ):
+        self.spatial_shard = spatial_shard or SpatialShard(healpix_level, 1, 0)
+        if self.spatial_shard.healpix_level != healpix_level:
             raise ValueError(
-                f"invalid source HEALPix cell range "
-                f"[{self.source_cell_start}, {self.source_cell_end})"
+                f"spatial shard HEALPix level ({self.spatial_shard.healpix_level}) does not "
+                f"match tokenizer level ({healpix_level})"
             )
+        self.source_cell_start = self.spatial_shard.cell_start
+        self.source_cell_end = self.spatial_shard.cell_end
+        self.local_target_values = local_target_values
 
     def reset_rng(self, rng) -> None:
         """
@@ -191,7 +190,7 @@ class TokenizerMasking(Tokenizer):
         )
 
         # TODO: split up
-        _, _, _, coords_local, coords_per_cell = tokenize_apply_mask_target(
+        _, _, _, coords_local, coords_per_cell, _ = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -204,6 +203,8 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            cell_start=self.source_cell_start,
+            cell_end=self.source_cell_end,
         )
 
         return (coords_local, coords_per_cell)
@@ -223,7 +224,7 @@ class TokenizerMasking(Tokenizer):
             idxs_cells, idxs_cells_lens, cell_mask
         )
 
-        data, datetimes, coords, _, _ = tokenize_apply_mask_target(
+        data, datetimes, coords, _, _, row_ids = tokenize_apply_mask_target(
             stream_info["stream_id"],
             self.hl_target,
             idxs_cells,
@@ -236,13 +237,15 @@ class TokenizerMasking(Tokenizer):
             self.hpy_verts_local_target,
             self.hpy_nctrs_target,
             encode_times_target,
+            cell_start=self.source_cell_start if self.local_target_values else 0,
+            cell_end=(
+                self.source_cell_end if self.local_target_values else self.num_healpix_cells_source
+            ),
         )
 
         idxs_ord_inv = None
-        if data.numel() > 0:
-            # flatten per-token indices into one flat list
-            idxs_flat = torch.cat([idxs for idxs_cell in idxs_cells for idxs in idxs_cell])
-            # compute indices for inversion
-            _, idxs_ord_inv = torch.sort(idxs_flat)
+        if data.numel() > 0 and not self.local_target_values:
+            # Restore packed cell/token data to its original ReaderData row order.
+            idxs_ord_inv = torch.argsort(row_ids, stable=True)
 
-        return (data, datetimes, coords, idxs_ord_inv)
+        return (data, datetimes, coords, idxs_ord_inv, row_ids)

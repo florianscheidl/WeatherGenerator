@@ -46,6 +46,7 @@ from weathergen.train.utils import (
     get_active_stage_config,
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
+    validation_sample_limit_reached,
 )
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
@@ -663,7 +664,9 @@ class Trainer(TrainerBase):
 
                     pbar.update(batch_size)
 
-                    if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
+                    if validation_sample_limit_reached(
+                        bidx, batch_size, mode_cfg.samples_per_mini_epoch
+                    ):
                         break
 
                 self._log_terminal(0, mini_epoch, VAL)

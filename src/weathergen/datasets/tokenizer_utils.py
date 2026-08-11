@@ -5,20 +5,16 @@ from astropy_healpix.healpy import ang2pix
 from torch import Tensor
 
 from weathergen.common.io import IOReaderData
-from weathergen.datasets.healpix_domain import build_local_healpix_cell_splits
+from weathergen.datasets.healpix_domain import (
+    build_local_healpix_cell_splits,
+    theta_phi_to_standard_coords,
+)
 from weathergen.datasets.utils import (
     locs_to_cell_coords_ctrs,
     locs_to_ctr_coords,
     r3tos2,
     s2tor3,
 )
-
-
-def theta_phi_to_standard_coords(coords):
-    thetas = ((90.0 - coords[:, 0]) / 180.0) * np.pi
-    phis = ((coords[:, 1] + 180.0) / 360.0) * 2.0 * np.pi
-
-    return thetas, phis
 
 
 def encode_times_source(times, time_win) -> torch.tensor:
@@ -132,7 +128,7 @@ def hpy_splits(
     offset_step: int = 0,
     cell_start: int = 0,
     cell_end: int | None = None,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
+) -> tuple[list[list[torch.Tensor]], list[list[int]]]:
     """Compute healpix cell for each data point and splitting information per cell;
        when the token_size is exceeded then splitting based on lat is used;
        tokens can be padded
@@ -352,6 +348,8 @@ def tokenize_apply_mask_target(
     hpy_verts_local,
     hpy_nctrs,
     enc_time,
+    cell_start=0,
+    cell_end=None,
 ):
     """
     Apply masking to the data.
@@ -362,27 +360,58 @@ def tokenize_apply_mask_target(
 
     """
 
-    def return_empty(rdata, idxs_cells_lens):
+    num_cells = len(idxs_cells_lens)
+    cell_end = num_cells if cell_end is None else cell_end
+    if not 0 <= cell_start < cell_end <= num_cells:
+        raise ValueError(
+            f"invalid target HEALPix cell range [{cell_start}, {cell_end}) for {num_cells} cells"
+        )
+
+    def return_empty(rdata, masked_points_per_cell):
         do = torch.zeros([0, rdata.data.shape[-1]])
         coords = torch.zeros([0, rdata.coords.shape[-1]])
         dt = np.array([], dtype=np.datetime64)
-        masked_points_per_cell = torch.zeros(len(idxs_cells_lens), dtype=torch.int32)
-        # data, datetimes, coords, coords_local, masked_points_per_cell
-        return do, dt, coords, coords, masked_points_per_cell
-
-    # convert to token level, forgetting about cells
-    idxs_tokens = [i for t in idxs_cells for i in t]
-    idxs_lens = [i for t in idxs_cells_lens for i in t]
+        # data, datetimes, coords, coords_local, masked_points_per_cell, stable row ids
+        return do, dt, coords, coords, masked_points_per_cell, torch.zeros(0, dtype=torch.int64)
 
     # apply spatial masking on a per token level
     if mask_tokens is None:
-        return return_empty(rdata, idxs_cells_lens)
+        return return_empty(rdata, torch.zeros(num_cells, dtype=torch.int32))
 
-    # filter tokens using mask to obtain flat per data point index list
-    idxs_data = [t for t, m in zip(idxs_tokens, mask_tokens, strict=True) if m]
+    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
+    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
+    masked_points_per_cell = torch.tensor(
+        [
+            sum(
+                len(token_idxs)
+                for token_idxs, keep in zip(cell_tokens, cell_token_mask, strict=True)
+                if keep
+            )
+            for cell_tokens, cell_token_mask in zip(
+                idxs_cells,
+                mask_tokens_per_cell,
+                strict=True,
+            )
+        ],
+        dtype=torch.int32,
+    )
+
+    # Select the rank's cells before indexing ReaderData and before allocating
+    # the expanded target-coordinate tensor. The global per-cell lengths remain
+    # available for prediction reassembly while target values are still global.
+    idxs_data = [
+        token_idxs
+        for cell_tokens, cell_token_mask in zip(
+            idxs_cells[cell_start:cell_end],
+            mask_tokens_per_cell[cell_start:cell_end],
+            strict=True,
+        )
+        for token_idxs, keep in zip(cell_tokens, cell_token_mask, strict=True)
+        if keep
+    ]
 
     if len(idxs_data) == 0:
-        return return_empty(rdata, idxs_cells_lens)
+        return return_empty(rdata, masked_points_per_cell)
 
     idxs_data = torch.cat(idxs_data)
 
@@ -397,33 +426,25 @@ def tokenize_apply_mask_target(
         assert False, "to be implemented"
         # data = data_padded[ : channel_mask]
 
-    num_tokens_per_cell = [len(idxs) for idxs in idxs_cells_lens]
-    mask_tokens_per_cell = torch.split(torch.from_numpy(mask_tokens), num_tokens_per_cell)
-    masked_points_per_cell = torch.tensor(
-        [
-            torch.tensor([len(t) for t, m in zip(tt, mm, strict=False) if m]).sum()
-            for tt, mm in zip(idxs_cells, mask_tokens_per_cell, strict=False)
-        ]
-    ).to(dtype=torch.int32)
-
     # compute encoding of target coordinates used in prediction network
-    if torch.tensor(idxs_lens).sum() > 0:
+    if coords.shape[0] > 0:
         coords_local = get_target_coords_local(
             stream_id,
             hl,
-            masked_points_per_cell,
+            masked_points_per_cell[cell_start:cell_end],
             coords,
             geoinfos,
             datetimes_enc,
-            hpy_verts_rots,
-            hpy_verts_local,
-            hpy_nctrs,
+            [rots[cell_start:cell_end] for rots in hpy_verts_rots],
+            hpy_verts_local[cell_start:cell_end],
+            hpy_nctrs[:, cell_start:cell_end],
+            set_stream_id_on_first_row=not masked_points_per_cell[:cell_start].any(),
         )
         coords_local.requires_grad = False
     else:
         coords_local = torch.tensor([])
 
-    return data, datetimes, coords, coords_local, masked_points_per_cell
+    return data, datetimes, coords, coords_local, masked_points_per_cell, idxs_data
 
 
 def get_source_coords_local(
@@ -460,6 +481,7 @@ def get_target_coords_local(
     verts_rots,
     verts_local,
     nctrs,
+    set_stream_id_on_first_row,
 ):
     """Generate local coordinates for target coords w.r.t healpix cell vertices and
     and for healpix cell vertices themselves
@@ -483,7 +505,11 @@ def get_target_coords_local(
             1 + target_geoinfos.shape[1] + target_times.shape[1] + 5 * (3 * 5) + 3 * 8,
         ]
     )
-    a[0] = stream_id
+    # Preserve the existing global packing behavior during rank-local
+    # construction: only the first selected row of the full packed tensor gets
+    # this assignment, not the first row of every shard.
+    if set_stream_id_on_first_row:
+        a[0] = stream_id
     geoinfo_offset = 1
     a[..., geoinfo_offset : geoinfo_offset + target_times.shape[1]] = target_times
     geoinfo_offset += target_times.shape[1]

@@ -26,8 +26,10 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
     check_reader_data,
 )
+from weathergen.datasets.healpix_domain import shard_grid_point_rows
 from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
+from weathergen.utils.spatial_shard import SpatialShard
 
 _logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         filename: Path,
         stream_info: dict,
         stage: Stage,
+        spatial_shard: SpatialShard | None = None,
     ) -> None:
         """
         Construct data reader for anemoi dataset
@@ -51,11 +54,18 @@ class DataReaderAnemoi(DataReaderTimestep):
             filename (and path) of dataset
         stream_info :
             information about stream
+        spatial_shard :
+            when set, source reads return only grid rows in this rank's HEALPix
+            cell range; targets remain global
 
         Returns
         -------
         None
         """
+
+        self.spatial_shard = spatial_shard
+        # Global grid-row indices owned by this rank; None means no filtering.
+        self.local_grid_rows: NDArray[np.int64] | None = None
 
         # use anemoi_config if it's defined; ignore filename in this case
         data_paths = stream_info.get("data_paths", [])
@@ -120,6 +130,20 @@ class DataReaderAnemoi(DataReaderTimestep):
         self.latitudes = _clip_lat(ds.latitudes)
         self.longitudes = _clip_lon(ds.longitudes)
 
+        # Anemoi fixed grids expose one lat/lon per grid row for the whole dataset,
+        # so the rank-local row selection is computed once here and reused for
+        # every window in _get.
+        if spatial_shard is not None:
+            self.local_grid_rows = shard_grid_point_rows(
+                spatial_shard, self.latitudes, self.longitudes
+            )
+            ds_name = stream_info["name"]
+            _logger.info(
+                f"{ds_name}: reader spatial filtering active, rank owns "
+                f"{len(self.local_grid_rows)}/{len(self.latitudes)} grid rows "
+                f"(cells [{spatial_shard.cell_start}, {spatial_shard.cell_end}))"
+            )
+
         # select/filter requested source channels
         if stream_info.get(str(stage) + "_source_channels") is None:
             self.source_idx = self.select_channels(ds, "source")
@@ -174,13 +198,35 @@ class DataReaderAnemoi(DataReaderTimestep):
         super().init_empty()
         self.ds = None
         self.len = 0
+        self.local_grid_rows = None
 
     @override
     def length(self) -> int:
         return self.len
 
     @override
-    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+    def get_source(self, idx: TIndex) -> ReaderData:
+        """
+        Get source data for idx, restricted to the local HEALPix domain when set.
+
+        Targets deliberately stay global (get_target is unchanged): target values
+        feed the still-global loss, while non-local source rows would be dropped
+        by the tokenizer anyway.
+        """
+        if self.local_grid_rows is None:
+            # Subclasses (e.g. DataReaderAnemoiOperan) override _get without the
+            # grid_rows parameter; they never receive a domain, so keep the
+            # legacy call for them and for unfiltered readers.
+            return self._get(idx, self.source_idx)
+        return self._get(idx, self.source_idx, grid_rows=self.local_grid_rows)
+
+    @override
+    def _get(
+        self,
+        idx: TIndex,
+        channels_idx: list[int],
+        grid_rows: NDArray[np.int64] | None = None,
+    ) -> ReaderData:
         """
         Get data for window (for either source or target, through public interface)
 
@@ -190,6 +236,8 @@ class DataReaderAnemoi(DataReaderTimestep):
             Index of temporal window
         channels_idx : np.array
             Selection of channels
+        grid_rows : np.array, optional
+            When given, only these grid rows (per timestep) are returned
 
         Returns
         -------
@@ -204,21 +252,51 @@ class DataReaderAnemoi(DataReaderTimestep):
             )
 
         assert t_idxs[0] >= 0, "index must be non-negative"
-        didx_start = t_idxs[0]
         # End is inclusive
-        didx_end = t_idxs[-1] + 1
+        rd = self._read_window(t_idxs[0], t_idxs[-1] + 1, channels_idx, grid_rows)
+        if rd is None:
+            return ReaderData.empty(
+                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
+            )
+        check_reader_data(rd, dtr)
+
+        return rd
+
+    def _read_window(
+        self,
+        didx_start: int,
+        didx_end: int,
+        channels_idx: list[int],
+        grid_rows: NDArray[np.int64] | None = None,
+    ) -> ReaderData | None:
+        """
+        Decode dataset timesteps [didx_start, didx_end) and assemble ReaderData.
+
+        Returns None when a date is missing from the dataset. Shared by
+        DataReaderAnemoi and subclasses with their own window selection
+        (e.g. DataReaderAnemoiOperan).
+        """
 
         # extract number of time steps and collapse ensemble dimension
         # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
         # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
         # sampling is required here
         try:
-            data = self.ds[didx_start:didx_end][:, :, 0].astype(np.float32)
+            if grid_rows is None:
+                data = self.ds[didx_start:didx_end][:, :, 0]
+            else:
+                # Decode one timestep at a time and filter to the rank-local grid
+                # rows immediately, so the transient decode buffer holds a single
+                # global timestep instead of the whole window.
+                data = np.stack(
+                    [self.ds[i][:, 0][:, grid_rows] for i in range(didx_start, didx_end)]
+                )
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
-            return ReaderData.empty(
-                num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
-            )
+            return None
+
+        data = data.astype(np.float32)
+        num_steps = didx_end - didx_start
 
         # coords-first representation and collapse multiple steps
         data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
@@ -229,29 +307,28 @@ class DataReaderAnemoi(DataReaderTimestep):
         data = data[:, list(channels_idx)]
 
         # construct lat/lon coords
+        lats = self.latitudes if grid_rows is None else self.latitudes[grid_rows]
+        lons = self.longitudes if grid_rows is None else self.longitudes[grid_rows]
         latlon = np.concatenate(
             [
-                np.expand_dims(self.latitudes, 0),
-                np.expand_dims(self.longitudes, 0),
+                np.expand_dims(lats, 0),
+                np.expand_dims(lons, 0),
             ],
             axis=0,
         ).transpose()
-        # repeat latlon len(t_idxs) times
-        coords = np.vstack((latlon,) * len(t_idxs))
+        # repeat latlon num_steps times
+        coords = np.vstack((latlon,) * num_steps)
 
         # date time matching #data points of data
         # Assuming a fixed frequency for the dataset
-        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // len(t_idxs))
+        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // num_steps)
 
-        rd = ReaderData(
+        return ReaderData(
             coords=coords,
             geoinfos=geoinfos,
             data=data,
             datetimes=datetimes,
         )
-        check_reader_data(rd, dtr)
-
-        return rd
 
     def select_channels(self, ds0: anemoi_datasets, ch_type: str) -> NDArray[np.int64]:
         """

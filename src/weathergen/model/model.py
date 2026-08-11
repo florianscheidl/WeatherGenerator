@@ -41,9 +41,9 @@ from weathergen.model.engines import (
 )
 from weathergen.model.layers import MLP, NamedLinear
 from weathergen.model.spatial_parallel import (
+    ensure_packed_cell_shard,
     reassemble_packed_cell_shards,
     select_healpix_neighborhood_shard,
-    select_packed_cell_shard,
     split_cell_lens_by_shard,
 )
 from weathergen.model.utils import get_num_parameters
@@ -346,6 +346,8 @@ class Model(torch.nn.Module):
         self.decoder_local_num_healpix_cells = self.num_healpix_cells
         self.decoder_local_cell_start = 0
         self.decoder_local_cell_end = self.num_healpix_cells
+        self.spatial_local_physical_loss = bool(cf.get("spatial_local_physical_loss", False))
+        self.spatial_local_validation = bool(cf.get("spatial_local_validation", False))
 
         assert cf.get("forecast", {}).get("att_dense_rate", 1.0) == 1.0, (
             "Local attention not adapted for register tokens"
@@ -817,17 +819,17 @@ class Model(torch.nn.Module):
                 batch.samples[i_b].streams_data[stream_name].target_coords[step]
                 for i_b in range(batch_size)
             ]
-            t_coords_lens = [len(t) for t in t_coords]
             t_coords = torch.cat(t_coords)
-            if len(t_coords) == 0:
-                continue
             tcls_global = torch.stack(
                 [
                     sample.streams_data[stream_name].target_coords_lens[step]
                     for sample in batch.samples
                 ]
             )
-            t_coords, tcls = select_packed_cell_shard(
+            if tcls_global.sum() == 0:
+                continue
+            t_coords_lens = tcls_global.sum(dim=1).tolist()
+            t_coords, tcls = ensure_packed_cell_shard(
                 t_coords,
                 tcls_global.flatten(),
                 self.num_healpix_cells,
@@ -897,7 +899,12 @@ class Model(torch.nn.Module):
             if local_coords_empty:
                 pred = pred[:, :0]
 
-            pred = self._gather_decoder_predictions(pred, tcls_global)
+            if (self.training and self.spatial_local_physical_loss) or (
+                not self.training and self.spatial_local_validation
+            ):
+                t_coords_lens = tcls.reshape(batch_size, -1).sum(dim=1).tolist()
+            else:
+                pred = self._gather_decoder_predictions(pred, tcls_global)
             # recover batch dimension (ragged, so as list)
             pred = torch.split(pred, t_coords_lens, dim=1)
             output.add_physical_prediction(step, stream_name, pred)

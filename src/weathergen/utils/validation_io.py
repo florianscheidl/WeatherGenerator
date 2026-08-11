@@ -19,8 +19,54 @@ import weathergen.common.io as io
 from weathergen.common.io import TimeRange, zarrio_writer
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.engines import LatentState
+from weathergen.utils.distributed import (
+    all_gather_vlen,
+    get_encoder_spatial_parallel_group,
+)
 
 _logger = logging.getLogger(__name__)
+
+
+def _reassemble_validation_rows(
+    predictions: list[torch.Tensor],
+    targets: list[torch.Tensor],
+    coords: list[torch.Tensor],
+    times_ns: list[torch.Tensor],
+    row_ids: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, npt.NDArray[np.datetime64]]:
+    """Concatenate rank-local rows and restore stable ReaderData row order."""
+
+    pred = torch.cat(predictions, dim=1)
+    target = torch.cat(targets, dim=0)
+    target_coords = torch.cat(coords, dim=0)
+    target_times_ns = torch.cat(times_ns, dim=0)
+    stable_ids = torch.cat(row_ids, dim=0)
+
+    if stable_ids.numel() != torch.unique(stable_ids).numel():
+        raise ValueError("rank-local validation shards contain duplicate stable row ids")
+    order = torch.argsort(stable_ids, stable=True)
+    target_times = target_times_ns[order].cpu().numpy().astype("datetime64[ns]")
+    return pred[:, order], target[order], target_coords[order], target_times
+
+
+def _gather_and_reassemble_validation_rows(cf, pred, target, coords, times, row_ids):
+    if row_ids is None:
+        raise ValueError("rank-local validation output requires stable row ids")
+
+    device = pred.device
+    coords = coords.to(device)
+    row_ids = row_ids.to(device)
+    times_ns = torch.as_tensor(
+        times.astype("datetime64[ns]").astype(np.int64), device=device, dtype=torch.int64
+    )
+    group, _ = get_encoder_spatial_parallel_group(cf)
+    return _reassemble_validation_rows(
+        all_gather_vlen(pred, group=group),
+        all_gather_vlen(target, group=group),
+        all_gather_vlen(coords, group=group),
+        all_gather_vlen(times_ns, group=group),
+        all_gather_vlen(row_ids, group=group),
+    )
 
 
 def write_output(
@@ -54,6 +100,7 @@ def write_output(
     timestep_idxs = [0] if len(batch.get_output_idxs()) == 0 else batch.get_output_idxs()
     forecast_offset = timestep_idxs[0]
     targets_lens = []
+    local_validation = bool(cf.get("spatial_local_validation", False))
 
     # TODO Maybe stopping at forecast_steps explained #1657
     for t_idx in timestep_idxs:
@@ -90,8 +137,17 @@ def write_output(
                     t_coords = target_data["target_coords"][i_batch]
                     t_times = target_data["target_times"][i_batch]
 
-                    idxs_inv = target_aux_out.physical[t_idx][sname]["idxs_inv"][i_batch]
-                    if idxs_inv is not None:
+                    idxs_inv = target_data["idxs_inv"][i_batch]
+                    if local_validation:
+                        pred, target, t_coords, t_times = _gather_and_reassemble_validation_rows(
+                            cf,
+                            pred,
+                            target,
+                            t_coords,
+                            t_times,
+                            target_data["row_ids"][i_batch],
+                        )
+                    elif idxs_inv is not None:
                         pred = pred[:, idxs_inv]
                         target = target[idxs_inv]
                         t_coords = t_coords[idxs_inv]
