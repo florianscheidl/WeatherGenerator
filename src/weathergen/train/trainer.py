@@ -48,7 +48,12 @@ from weathergen.train.utils import (
     get_target_idxs_from_cfg,
 )
 from weathergen.utils.distributed import is_root
-from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
+from weathergen.utils.performance import (
+    InferencePhaseProfiler,
+    NullThroughputTracker,
+    ThroughputTracker,
+    nvtx_range,
+)
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
 from weathergen.utils.utils import get_dtype
 from weathergen.utils.validation_io import write_output
@@ -90,6 +95,7 @@ class Trainer(TrainerBase):
         self.perf_tracker: ThroughputTracker | NullThroughputTracker = NullThroughputTracker()
         self.t_training_start: float = 0
         self.training_loop_annotation_context = contextlib.nullcontext
+        self.inference_phase_profiler: InferencePhaseProfiler | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -220,6 +226,26 @@ class Trainer(TrainerBase):
         }
         self.data_loader_validation = torch.utils.data.DataLoader(
             self.dataset, **loader_params, sampler=None
+        )
+
+        profiling_cfg = cf.get("profiling", {})
+        timing_enabled = profiling_cfg.get("inference_phase_timing", False)
+        timing_path = None
+        if timing_enabled:
+            timing_path = config.get_path_run(cf) / (
+                f"inference_phase_timing_rank{cf.rank:04d}.json"
+            )
+        self.inference_phase_profiler = InferencePhaseProfiler(
+            output_path=timing_path,
+            rank=cf.rank,
+            world_size=cf.world_size,
+            run_id=cf.general.run_id,
+            nvtx_annotate=profiling_cfg.get("nvtx_annotate", False),
+            metadata={
+                "configured_num_workers": cf.data_loading.num_workers,
+                "effective_num_workers": loader_num_workers,
+                "samples_per_mini_epoch": self.test_cfg.samples_per_mini_epoch,
+            },
         )
 
         self.model, self.model_params = init_model_and_shard(
@@ -577,83 +603,111 @@ class Trainer(TrainerBase):
 
         cf = self.cf
         self.model.eval()
+        profiler = self.inference_phase_profiler
 
-        dataset_val_iter = iter(self.data_loader_validation)
+        def phase(name: str, batch_idx: int | None = None):
+            if profiler is None:
+                return contextlib.nullcontext()
+            return profiler.phase(name, batch_idx)
 
-        num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
+        try:
+            with phase("data_loader_iter"):
+                dataset_val_iter = iter(self.data_loader_validation)
 
-        with torch.no_grad():
-            # print progress bar but only in interactive mode, i.e. when without ddp
-            with tqdm.tqdm(
-                total=len(self.data_loader_validation), disable=self.cf.with_ddp
-            ) as pbar:
-                for bidx, batch in enumerate(dataset_val_iter):
-                    batch.to_device(self.device)
+            num_samples_write = mode_cfg.get("output", {}).get("num_samples", 0) * batch_size
 
-                    # evaluate model
-                    with torch.autocast(
-                        device_type=f"cuda:{cf.local_rank}",
-                        dtype=self.mixed_precision_dtype,
-                        enabled=cf.with_mixed_precision,
-                    ):
-                        if self.ema_model is None:
-                            preds = self.model(
-                                self.model_params,
-                                batch.get_source_samples(),
+            with torch.no_grad():
+                # print progress bar but only in interactive mode, i.e. when without ddp
+                with tqdm.tqdm(
+                    total=len(self.data_loader_validation), disable=self.cf.with_ddp
+                ) as pbar:
+                    bidx = 0
+                    while True:
+                        with phase("data_loader_next", bidx):
+                            try:
+                                batch = next(dataset_val_iter)
+                            except StopIteration:
+                                break
+
+                        with phase("h2d_transfer", bidx):
+                            batch.to_device(self.device)
+
+                        # evaluate model
+                        with torch.autocast(
+                            device_type=f"cuda:{cf.local_rank}",
+                            dtype=self.mixed_precision_dtype,
+                            enabled=cf.with_mixed_precision,
+                        ):
+                            with phase("forward", bidx):
+                                if self.ema_model is None:
+                                    preds = self.model(
+                                        self.model_params,
+                                        batch.get_source_samples(),
+                                    )
+                                else:
+                                    preds = self.ema_model.forward_eval(
+                                        self.model_params,
+                                        batch.get_source_samples(),
+                                    )
+
+                            with phase("target_aux", bidx):
+                                targets_and_auxs = {}
+                                for (
+                                    loss_name,
+                                    target_aux,
+                                ) in self.target_and_aux_calculators_val.items():
+                                    target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
+                                    targets_and_auxs[loss_name] = target_aux.compute(
+                                        self.cf.general.istep,
+                                        batch.get_target_samples(target_idxs),
+                                        self.model_params,
+                                        self.model,
+                                    )
+
+                        with phase("loss", bidx):
+                            _ = self.loss_calculator_val.compute_loss(
+                                preds=preds,
+                                targets_and_aux=targets_and_auxs,
+                                metadata=extract_batch_metadata(batch),
                             )
-                        else:
-                            preds = self.ema_model.forward_eval(
-                                self.model_params,
-                                batch.get_source_samples(),
+
+                        # log output
+                        if bidx < num_samples_write:
+                            # denormalization function for data
+                            denormalize_data_fct = (
+                                (lambda x0, x1: x1)
+                                if mode_cfg.get("output", {}).get("normalized_samples", False)
+                                else self.dataset_val.denormalize_target_channels
+                            )
+                            write_output(
+                                self.cf,
+                                mode_cfg,
+                                batch_size,
+                                mini_epoch,
+                                bidx,
+                                denormalize_data_fct,
+                                batch,
+                                preds,
+                                targets_and_auxs,
+                                phase_context=lambda name, batch_idx=bidx: phase(name, batch_idx),
                             )
 
-                        targets_and_auxs = {}
-                        for loss_name, target_aux in self.target_and_aux_calculators_val.items():
-                            target_idxs = get_target_idxs_from_cfg(mode_cfg, loss_name)
-                            targets_and_auxs[loss_name] = target_aux.compute(
-                                self.cf.general.istep,
-                                batch.get_target_samples(target_idxs),
-                                self.model_params,
-                                self.model,
-                            )
+                        pbar.update(batch_size)
 
-                    _ = self.loss_calculator_val.compute_loss(
-                        preds=preds,
-                        targets_and_aux=targets_and_auxs,
-                        metadata=extract_batch_metadata(batch),
-                    )
+                        if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
+                            break
+                        bidx += 1
 
-                    # log output
-                    if bidx < num_samples_write:
-                        # denormalization function for data
-                        denormalize_data_fct = (
-                            (lambda x0, x1: x1)
-                            if mode_cfg.get("output", {}).get("normalized_samples", False)
-                            else self.dataset_val.denormalize_target_channels
-                        )
-                        # write output
-                        write_output(
-                            self.cf,
-                            mode_cfg,
-                            batch_size,
-                            mini_epoch,
-                            bidx,
-                            denormalize_data_fct,
-                            batch,
-                            preds,
-                            targets_and_auxs,
-                        )
+                    with phase("validation_logging_reduction"):
+                        self._log_terminal(0, mini_epoch, VAL)
+                        self._log(VAL)
 
-                    pbar.update(batch_size)
-
-                    if (bidx * batch_size) > mode_cfg.samples_per_mini_epoch:
-                        break
-
-                self._log_terminal(0, mini_epoch, VAL)
-                self._log(VAL)
-
-        # avoid that there is a systematic bias in the validation subset
-        self.dataset_val.advance()
+            # avoid that there is a systematic bias in the validation subset
+            with phase("validation_finalize"):
+                self.dataset_val.advance()
+        finally:
+            if profiler is not None:
+                profiler.write()
 
     def _get_full_model_state_dict(self):
         maybe_sharded_sd = (

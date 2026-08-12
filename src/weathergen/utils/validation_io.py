@@ -7,6 +7,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import contextlib
 import logging
 
 import astropy_healpix as hp
@@ -23,7 +24,7 @@ from weathergen.model.engines import LatentState
 _logger = logging.getLogger(__name__)
 
 
-def write_output(
+def _prepare_output(
     cf,
     val_cfg,
     batch_size,
@@ -115,7 +116,7 @@ def write_output(
 
     if len(preds_all) == 0 or np.array([p.shape[1] for pp in preds_all for p in pp]).sum() == 0:
         _logger.warning("Writing no data since predictions are empty.")
-        return
+        return None
 
     # collect source information
     sources = []
@@ -189,19 +190,52 @@ def write_output(
 
     store_path = config.get_path_results(cf, mini_epoch)
 
-    with zarrio_writer(store_path) as zio:
-        for subset in data.items():
-            zio.write_zarr(subset)
-        # Write latent data directly to zarr store without using OutputItem validation
-        if data.latents:
-            _write_latent_data_to_zarr(
-                zio,
-                data,
-                cf,
-                batch,
-                batch_idx,
-                batch_size,
-            )
+    return data, store_path
+
+
+def write_output(
+    cf,
+    val_cfg,
+    batch_size,
+    mini_epoch,
+    batch_idx,
+    dn_data,
+    batch,
+    model_output,
+    target_aux_out,
+    phase_context=contextlib.nullcontext,
+):
+    """Prepare validation output on the host, then write it to the configured Zarr store."""
+    with phase_context("output_prepare_d2h"):
+        prepared = _prepare_output(
+            cf,
+            val_cfg,
+            batch_size,
+            mini_epoch,
+            batch_idx,
+            dn_data,
+            batch,
+            model_output,
+            target_aux_out,
+        )
+    if prepared is None:
+        return
+
+    data, store_path = prepared
+    with phase_context("output_zarr_write"):
+        with zarrio_writer(store_path) as zio:
+            for subset in data.items():
+                zio.write_zarr(subset)
+            # Write latent data directly to zarr store without using OutputItem validation
+            if data.latents:
+                _write_latent_data_to_zarr(
+                    zio,
+                    data,
+                    cf,
+                    batch,
+                    batch_idx,
+                    batch_size,
+                )
 
 
 def _write_latent_data_to_zarr(zio, data, cf, batch, batch_idx, batch_size):

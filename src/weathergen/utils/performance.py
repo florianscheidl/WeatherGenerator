@@ -9,10 +9,13 @@
 
 """Utilities for measuring training throughput metrics."""
 
+import json
 import logging
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -194,6 +197,67 @@ def nvtx_range(name):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
+
+
+class InferencePhaseProfiler:
+    """Record inference phase timings and emit matching NVTX ranges."""
+
+    def __init__(
+        self,
+        output_path: Path | None,
+        rank: int,
+        world_size: int,
+        run_id: str,
+        nvtx_annotate: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.output_path = output_path
+        self.nvtx_annotate = nvtx_annotate
+        self.started_ns = time.perf_counter_ns()
+        self.payload: dict[str, Any] = {
+            "schema_version": 1,
+            "clock": "time.perf_counter_ns",
+            "rank": rank,
+            "world_size": world_size,
+            "run_id": run_id,
+            "metadata": metadata or {},
+            "phases": [],
+        }
+
+    @contextmanager
+    def phase(self, name: str, batch_idx: int | None = None):
+        """Measure one host phase without introducing a CUDA synchronization."""
+        range_name = f"inference.{name}"
+        if batch_idx is not None:
+            range_name = f"{range_name}.batch_{batch_idx}"
+
+        if self.nvtx_annotate:
+            torch.cuda.nvtx.range_push(range_name)
+        start_ns = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            end_ns = time.perf_counter_ns()
+            if self.nvtx_annotate:
+                torch.cuda.nvtx.range_pop()
+            if self.output_path is not None:
+                self.payload["phases"].append(
+                    {
+                        "name": name,
+                        "batch_idx": batch_idx,
+                        "start_s": (start_ns - self.started_ns) / 1e9,
+                        "duration_s": (end_ns - start_ns) / 1e9,
+                    }
+                )
+
+    def write(self) -> None:
+        """Atomically write this rank's accumulated timing records."""
+        if self.output_path is None:
+            return
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.output_path.with_suffix(f"{self.output_path.suffix}.tmp")
+        temporary_path.write_text(json.dumps(self.payload, indent=2) + "\n", encoding="utf-8")
+        temporary_path.replace(self.output_path)
 
 
 def _nvtx_push(name: str):
