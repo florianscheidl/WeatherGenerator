@@ -35,6 +35,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
+from weathergen.utils.performance import NvtxAnnotator
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -49,13 +50,21 @@ FORECAST_DEFAULTS = {
 }
 
 
-def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IOReaderData:
+def collect_datasources(
+    stream_datasets: list,
+    idx: int,
+    type: str,
+    rng,
+    nvtx: NvtxAnnotator | None = None,
+) -> IOReaderData:
     """
     Utility function to collect all sources / targets from streams list
 
     rng and num_subset are used to drop data
+    nvtx annotates the reader stages of one window when loader profiling is enabled
     """
 
+    nvtx = nvtx if nvtx is not None else NvtxAnnotator(False)
     rdatas = []
 
     for ds in stream_datasets:
@@ -75,14 +84,20 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
             assert False, "invalid value for argument `type`"
 
         # get source (of potentially multi-step length)
-        rdata = (
-            get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
-        )
-        rdata.data = normalize_channels(rdata.data)
-        rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
+        # kept as separate statements so that each reader stage gets its own NVTX range
+        with nvtx.range(f"read.{type}.reader_get"):
+            rdata = get_reader_data(idx)
+        with nvtx.range(f"read.{type}.shuffle_subsample"):
+            rdata = rdata.shuffle(rng, shuffle, num_subset)
+        with nvtx.range(f"read.{type}.remove_nan_coords"):
+            rdata = rdata.remove_nan_coords_and_geoinfos()
+        with nvtx.range(f"read.{type}.normalize"):
+            rdata.data = normalize_channels(rdata.data)
+            rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
         rdatas += [rdata]
 
-    return IOReaderData.combine(rdatas)
+    with nvtx.range(f"read.{type}.combine"):
+        return IOReaderData.combine(rdatas)
 
 
 @dataclasses.dataclass
@@ -97,6 +112,11 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.mode_cfg = mode_cfg
         self._stage = stage
+
+        # created here so that the worker processes inherit it with their dataset copy
+        self._nvtx = NvtxAnnotator(
+            cf.get("profiling", {}).get("loader_nvtx_annotate", False), "loader."
+        )
 
         self.mini_epoch = 0
         self.mask_value = 0.0
@@ -391,6 +411,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         num_steps_input: int,
         input_data: list,
         input_tokens: list,
+        nvtx: NvtxAnnotator,
         mask: torch.Tensor | None = None,
     ) -> tuple[StreamData, dict | None]:
         """
@@ -403,6 +424,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             view_meta: ViewMetadata describing spatial mask
             stream_info: Stream configuration dict
             stream_ds: List of dataset readers for this stream
+            nvtx: annotator for the per-step token construction
 
         Returns:
             StreamData with source and targets masked according to view_meta
@@ -424,13 +446,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     continue
 
                 # preprocess data for model input
-                (source_cells, source_cells_lens) = self.tokenizer.get_source(
-                    stream_info,
-                    rdata,
-                    token_data,
-                    (time_win_source.start, time_win_source.end),
-                    mask,
-                )
+                with nvtx.range("build_input.source_tokens"):
+                    (source_cells, source_cells_lens) = self.tokenizer.get_source(
+                        stream_info,
+                        rdata,
+                        token_data,
+                        (time_win_source.start, time_win_source.end),
+                        mask,
+                    )
 
                 stream_data.add_source(
                     self._stage, step, rdata, source_cells_lens, source_cells, rdata.is_spoof
@@ -448,10 +471,12 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_data: list,
         output_tokens: list,
         target_mask,
+        nvtx: NvtxAnnotator,
     ) -> StreamData:
         """
         Generate stream data for output
 
+        nvtx annotates target coordinate and target value construction per forecast step.
         """
 
         # collect for all forecast steps
@@ -468,23 +493,25 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 continue
 
             if "target_coords" in mode:
-                (tc, tc_l) = self.tokenizer.get_target_coords(
-                    stream_info,
-                    rdata,
-                    token_data,
-                    (time_win_target.start, time_win_target.end),
-                    target_mask,
-                )
+                with nvtx.range("build_output.target_coords"):
+                    (tc, tc_l) = self.tokenizer.get_target_coords(
+                        stream_info,
+                        rdata,
+                        token_data,
+                        (time_win_target.start, time_win_target.end),
+                        target_mask,
+                    )
                 stream_data.add_target_coords(self._stage, timestep_idx, tc, tc_l, rdata.is_spoof)
 
             if "target_values" in mode:
-                (tt_cells, tt_t, tt_c, idxs_inv) = self.tokenizer.get_target_values(
-                    stream_info,
-                    rdata,
-                    token_data,
-                    (time_win_target.start, time_win_target.end),
-                    target_mask,
-                )
+                with nvtx.range("build_output.target_values"):
+                    (tt_cells, tt_t, tt_c, idxs_inv) = self.tokenizer.get_target_values(
+                        stream_info,
+                        rdata,
+                        token_data,
+                        (time_win_target.start, time_win_target.end),
+                        target_mask,
+                    )
 
                 stream_data.add_target_values(
                     self._stage, timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof
@@ -505,6 +532,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_tokens: list,
         output_mask,
         input_mask,
+        nvtx: NvtxAnnotator,
     ) -> StreamData:
         """
         Return one batch of data
@@ -520,6 +548,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             output_mask : mask for output/prediction/target
             input_mask : mask for network input (can be source or target)
+            nvtx : annotator for the input/output construction of this view
 
 
         Returns:
@@ -534,31 +563,37 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             self.num_healpix_cells,
         )
 
-        stream_data = self._build_stream_data_input(
-            modes,
-            stream_data,
-            base_idx,
-            stream_info,
-            num_steps_input,
-            input_data,
-            input_tokens,
-            input_mask,
-        )
+        with nvtx.range("build_input"):
+            stream_data = self._build_stream_data_input(
+                modes,
+                stream_data,
+                base_idx,
+                stream_info,
+                num_steps_input,
+                input_data,
+                input_tokens,
+                nvtx,
+                input_mask,
+            )
 
-        stream_data = self._build_stream_data_output(
-            modes,
-            stream_data,
-            base_idx,
-            stream_info,
-            num_forecast_steps,
-            output_data,
-            output_tokens,
-            output_mask,
-        )
+        with nvtx.range("build_output"):
+            stream_data = self._build_stream_data_output(
+                modes,
+                stream_data,
+                base_idx,
+                stream_info,
+                num_forecast_steps,
+                output_data,
+                output_tokens,
+                output_mask,
+                nvtx,
+            )
 
         return stream_data
 
-    def _get_data_windows(self, base_idx, num_forecast_steps, num_steps_input_max, stream_ds):
+    def _get_data_windows(
+        self, base_idx, num_forecast_steps, num_steps_input_max, stream_ds, nvtx: NvtxAnnotator
+    ):
         """
         Collect all data needed for current stream to potentially amortize costs by
         generating multiple samples
@@ -567,46 +602,48 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         # source data: iterate overall input steps
         input_data = []
-        for idx in range(base_idx - num_steps_input_max + 1, base_idx + 1):
-            # TODO: check that we are not out of bounds when we go back in time
+        with nvtx.range("read_source_windows"):
+            for idx in range(base_idx - num_steps_input_max + 1, base_idx + 1):
+                # TODO: check that we are not out of bounds when we go back in time
 
-            rdata = collect_datasources(stream_ds, idx, "source", self.rng)
+                rdata = collect_datasources(stream_ds, idx, "source", self.rng, nvtx)
 
-            if rdata.is_empty():
-                # work around for https://github.com/pytorch/pytorch/issues/158719
-                # create non-empty mean data instead of empty tensor
-                time_win = self.time_window_handler.window(idx)
-                rdata = spoof(
-                    self.healpix_level,
-                    time_win.start,
-                    stream_ds[0].get_geoinfo_size(),
-                    len(stream_ds[0].mean[stream_ds[0].source_idx]),
-                )
-                rdata.is_spoof = True
+                if rdata.is_empty():
+                    # work around for https://github.com/pytorch/pytorch/issues/158719
+                    # create non-empty mean data instead of empty tensor
+                    time_win = self.time_window_handler.window(idx)
+                    rdata = spoof(
+                        self.healpix_level,
+                        time_win.start,
+                        stream_ds[0].get_geoinfo_size(),
+                        len(stream_ds[0].mean[stream_ds[0].source_idx]),
+                    )
+                    rdata.is_spoof = True
 
-            input_data += [rdata]
+                input_data += [rdata]
 
         # target data: collect for all forecast steps
         output_data = []
         num_output_steps = self._get_output_length(num_forecast_steps)
-        for timestep_idx in range(self.output_offset, num_output_steps):
-            step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
+        with nvtx.range("read_target_windows"):
+            for timestep_idx in range(self.output_offset, num_output_steps):
+                step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
 
-            rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng)
+                rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng, nvtx)
 
-            if rdata.is_empty():
-                # work around for https://github.com/pytorch/pytorch/issues/158719
-                # create non-empty mean data instead of empty tensor
-                time_win = self.time_window_handler.window(step_forecast_dt)
-                rdata = spoof(
-                    self.healpix_level,
-                    time_win.start,
-                    stream_ds[0].get_geoinfo_size(),
-                    len(stream_ds[0].mean[stream_ds[0].target_idx]),
-                )
-                rdata.is_spoof = True
+                if rdata.is_empty():
+                    # work around for https://github.com/pytorch/pytorch/issues/158719
+                    # create non-empty mean data instead of empty tensor
+                    time_win = self.time_window_handler.window(step_forecast_dt)
+                    rdata = spoof(
+                        self.healpix_level,
+                        time_win.start,
+                        stream_ds[0].get_geoinfo_size(),
+                        len(stream_ds[0].mean[stream_ds[0].target_idx]),
+                    )
+                    rdata.is_spoof = True
 
-            output_data += [rdata]
+                output_data += [rdata]
 
         return (input_data, output_data)
 
@@ -659,7 +696,10 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         target_cfgs = self.mode_cfg.get("target_input", {})
 
         # get/coordinate masks
-        masks_streams, num_source_samples, num_target_samples = self._get_source_target_masks(mode)
+        with self._nvtx.range("masks"):
+            masks_streams, num_source_samples, num_target_samples = self._get_source_target_masks(
+                mode
+            )
 
         source_select, target_select = [], []
         if "masking" in mode:
@@ -686,6 +726,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         for stream_name, stream_data in self.streams_datasets.items():
             stream_info, stream_ds = stream_data.info, stream_data.readers
             (target_masks, source_masks, source_to_target) = masks_streams[stream_name]
+            stream_nvtx = self._nvtx.child(f"stream.{stream_name}.")
 
             # max number of input steps
             input_steps = np.array([sc.get("num_steps_input", 1) for _, sc in source_cfgs.items()])
@@ -698,13 +739,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # in source and target channels; overlap in one window when self.output_offset=0
             i_max = input_steps.max().item()
             (input_data, output_data) = self._get_data_windows(
-                idx, num_forecast_steps, i_max, stream_ds
+                idx, num_forecast_steps, i_max, stream_ds, stream_nvtx
             )
 
             # tokenize windows
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
-            input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
-            output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
+            with stream_nvtx.range("tokenize_source_windows"):
+                input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
+            with stream_nvtx.range("tokenize_target_windows"):
+                output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
 
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target
@@ -721,6 +764,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     output_tokens,
                     output_mask=target_masks.masks[tidx],
                     input_mask=source_mask,
+                    nvtx=stream_nvtx.child("source_view."),
                 )
 
                 batch.add_source_stream(sidx, tidx, stream_name, sdata, source_masks.metadata[sidx])
@@ -741,6 +785,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     output_tokens,
                     output_mask=target_mask,
                     input_mask=target_mask,
+                    nvtx=stream_nvtx.child("target_view."),
                 )
                 target_metadata = target_masks.metadata[tidx]
                 # also want to add the mask to the metadata
@@ -754,7 +799,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         source_in_steps = input_steps.max().item()
         target_in_steps = np.array([tc.get("num_steps_input", 1) for _, tc in target_cfgs.items()])
         target_in_steps = 1 if len(target_in_steps) == 0 else target_in_steps.max().item()
-        batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
+        with self._nvtx.range("preprocess_batch"):
+            batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
 
         return batch
 
@@ -765,11 +811,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         Return :
             batch of data
         """
-        iter_start, iter_end = self.worker_workset()
-        logger.info(f"iter_start={iter_start}, iter_end={iter_end}, len={self.len}")
+        with self._nvtx.range("iter_setup"):
+            iter_start, iter_end = self.worker_workset()
+            logger.info(f"iter_start={iter_start}, iter_end={iter_end}, len={self.len}")
 
-        # create new shuffeling
-        perms, perms_num_forecast_steps = self.reset()
+            # create new shuffeling
+            perms, perms_num_forecast_steps = self.reset()
+
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = 0 if worker_info is None else worker_info.id
 
         # bidx is used to count the #batches that have been emitted
         # idx_raw is used to index into the dataset; the decoupling is needed
@@ -780,25 +830,35 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # (amortized through data parallel training)
             num_forecast_steps = perms_num_forecast_steps[i]
 
-            # use while loop due to the scattered nature of the data in time and to
-            # ensure batches are not empty
-            while True:
-                idx: TIndex = perms[idx_raw % perms.shape[0]]
-                idx_raw += 1
+            # the range closes before the yield so that it does not stay open across the
+            # handoff of the completed batch to the parent process
+            with self._nvtx.range(f"w{worker_id}.batch_{i}"):
+                # use while loop due to the scattered nature of the data in time and to
+                # ensure batches are not empty
+                attempt = 0
+                while True:
+                    idx: TIndex = perms[idx_raw % perms.shape[0]]
+                    idx_raw += 1
 
-                batch = self._get_batch(idx, num_forecast_steps)
+                    with self._nvtx.range(f"attempt_{attempt}"):
+                        with self._nvtx.range("get_batch"):
+                            batch = self._get_batch(idx, num_forecast_steps)
 
-                # ensure the batch is valid, i.e. not completely empty and no NaN values
-                # student teacher has no classical targets
-                mode = self.mode_cfg.get("training_mode")
-                not_valid = batch.sources_empty() or batch.is_nan()
-                not_valid = not_valid or (batch.targets_empty() if "masking" in mode else False)
+                        # ensure the batch is valid, i.e. not completely empty and no NaN values
+                        # student teacher has no classical targets
+                        mode = self.mode_cfg.get("training_mode")
+                        with self._nvtx.range("validate_batch"):
+                            not_valid = batch.sources_empty() or batch.is_nan()
+                            not_valid = not_valid or (
+                                batch.targets_empty() if "masking" in mode else False
+                            )
+                    attempt += 1
 
-                # skip completely empty batch item or when all targets are empty -> no grad
-                if not_valid:
-                    logger.warning(f"Skipping empty batch with idx={idx}.")
-                else:
-                    break
+                    # skip completely empty batch item or when all targets are empty -> no grad
+                    if not_valid:
+                        logger.warning(f"Skipping empty batch with idx={idx}.")
+                    else:
+                        break
 
             yield batch
 
