@@ -6,6 +6,7 @@ from weathergen.utils.performance import (
     InferencePhaseProfiler,
     LoaderPhaseProfiler,
     NvtxAnnotator,
+    OutputWriterProfiler,
 )
 
 
@@ -64,6 +65,95 @@ def test_inference_phase_profiler_balances_nvtx_on_error(monkeypatch):
         pass
 
     assert calls == ["inference.forward.batch_1", "pop"]
+
+
+def test_inference_phase_profiler_persists_each_completed_phase(tmp_path, monkeypatch):
+    timestamps = iter([1_000, 2_000, 3_000, 4_000, 5_000])
+    monkeypatch.setattr(performance.time, "perf_counter_ns", lambda: next(timestamps))
+    output_path = tmp_path / "inference.json"
+    profiler = InferencePhaseProfiler(output_path, 0, 4, "example", False)
+
+    with profiler.phase("first", batch_idx=0):
+        pass
+    first_payload = json.loads(output_path.read_text(encoding="utf-8"))
+    with profiler.phase("second", batch_idx=0):
+        pass
+
+    assert [phase["name"] for phase in first_payload["phases"]] == ["first"]
+    assert [
+        phase["name"] for phase in json.loads(output_path.read_text(encoding="utf-8"))["phases"]
+    ] == ["first", "second"]
+
+
+def test_output_writer_profiler_writes_incremental_counters(tmp_path, monkeypatch):
+    timestamps = iter([10, 20])
+    cpu_timestamps = iter([100, 160])
+    io_snapshots = iter(
+        [
+            {"wchar": 1_000, "write_bytes": 400, "syscw": 2},
+            {"wchar": 1_300, "write_bytes": 900, "syscw": 5},
+        ]
+    )
+    monkeypatch.setattr(performance.time, "perf_counter_ns", lambda: next(timestamps))
+    monkeypatch.setattr(performance.time, "process_time_ns", lambda: next(cpu_timestamps))
+    monkeypatch.setattr(performance, "_read_process_io", lambda: next(io_snapshots))
+    monkeypatch.setattr(performance.os, "getpid", lambda: 4321)
+    output_path = tmp_path / "writer.jsonl"
+    profiler = OutputWriterProfiler(
+        enabled=True,
+        output_path=output_path,
+        rank=2,
+        world_size=4,
+        run_id="example",
+        nvtx_annotate=False,
+        cgroup_memory=False,
+    )
+    metadata = {"logical_bytes": 12}
+
+    with profiler.child(batch_idx=3).range("array_create", metadata):
+        metadata["store_size_after_bytes"] = 7
+    profiler.close()
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert record["rank"] == 2
+    assert record["pid"] == 4321
+    assert record["name"] == "array_create"
+    assert record["completed"] is True
+    assert record["context"] == {"batch_idx": 3}
+    assert record["metadata"] == {"logical_bytes": 12, "store_size_after_bytes": 7}
+    assert record["duration_ns"] == 10
+    assert record["process_cpu_duration_ns"] == 60
+    assert record["process_io_delta"] == {"wchar": 300, "write_bytes": 500, "syscw": 3}
+
+
+def test_output_writer_profiler_records_range_on_error(tmp_path, monkeypatch):
+    timestamps = iter([10, 20])
+    cpu_timestamps = iter([100, 110])
+    monkeypatch.setattr(performance.time, "perf_counter_ns", lambda: next(timestamps))
+    monkeypatch.setattr(performance.time, "process_time_ns", lambda: next(cpu_timestamps))
+    monkeypatch.setattr(performance, "_read_process_io", lambda: {})
+    output_path = tmp_path / "writer.jsonl"
+    profiler = OutputWriterProfiler(True, output_path, 0, 1, "example", False, cgroup_memory=False)
+
+    try:
+        with profiler.range("store_close"):
+            raise RuntimeError("expected")
+    except RuntimeError:
+        pass
+    profiler.close()
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert record["name"] == "store_close"
+    assert record["completed"] is False
+
+
+def test_output_writer_profiler_disabled_is_silent(tmp_path):
+    profiler = OutputWriterProfiler(False, None, 0, 1, "example", False)
+
+    with profiler.range("array_create"):
+        pass
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_nvtx_annotator_nests_prefixes(monkeypatch):

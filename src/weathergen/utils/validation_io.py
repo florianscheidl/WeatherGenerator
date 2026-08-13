@@ -20,6 +20,7 @@ import weathergen.common.io as io
 from weathergen.common.io import TimeRange, zarrio_writer
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.engines import LatentState
+from weathergen.utils.performance import OutputWriterProfiler
 
 _logger = logging.getLogger(__name__)
 
@@ -204,6 +205,7 @@ def write_output(
     model_output,
     target_aux_out,
     phase_context=contextlib.nullcontext,
+    writer_profiler: OutputWriterProfiler | None = None,
 ):
     """Prepare validation output on the host, then write it to the configured Zarr store."""
     with phase_context("output_prepare_d2h"):
@@ -222,20 +224,61 @@ def write_output(
         return
 
     data, store_path = prepared
+    profiler = (
+        writer_profiler.child(batch_idx=batch_idx, store_path=str(store_path))
+        if writer_profiler is not None
+        else None
+    )
+    profile_context = profiler.range if profiler is not None else None
+    batch_metadata = {
+        "batch_idx": batch_idx,
+        "store_path": str(store_path),
+        "store_size_before_bytes": store_path.stat().st_size if store_path.exists() else 0,
+    }
     with phase_context("output_zarr_write"):
-        with zarrio_writer(store_path) as zio:
-            for subset in data.items():
-                zio.write_zarr(subset)
-            # Write latent data directly to zarr store without using OutputItem validation
-            if data.latents:
-                _write_latent_data_to_zarr(
-                    zio,
-                    data,
-                    cf,
-                    batch,
-                    batch_idx,
-                    batch_size,
-                )
+        if profiler is None:
+            with zarrio_writer(store_path) as zio:
+                for subset in data.items():
+                    zio.write_zarr(subset)
+                if data.latents:
+                    _write_latent_data_to_zarr(
+                        zio,
+                        data,
+                        cf,
+                        batch,
+                        batch_idx,
+                        batch_size,
+                    )
+            return
+
+        batch_range = profiler.range("batch_write", batch_metadata, capture_cgroup=True)
+        with batch_range:
+            with zarrio_writer(store_path, profile_context=profile_context) as zio:
+                for key in data.item_keys():
+                    item_metadata = {
+                        "sample": key.sample,
+                        "stream": key.stream,
+                        "forecast_step": key.forecast_step,
+                    }
+                    item_range = profiler.range("item_extract", item_metadata)
+                    with item_range:
+                        subset = data.extract(key)
+                    zio.write_zarr(subset)
+                # Write latent data directly to zarr store without using OutputItem validation
+                if data.latents:
+                    latent_range = profiler.range("latent_write")
+                    with latent_range:
+                        _write_latent_data_to_zarr(
+                            zio,
+                            data,
+                            cf,
+                            batch,
+                            batch_idx,
+                            batch_size,
+                        )
+            batch_metadata["store_size_after_bytes"] = (
+                store_path.stat().st_size if store_path.exists() else 0
+            )
 
 
 def _write_latent_data_to_zarr(zio, data, cf, batch, batch_idx, batch_size):

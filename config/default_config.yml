@@ -100,6 +100,14 @@ streams: ???
 # type of zarr_store
 zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 
+# Diagnostic inference profiling; disabled by default.
+profiling:
+  nvtx_annotate: False
+  inference_phase_timing: False
+  loader_phase_timing: False
+  output_writer_timing: False
+  output_writer_cgroup_memory: True
+
 general:
 
   # mutable parameters

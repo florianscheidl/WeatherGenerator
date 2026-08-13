@@ -424,6 +424,7 @@ class InferencePhaseProfiler:
                         "duration_s": (end_ns - start_ns) / 1e9,
                     }
                 )
+                self.write()
 
     def write(self) -> None:
         """Atomically write this rank's accumulated timing records."""
@@ -433,6 +434,237 @@ class InferencePhaseProfiler:
         temporary_path = self.output_path.with_suffix(f"{self.output_path.suffix}.tmp")
         temporary_path.write_text(json.dumps(self.payload, indent=2) + "\n", encoding="utf-8")
         temporary_path.replace(self.output_path)
+
+
+def _read_key_value_file(path: Path) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, value = line.split(maxsplit=1)
+        values[key] = int(value)
+    return values
+
+
+def _read_process_io(path: Path = Path("/proc/self/io")) -> dict[str, int]:
+    """Read Linux per-process I/O accounting counters."""
+    return _read_key_value_file(path)
+
+
+def _resolve_cgroup_v2_path(
+    proc_cgroup_path: Path = Path("/proc/self/cgroup"),
+    cgroup_mount: Path = Path("/sys/fs/cgroup"),
+) -> Path:
+    """Resolve the cgroup-v2 directory visible to the current process."""
+    for line in proc_cgroup_path.read_text(encoding="utf-8").splitlines():
+        hierarchy_id, controllers, relative_path = line.split(":", maxsplit=2)
+        if hierarchy_id == "0" and controllers == "":
+            path = cgroup_mount / relative_path.lstrip("/")
+            if (path / "memory.current").is_file():
+                return path
+            if relative_path == "/" and (cgroup_mount / "memory.current").is_file():
+                return cgroup_mount
+            raise RuntimeError(f"Cannot read cgroup-v2 memory metrics from {path}")
+    raise RuntimeError("The current process does not expose a cgroup-v2 hierarchy")
+
+
+def _read_cgroup_memory(path: Path) -> dict[str, int]:
+    memory_stat = _read_key_value_file(path / "memory.stat")
+    fields = ("anon", "file", "shmem", "file_dirty", "file_writeback")
+    values = {field: memory_stat[field] for field in fields if field in memory_stat}
+    values["current"] = int((path / "memory.current").read_text(encoding="utf-8").strip())
+    peak_path = path / "memory.peak"
+    if peak_path.is_file():
+        values["peak"] = int(peak_path.read_text(encoding="utf-8").strip())
+    return values
+
+
+def _counter_delta(start: dict[str, int], end: dict[str, int]) -> dict[str, int]:
+    return {key: end[key] - start[key] for key in start.keys() & end.keys()}
+
+
+class OutputWriterProfiler:
+    """Incrementally record nested inference-output writer operations.
+
+    Each completed range is flushed as one JSONL record. Process CPU and Linux process-I/O
+    counters are captured for every range; cgroup memory snapshots are limited to explicitly
+    requested coarse ranges to avoid perturbing each small metadata operation.
+    """
+
+    def __init__(
+        self,
+        enabled: bool,
+        output_path: Path | None,
+        rank: int,
+        world_size: int,
+        run_id: str,
+        nvtx_annotate: bool,
+        context: dict[str, Any] | None = None,
+        *,
+        cgroup_memory: bool = True,
+        _root: "OutputWriterProfiler | None" = None,
+    ) -> None:
+        if enabled and output_path is None:
+            raise ValueError("output writer timing requires an output path")
+        self.enabled = enabled
+        self.output_path = output_path
+        self.rank = rank
+        self.world_size = world_size
+        self.run_id = run_id
+        self.nvtx_annotate = nvtx_annotate
+        self.context = dict(context or {})
+        self._root = _root or self
+        if _root is None:
+            self._file: TextIO | None = None
+            self._write_failed = False
+            self._cgroup_path: Path | None = None
+            if enabled and cgroup_memory:
+                try:
+                    self._cgroup_path = _resolve_cgroup_v2_path()
+                except (OSError, RuntimeError, ValueError):
+                    logger.warning("Cgroup-v2 writer snapshots are unavailable", exc_info=True)
+
+    def child(self, **context: Any) -> "OutputWriterProfiler":
+        """Return a profiler carrying additional immutable record context."""
+        return OutputWriterProfiler(
+            enabled=self.enabled,
+            output_path=self.output_path,
+            rank=self.rank,
+            world_size=self.world_size,
+            run_id=self.run_id,
+            nvtx_annotate=self.nvtx_annotate,
+            context={**self.context, **context},
+            cgroup_memory=False,
+            _root=self._root,
+        )
+
+    @contextmanager
+    def range(
+        self,
+        name: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        capture_cgroup: bool = False,
+    ):
+        """Measure one writer operation without synchronizing CUDA."""
+        if not self.enabled:
+            yield
+            return
+
+        range_name = f"output_writer.{name}"
+        if self.nvtx_annotate:
+            torch.cuda.nvtx.range_push(range_name)
+        record_metadata = metadata if metadata is not None else {}
+        start_ns = time.perf_counter_ns()
+        process_cpu_start_ns = time.process_time_ns()
+        process_io_start = self._optional_process_io()
+        cgroup_start = self._optional_cgroup_memory() if capture_cgroup else None
+        completed = False
+        try:
+            yield
+            completed = True
+        finally:
+            end_ns = time.perf_counter_ns()
+            process_cpu_end_ns = time.process_time_ns()
+            process_io_end = self._optional_process_io()
+            cgroup_end = self._optional_cgroup_memory() if capture_cgroup else None
+            if self.nvtx_annotate:
+                torch.cuda.nvtx.range_pop()
+            self._write(
+                name=name,
+                metadata=record_metadata,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                process_cpu_start_ns=process_cpu_start_ns,
+                process_cpu_end_ns=process_cpu_end_ns,
+                process_io_start=process_io_start,
+                process_io_end=process_io_end,
+                cgroup_start=cgroup_start,
+                cgroup_end=cgroup_end,
+                completed=completed,
+            )
+
+    def close(self) -> None:
+        """Close the incremental JSONL file if this profiler opened it."""
+        root = self._root
+        if root._file is not None:
+            try:
+                root._file.close()
+            except OSError:
+                logger.exception("Failed to close output writer timing file")
+            root._file = None
+
+    def _optional_process_io(self) -> dict[str, int] | None:
+        try:
+            return _read_process_io()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _optional_cgroup_memory(self) -> dict[str, int] | None:
+        cgroup_path = self._root._cgroup_path
+        if cgroup_path is None:
+            return None
+        try:
+            return _read_cgroup_memory(cgroup_path)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _get_file(self) -> TextIO:
+        root = self._root
+        if root._file is None:
+            assert self.output_path is not None
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            root._file = self.output_path.open("a", encoding="utf-8", buffering=1)
+        return root._file
+
+    def _write(
+        self,
+        *,
+        name: str,
+        metadata: dict[str, Any],
+        start_ns: int,
+        end_ns: int,
+        process_cpu_start_ns: int,
+        process_cpu_end_ns: int,
+        process_io_start: dict[str, int] | None,
+        process_io_end: dict[str, int] | None,
+        cgroup_start: dict[str, int] | None,
+        cgroup_end: dict[str, int] | None,
+        completed: bool,
+    ) -> None:
+        root = self._root
+        if root._write_failed:
+            return
+        record: dict[str, Any] = {
+            "schema_version": 1,
+            "clock": "time.perf_counter_ns",
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "pid": os.getpid(),
+            "run_id": self.run_id,
+            "name": name,
+            "completed": completed,
+            "context": self.context,
+            "metadata": metadata,
+            "start_ns": start_ns,
+            "end_ns": end_ns,
+            "duration_ns": end_ns - start_ns,
+            "process_cpu_start_ns": process_cpu_start_ns,
+            "process_cpu_end_ns": process_cpu_end_ns,
+            "process_cpu_duration_ns": process_cpu_end_ns - process_cpu_start_ns,
+        }
+        if process_io_start is not None and process_io_end is not None:
+            record["process_io_start"] = process_io_start
+            record["process_io_end"] = process_io_end
+            record["process_io_delta"] = _counter_delta(process_io_start, process_io_end)
+        if cgroup_start is not None and cgroup_end is not None:
+            record["cgroup_memory_start"] = cgroup_start
+            record["cgroup_memory_end"] = cgroup_end
+        try:
+            output = self._get_file()
+            output.write(json.dumps(record, separators=(",", ":")) + "\n")
+            output.flush()
+        except (OSError, TypeError, ValueError):
+            logger.exception("Disabling output writer timing after a write failure")
+            root._write_failed = True
 
 
 def _nvtx_push(name: str):

@@ -51,6 +51,7 @@ from weathergen.utils.distributed import is_root
 from weathergen.utils.performance import (
     InferencePhaseProfiler,
     NullThroughputTracker,
+    OutputWriterProfiler,
     ThroughputTracker,
     nvtx_range,
 )
@@ -96,6 +97,7 @@ class Trainer(TrainerBase):
         self.t_training_start: float = 0
         self.training_loop_annotation_context = contextlib.nullcontext
         self.inference_phase_profiler: InferencePhaseProfiler | None = None
+        self.output_writer_profiler: OutputWriterProfiler | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -246,6 +248,25 @@ class Trainer(TrainerBase):
                 "effective_num_workers": loader_num_workers,
                 "samples_per_mini_epoch": self.test_cfg.samples_per_mini_epoch,
             },
+        )
+        writer_timing_enabled = profiling_cfg.get("output_writer_timing", False)
+        writer_timing_path = (
+            config.get_path_run(cf) / f"output_writer_timing_rank{cf.rank:04d}.jsonl"
+            if writer_timing_enabled
+            else None
+        )
+        self.output_writer_profiler = (
+            OutputWriterProfiler(
+                enabled=True,
+                output_path=writer_timing_path,
+                rank=cf.rank,
+                world_size=cf.world_size,
+                run_id=cf.general.run_id,
+                nvtx_annotate=profiling_cfg.get("nvtx_annotate", False),
+                cgroup_memory=profiling_cfg.get("output_writer_cgroup_memory", True),
+            )
+            if writer_timing_enabled
+            else None
         )
 
         self.model, self.model_params = init_model_and_shard(
@@ -690,6 +711,7 @@ class Trainer(TrainerBase):
                                 preds,
                                 targets_and_auxs,
                                 phase_context=lambda name, batch_idx=bidx: phase(name, batch_idx),
+                                writer_profiler=self.output_writer_profiler,
                             )
 
                         pbar.update(batch_size)
@@ -708,6 +730,8 @@ class Trainer(TrainerBase):
         finally:
             if profiler is not None:
                 profiler.write()
+            if self.output_writer_profiler is not None:
+                self.output_writer_profiler.close()
 
     def _get_full_model_state_dict(self):
         maybe_sharded_sd = (

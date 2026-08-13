@@ -16,6 +16,7 @@ import pathlib
 import timeit
 import typing
 import warnings
+from contextlib import AbstractContextManager, nullcontext
 
 import dask.array as da
 import numpy as np
@@ -34,11 +35,19 @@ SCALE_FACTOR = 4  # scaling for the other dimensions
 type DType = np.float32
 type NPDT64 = datetime64
 type ArrayType = zarr.Array | np.NDArray[DType]
+type ProfileContext = typing.Callable[[str, dict[str, typing.Any]], AbstractContextManager[None]]
 
 # pseudo-stream name for latent outputs
 LATENT_STREAM = "latent"
 
 _logger = logging.getLogger(__name__)
+
+
+def _null_profile_context(
+    name: str, metadata: dict[str, typing.Any]
+) -> AbstractContextManager[None]:
+    del name, metadata
+    return nullcontext()
 
 
 def is_ndarray(obj: typing.Any) -> bool:
@@ -372,11 +381,18 @@ class OutputItem:
 class ZarrIO:
     """Manage zarr storage hierarchy."""
 
-    def __init__(self, store_path: pathlib.Path, read_only: bool):
+    def __init__(
+        self,
+        store_path: pathlib.Path,
+        read_only: bool,
+        profile_context: ProfileContext | None = None,
+    ):
         self._store: LocalStore | ZipStore | None = None
         self._store_path = store_path
         self.data_root: zarr.Group | None = None
         self.read_only = read_only
+        self.profiling_enabled = profile_context is not None
+        self.profile_context = profile_context or _null_profile_context
 
     @property
     def _mode(self):
@@ -385,10 +401,13 @@ class ZarrIO:
         # mode = "a" required for fix that removes ZarrIO dependency in trainer.py
 
     def __enter__(self) -> typing.Self:
-        # Capture warnings emitted during store creation/open
-        with warnings.catch_warnings(record=True) as caught:
-            self._store = LocalStore(self._store_path)
-            self.data_root = zarr.group(store=self._store)
+        metadata = self._store_metadata()
+        with self.profile_context("store_open", metadata):
+            # Capture warnings emitted during store creation/open
+            with warnings.catch_warnings(record=True) as caught:
+                self._store = LocalStore(self._store_path)
+                self.data_root = zarr.group(store=self._store)
+            metadata.update(self._store_metadata("after"))
         # Warns user of future deprecation only if a ZarrUserWarning was raised
         # Support for existing Zarr2 stores will be removed in future versions
         if any(issubclass(w.category, ZarrUserWarning) for w in caught):
@@ -409,14 +428,36 @@ class ZarrIO:
 
     def __exit__(self, exc_type, exc_value, exc_tb):
         if self._store is not None:
-            self._store.close()
+            metadata = self._store_metadata()
+            with self.profile_context("store_close", metadata):
+                self._store.close()
+                metadata.update(self._store_metadata("after"))
+
+    def _store_metadata(self, suffix: str = "before") -> dict[str, typing.Any]:
+        if not self.profiling_enabled:
+            return {}
+        metadata: dict[str, typing.Any] = {
+            "store_path": str(self._store_path),
+            "store_type": self._store_path.suffix.removeprefix("."),
+        }
+        try:
+            metadata[f"store_size_{suffix}_bytes"] = self._store_path.stat().st_size
+        except FileNotFoundError:
+            metadata[f"store_size_{suffix}_bytes"] = 0
+        return metadata
 
     def write_zarr(self, item: OutputItem):
         """Write one output item to the zarr store."""
-        group = self._get_group(item.key, create=True)
-        for dataset in item.datasets:
-            if dataset is not None:
-                self._write_dataset(group, dataset)
+        item_metadata = {
+            "sample": item.key.sample,
+            "stream": item.key.stream,
+            "forecast_step": item.key.forecast_step,
+        }
+        with self.profile_context("item_write", item_metadata):
+            group = self._get_group(item.key, create=True, metadata=item_metadata)
+            for dataset in item.datasets:
+                if dataset is not None:
+                    self._write_dataset(group, dataset, item_metadata)
 
     def get_data(self, sample: int, stream: str, forecast_step: int) -> OutputItem:
         """Get datasets for the output item matching the arguments."""
@@ -439,11 +480,20 @@ class ZarrIO:
             for name, dataset in group.groups()
         }
 
-    def _get_group(self, item: ItemKey, create: bool) -> zarr.Array | zarr.Group:
+    def _get_group(
+        self,
+        item: ItemKey,
+        create: bool,
+        metadata: dict[str, typing.Any] | None = None,
+    ) -> zarr.Array | zarr.Group:
         assert self.data_root is not None, "ZarrIO must be opened before accessing data."
         if create:
-            assert self.data_root.get(item.path) is None, "Group already exists, stop overwriting"
-            group = self.data_root.create_group(item.path)
+            group_metadata = {"group_path": item.path, **(metadata or {})}
+            with self.profile_context("item_group_create", group_metadata):
+                assert self.data_root.get(item.path) is None, (
+                    "Group already exists, stop overwriting"
+                )
+                group = self.data_root.create_group(item.path)
         else:
             try:
                 #####WARNING IS APPEARING HERE TOO#####
@@ -456,16 +506,39 @@ class ZarrIO:
         assert group is not None, f"Zarr group: {item.path} does not exist."
         return group
 
-    def _write_dataset(self, item_group: zarr.Group, dataset: OutputDataset):
-        assert dataset.name not in list(item_group.keys()), "No duplication allowed"
-        dataset_group = item_group.create_group(dataset.name, attributes=dataset.metadata)
-        self._write_arrays(dataset_group, dataset)
+    def _write_dataset(
+        self,
+        item_group: zarr.Group,
+        dataset: OutputDataset,
+        item_metadata: dict[str, typing.Any],
+    ):
+        metadata = {**item_metadata, "dataset": dataset.name}
+        with self.profile_context("dataset_group_create", metadata):
+            assert dataset.name not in list(item_group.keys()), "No duplication allowed"
+            dataset_group = item_group.create_group(dataset.name, attributes=dataset.metadata)
+        self._write_arrays(dataset_group, dataset, item_metadata)
 
-    def _write_arrays(self, dataset_group: zarr.Group, dataset: OutputDataset):
+    def _write_arrays(
+        self,
+        dataset_group: zarr.Group,
+        dataset: OutputDataset,
+        item_metadata: dict[str, typing.Any],
+    ):
         for array_name, array in dataset.arrays.items():  # suffix is eg. data or coords
-            self._create_dataset(dataset_group, array_name, array)
+            self._create_dataset(
+                dataset_group,
+                array_name,
+                array,
+                {**item_metadata, "dataset": dataset.name},
+            )
 
-    def _create_dataset(self, group: zarr.Group, name: str, array: NDArray):
+    def _create_dataset(
+        self,
+        group: zarr.Group,
+        name: str,
+        array: NDArray,
+        dataset_metadata: dict[str, typing.Any],
+    ):
         assert is_ndarray(array), f"Expected ndarray but got: {type(array)}"
 
         if array.size == 0:  # sometimes for geoinfo
@@ -476,14 +549,32 @@ class ZarrIO:
             f"writing array: {name} with shape: {array.shape},chunks: {chunks}"
             + f"into group: {group}."
         )
+        shards = (
+            _get_shards(SHARD_N_SAMPLES, chunks) if SHARDING_ENABLED and chunks != "auto" else None
+        )
+        metadata = (
+            {
+                **dataset_metadata,
+                "array": name,
+                "shape": list(array.shape),
+                "dtype": str(array.dtype),
+                "logical_bytes": array.nbytes,
+                "chunks": chunks,
+                "shards": shards,
+                **self._store_metadata(),
+            }
+            if self.profiling_enabled
+            else {}
+        )
         start_time = timeit.default_timer()
-        if SHARDING_ENABLED and chunks != "auto":
-            shards = _get_shards(SHARD_N_SAMPLES, chunks)
-            group.create_array(name, data=array, chunks=chunks, shards=shards)
-            _logger.debug(f"sharding enabled with shards: {shards} and chunks: {chunks}")
-        else:
-            group.create_array(name, data=array, chunks=chunks)
-            _logger.debug(f"sharding disabled, writing with chunks: {chunks}")
+        with self.profile_context("array_create", metadata):
+            if shards is not None:
+                group.create_array(name, data=array, chunks=chunks, shards=shards)
+                _logger.debug(f"sharding enabled with shards: {shards} and chunks: {chunks}")
+            else:
+                group.create_array(name, data=array, chunks=chunks)
+                _logger.debug(f"sharding disabled, writing with chunks: {chunks}")
+            metadata.update(self._store_metadata("after"))
         elapsed = timeit.default_timer() - start_time
         _logger.debug(f"writing array: {name} took {elapsed:.2f}")
 
@@ -533,12 +624,15 @@ class ZarrIO:
 
 class ZipZarrIO(ZarrIO):
     def __enter__(self) -> typing.Self:
-        _logger.debug(f"Opening zipstore, read-only: {self.read_only}")
-        self._store = ZipStore(self._store_path, mode=self._mode, read_only=self.read_only)
-        if self.read_only:
-            self.data_root = zarr.open_group(store=self._store, mode=self._mode)
-        else:
-            self.data_root = zarr.group(store=self._store)
+        metadata = self._store_metadata()
+        with self.profile_context("store_open", metadata):
+            _logger.debug(f"Opening zipstore, read-only: {self.read_only}")
+            self._store = ZipStore(self._store_path, mode=self._mode, read_only=self.read_only)
+            if self.read_only:
+                self.data_root = zarr.open_group(store=self._store, mode=self._mode)
+            else:
+                self.data_root = zarr.group(store=self._store)
+            metadata.update(self._store_metadata("after"))
 
         return self
 
@@ -610,10 +704,15 @@ class OutputBatchData:
     def items(self) -> typing.Generator[OutputItem, None, None]:
         """Iterate over possible output items"""
         # TODO: filter for empty items?
-        for s, fo_s, fi_s in itertools.product(
+        for key in self.item_keys():
+            yield self.extract(key)
+
+    def item_keys(self) -> typing.Generator[ItemKey, None, None]:
+        """Iterate over output item keys without extracting their array views."""
+        for sample, forecast_step, stream in itertools.product(
             self.samples, self.forecast_steps, self.streams.keys()
         ):
-            yield self.extract(ItemKey(int(s), int(fo_s), fi_s))
+            yield ItemKey(int(sample), int(forecast_step), stream)
 
     def latent_items(self) -> typing.Generator[OutputItem, None, None]:
         """Additionally yield latent output items if a latent stream name was provided"""
@@ -842,7 +941,10 @@ def zarrio_reader(store_path: pathlib.Path) -> ZarrIO:
     return _get_backend(store_path, read_only=True)
 
 
-def zarrio_writer(store_path: pathlib.Path) -> ZarrIO:
+def zarrio_writer(
+    store_path: pathlib.Path,
+    profile_context: ProfileContext | None = None,
+) -> ZarrIO:
     """
     Get the proper io-writer for a given store.
 
@@ -850,13 +952,17 @@ def zarrio_writer(store_path: pathlib.Path) -> ZarrIO:
         store_path: Full path to the storage location.
     """
 
-    return _get_backend(store_path, read_only=False)
+    return _get_backend(store_path, read_only=False, profile_context=profile_context)
 
 
 _IO_CLASSES: dict[StoreType, type] = {StoreType.ZIP: ZipZarrIO, StoreType.LOCAL: ZarrIO}
 
 
-def _get_backend(store_path: pathlib.Path, read_only: bool) -> ZarrIO:
+def _get_backend(
+    store_path: pathlib.Path,
+    read_only: bool,
+    profile_context: ProfileContext | None = None,
+) -> ZarrIO:
     """Get the proper io backend for a given store."""
     ext = store_path.suffix[1:]
-    return _IO_CLASSES[StoreType(ext)](store_path, read_only)
+    return _IO_CLASSES[StoreType(ext)](store_path, read_only, profile_context)
