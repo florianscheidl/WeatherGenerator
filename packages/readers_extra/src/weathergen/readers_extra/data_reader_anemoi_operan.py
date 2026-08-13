@@ -14,7 +14,7 @@ from typing import override
 import numpy as np
 from anemoi.datasets.data import MissingDateError
 
-from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
+from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi, _read_projected_channels
 from weathergen.datasets.data_reader_base import (
     ReaderData,
     TimeWindowHandler,
@@ -140,25 +140,19 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
         # End is inclusive
         didx_end = t_idxs[-1] + 1
 
-        # extract number of time steps and collapse ensemble dimension
-        # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
-        # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
-        # sampling is required here
         try:
-            data = self.ds[didx_start:didx_end][:, :, 0].astype(np.float32)
+            data, geoinfos = _read_projected_channels(
+                self.ds,
+                didx_start,
+                didx_end,
+                channels_idx,
+                self.geoinfo_idx,
+            )
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
-
-        # coords-first representation and collapse multiple steps
-        data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
-
-        # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
-        # extract channels
-        data = data[:, list(channels_idx)]
 
         # construct lat/lon coords
         latlon = np.concatenate(

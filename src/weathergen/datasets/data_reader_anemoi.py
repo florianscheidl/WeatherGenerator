@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import override
 
@@ -30,6 +31,37 @@ from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
 
 _logger = logging.getLogger(__name__)
+
+
+def _read_projected_channels(
+    ds: Dataset,
+    didx_start: int,
+    didx_end: int,
+    channels_idx: Sequence[int],
+    geoinfo_idx: Sequence[int],
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Read only requested data/geoinfo channels and flatten time and grid rows."""
+
+    data_channels = [int(idx) for idx in channels_idx]
+    geoinfo_channels = [int(idx) for idx in geoinfo_idx]
+    projected_channels = list(dict.fromkeys(data_channels + geoinfo_channels))
+
+    if not projected_channels:
+        num_rows = (didx_end - didx_start) * ds.shape[-1]
+        empty = np.empty((num_rows, 0), dtype=np.float32)
+        return empty, empty.copy()
+
+    # anemoi-datasets expands the channel list into channel-specific Zarr reads. Selecting
+    # here avoids materializing every dataset variable before retaining the configured subset.
+    projected = ds[didx_start:didx_end, projected_channels, 0, :].astype(np.float32)
+    projected = projected.transpose([0, 2, 1]).reshape(
+        (projected.shape[0] * projected.shape[2], -1)
+    )
+
+    positions = {channel: position for position, channel in enumerate(projected_channels)}
+    data = projected[:, [positions[channel] for channel in data_channels]]
+    geoinfos = projected[:, [positions[channel] for channel in geoinfo_channels]]
+    return data, geoinfos
 
 
 class DataReaderAnemoi(DataReaderTimestep):
@@ -208,25 +240,19 @@ class DataReaderAnemoi(DataReaderTimestep):
         # End is inclusive
         didx_end = t_idxs[-1] + 1
 
-        # extract number of time steps and collapse ensemble dimension
-        # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
-        # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
-        # sampling is required here
         try:
-            data = self.ds[didx_start:didx_end][:, :, 0].astype(np.float32)
+            data, geoinfos = _read_projected_channels(
+                self.ds,
+                didx_start,
+                didx_end,
+                channels_idx,
+                self.geoinfo_idx,
+            )
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
-
-        # coords-first representation and collapse multiple steps
-        data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
-
-        # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
-        # extract channels
-        data = data[:, list(channels_idx)]
 
         # construct lat/lon coords
         latlon = np.concatenate(
