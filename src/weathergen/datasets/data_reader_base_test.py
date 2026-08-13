@@ -7,7 +7,55 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from weathergen.datasets.data_reader_base import DataReaderBase
+from weathergen.datasets.data_reader_base import DataReaderBase, ReaderData, point_selection_indices
+
+
+def _reader_data(num_rows: int) -> ReaderData:
+    values = np.arange(num_rows, dtype=np.float32)
+    return ReaderData(
+        coords=np.column_stack((values, values + 1)),
+        geoinfos=values[:, None],
+        data=np.column_stack((values + 2, values + 3)),
+        datetimes=np.arange(num_rows).astype("timedelta64[h]") + np.datetime64("2020-01-01"),
+    )
+
+
+@pytest.mark.parametrize(("shuffle", "num_subset"), [(False, 4), (True, 4), (True, -1)])
+def test_point_selection_indices_match_reader_data_shuffle(shuffle: bool, num_subset: int) -> None:
+    seed = 17
+    expected = _reader_data(8).shuffle(np.random.default_rng(seed), shuffle, num_subset)
+    original = _reader_data(8)
+
+    indices = point_selection_indices(
+        original.len(), np.random.default_rng(seed), shuffle, num_subset
+    )
+
+    assert indices is not None
+    np.testing.assert_array_equal(original.coords[indices], expected.coords)
+    np.testing.assert_array_equal(original.geoinfos[indices], expected.geoinfos)
+    np.testing.assert_array_equal(original.data[indices], expected.data)
+    np.testing.assert_array_equal(original.datetimes[indices], expected.datetimes)
+
+
+def test_point_selection_noop_does_not_advance_rng() -> None:
+    rng = np.random.default_rng(23)
+    untouched_rng = np.random.default_rng(23)
+
+    indices = point_selection_indices(8, rng, False, -1)
+
+    assert indices is None
+    assert rng.integers(1_000_000) == untouched_rng.integers(1_000_000)
+
+
+def test_point_selection_equal_cap_preserves_legacy_random_draw() -> None:
+    rng = np.random.default_rng(29)
+    legacy_rng = np.random.default_rng(29)
+
+    indices = point_selection_indices(8, rng, False, 8)
+    legacy_indices = np.sort(legacy_rng.choice(8, 8, replace=False))
+
+    np.testing.assert_array_equal(indices, legacy_indices)
+    assert rng.integers(1_000_000) == legacy_rng.integers(1_000_000)
 
 
 def _normalize_channel_loop(

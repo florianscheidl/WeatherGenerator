@@ -59,6 +59,9 @@ def dt2cal(dt):
 class DataReaderAnemoiOperan(DataReaderAnemoi):
     "Wrapper for Anemoi datasets"
 
+    # This reader changes temporal selection in its own _get implementation.
+    supports_early_target_sampling = False
+
     def __init__(
         self,
         tw_handler: TimeWindowHandler,

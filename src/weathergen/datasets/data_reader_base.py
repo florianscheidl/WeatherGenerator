@@ -222,24 +222,10 @@ class ReaderData:
         self
         """
 
-        # nothing to be done
-        if num_subset < 0 and shuffle is False:
-            return self
-
         num_datapoints = self.coords.shape[0]
-        if (num_datapoints == 0) or (num_datapoints < num_subset and shuffle is False):
+        idxs_subset = point_selection_indices(num_datapoints, rng, shuffle, num_subset)
+        if idxs_subset is None:
             return self
-
-        # only shuffling
-        if num_subset == -1 and shuffle is True:
-            num_subset = num_datapoints
-
-        # ensure num_subset <= num_datapoints
-        num_subset = min(num_subset, num_datapoints)
-
-        idxs_subset = rng.choice(num_datapoints, num_subset, replace=False)
-        if shuffle is False:
-            idxs_subset = np.sort(idxs_subset)
 
         self.coords = self.coords[idxs_subset]
         self.geoinfos = self.geoinfos[idxs_subset]
@@ -247,6 +233,28 @@ class ReaderData:
         self.datetimes = self.datetimes[idxs_subset]
 
         return self
+
+
+def point_selection_indices(
+    num_datapoints: int,
+    rng: np.random.Generator,
+    shuffle: bool,
+    num_subset: int,
+) -> NDArray[np.int64] | None:
+    """Return the row selection used by ``ReaderData.shuffle``, or ``None`` for no-op."""
+
+    if num_subset < 0 and shuffle is False:
+        return None
+    if num_datapoints == 0 or (num_datapoints < num_subset and shuffle is False):
+        return None
+    if num_subset == -1 and shuffle is True:
+        num_subset = num_datapoints
+
+    num_subset = min(num_subset, num_datapoints)
+    idxs_subset = rng.choice(num_datapoints, num_subset, replace=False)
+    if shuffle is False:
+        idxs_subset = np.sort(idxs_subset)
+    return idxs_subset
 
 
 def check_reader_data(rdata: ReaderData, dtr: DTRange) -> None:
@@ -301,6 +309,8 @@ class DataReaderBase(metaclass=ABCMeta):
     latitude in degrees from -90 (South) to +90 (North),
     and longitude in degrees from -180 (West) to +180 (East).
     """
+
+    supports_early_target_sampling = False
 
     # The fields that need to be set by the child classes
     source_channels: list[str] = abstract_attribute()
@@ -406,6 +416,17 @@ class DataReaderBase(metaclass=ABCMeta):
         rdata = self._get(idx, self.target_idx)
 
         return rdata
+
+    def get_target_sampled(
+        self,
+        idx: TIndex,
+        rng: np.random.Generator,
+        shuffle: bool,
+        num_subset: int,
+    ) -> ReaderData:
+        """Read a target after selecting rows at the reader boundary when supported."""
+
+        raise NotImplementedError(f"{self.__class__.__name__} does not support early sampling")
 
     @abstractmethod
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:

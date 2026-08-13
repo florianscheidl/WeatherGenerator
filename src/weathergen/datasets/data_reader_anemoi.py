@@ -25,6 +25,7 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
     check_reader_data,
+    point_selection_indices,
 )
 from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
@@ -34,6 +35,8 @@ _logger = logging.getLogger(__name__)
 
 class DataReaderAnemoi(DataReaderTimestep):
     "Wrapper for Anemoi datasets"
+
+    supports_early_target_sampling = True
 
     def __init__(
         self,
@@ -181,6 +184,16 @@ class DataReaderAnemoi(DataReaderTimestep):
 
     @override
     def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+        return self._get_with_sampling(idx, channels_idx, None, False, -1)
+
+    def _get_with_sampling(
+        self,
+        idx: TIndex,
+        channels_idx: list[int],
+        rng: np.random.Generator | None = None,
+        shuffle: bool = False,
+        num_subset: int = -1,
+    ) -> ReaderData:
         """
         Get data for window (for either source or target, through public interface)
 
@@ -223,6 +236,16 @@ class DataReaderAnemoi(DataReaderTimestep):
         # coords-first representation and collapse multiple steps
         data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
 
+        # Preserve the efficient whole-state Zarr read above, then reduce the spatial rows before
+        # materializing channel, geoinfo, coordinate, and datetime arrays for ReaderData.
+        row_indices = (
+            point_selection_indices(len(data), rng, shuffle, num_subset)
+            if rng is not None
+            else None
+        )
+        if row_indices is not None:
+            data = data[row_indices]
+
         # extract geoinfo channels (can be time-varying, so read from dataset)
         geoinfos = data[:, list(self.geoinfo_idx)]
         # extract channels
@@ -236,12 +259,16 @@ class DataReaderAnemoi(DataReaderTimestep):
             ],
             axis=0,
         ).transpose()
-        # repeat latlon len(t_idxs) times
-        coords = np.vstack((latlon,) * len(t_idxs))
-
-        # date time matching #data points of data
-        # Assuming a fixed frequency for the dataset
-        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // len(t_idxs))
+        dates = self.ds.dates[didx_start:didx_end]
+        if row_indices is None:
+            # repeat latlon len(t_idxs) times
+            coords = np.vstack((latlon,) * len(t_idxs))
+            # date time matching #data points of data; assuming a fixed dataset frequency
+            datetimes = np.repeat(dates, len(data) // len(t_idxs))
+        else:
+            grid_size = len(latlon)
+            coords = latlon[row_indices % grid_size]
+            datetimes = dates[row_indices // grid_size]
 
         rd = ReaderData(
             coords=coords,
@@ -252,6 +279,18 @@ class DataReaderAnemoi(DataReaderTimestep):
         check_reader_data(rd, dtr)
 
         return rd
+
+    @override
+    def get_target_sampled(
+        self,
+        idx: TIndex,
+        rng: np.random.Generator,
+        shuffle: bool,
+        num_subset: int,
+    ) -> ReaderData:
+        """Select target rows immediately after the whole-state Anemoi read."""
+
+        return self._get_with_sampling(idx, self.target_idx, rng, shuffle, num_subset)
 
     def select_channels(self, ds0: anemoi_datasets, ch_type: str) -> NDArray[np.int64]:
         """

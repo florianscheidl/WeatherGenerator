@@ -133,12 +133,18 @@ def collect_datasources(
         }
         if len(channel_idxs) == 0:
             continue
+        early_target_sampling = type == "target" and ds.supports_early_target_sampling
+        reader_metadata["early_target_sampling"] = early_target_sampling
         with profiler.range(f"read.{type}.reader_get", reader_metadata):
-            rdata = get_reader_data(idx)
+            if early_target_sampling:
+                rdata = ds.get_target_sampled(idx, rng, shuffle, num_subset)
+            else:
+                rdata = get_reader_data(idx)
             _record_reader_data_stats(reader_metadata, rdata)
         shuffle_metadata = dict(reader_metadata)
         with profiler.range(f"read.{type}.shuffle_subsample", shuffle_metadata):
-            rdata = rdata.shuffle(rng, shuffle, num_subset)
+            if not early_target_sampling:
+                rdata = rdata.shuffle(rng, shuffle, num_subset)
             _record_reader_data_stats(shuffle_metadata, rdata)
         remove_nan_metadata = dict(shuffle_metadata)
         with profiler.range(f"read.{type}.remove_nan_coords", remove_nan_metadata):
