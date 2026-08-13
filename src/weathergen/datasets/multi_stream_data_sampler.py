@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
-from weathergen.common.config import Config
+from weathergen.common.config import Config, get_path_run
 from weathergen.common.io import IOReaderData
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
@@ -35,7 +35,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
 from weathergen.utils.distributed import is_root
-from weathergen.utils.performance import NvtxAnnotator
+from weathergen.utils.performance import LoaderPhaseProfiler
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -50,24 +50,32 @@ FORECAST_DEFAULTS = {
 }
 
 
+def _record_reader_data_stats(metadata: dict, rdata: IOReaderData) -> None:
+    """Add cheap shape/storage accounting to one loader timing record."""
+    metadata["rows"] = len(rdata.data)
+    metadata["bytes"] = sum(
+        array.nbytes for array in (rdata.coords, rdata.geoinfos, rdata.data, rdata.datetimes)
+    )
+
+
 def collect_datasources(
     stream_datasets: list,
     idx: int,
     type: str,
     rng,
-    nvtx: NvtxAnnotator | None = None,
+    profiler: LoaderPhaseProfiler | None = None,
 ) -> IOReaderData:
     """
     Utility function to collect all sources / targets from streams list
 
     rng and num_subset are used to drop data
-    nvtx annotates the reader stages of one window when loader profiling is enabled
+    profiler records the reader stages of one window when loader profiling is enabled
     """
 
-    nvtx = nvtx if nvtx is not None else NvtxAnnotator(False)
+    profiler = profiler if profiler is not None else LoaderPhaseProfiler()
     rdatas = []
 
-    for ds in stream_datasets:
+    for reader_index, ds in enumerate(stream_datasets):
         # number of points to sub-sample
         num_subset = -1
 
@@ -85,18 +93,32 @@ def collect_datasources(
 
         # get source (of potentially multi-step length)
         # kept as separate statements so that each reader stage gets its own NVTX range
-        with nvtx.range(f"read.{type}.reader_get"):
+        channel_idxs = ds.source_idx if type == "source" else ds.target_idx
+        reader_metadata = {
+            "temporal_index": int(idx),
+            "reader": ds.__class__.__name__,
+            "reader_index": reader_index,
+            "selected_channels": len(channel_idxs),
+        }
+        with profiler.range(f"read.{type}.reader_get", reader_metadata):
             rdata = get_reader_data(idx)
-        with nvtx.range(f"read.{type}.shuffle_subsample"):
+            _record_reader_data_stats(reader_metadata, rdata)
+        shuffle_metadata = dict(reader_metadata)
+        with profiler.range(f"read.{type}.shuffle_subsample", shuffle_metadata):
             rdata = rdata.shuffle(rng, shuffle, num_subset)
-        with nvtx.range(f"read.{type}.remove_nan_coords"):
+            _record_reader_data_stats(shuffle_metadata, rdata)
+        remove_nan_metadata = dict(shuffle_metadata)
+        with profiler.range(f"read.{type}.remove_nan_coords", remove_nan_metadata):
             rdata = rdata.remove_nan_coords_and_geoinfos()
-        with nvtx.range(f"read.{type}.normalize"):
+            _record_reader_data_stats(remove_nan_metadata, rdata)
+        normalize_metadata = dict(remove_nan_metadata)
+        with profiler.range(f"read.{type}.normalize", normalize_metadata):
             rdata.data = normalize_channels(rdata.data)
             rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
+            _record_reader_data_stats(normalize_metadata, rdata)
         rdatas += [rdata]
 
-    with nvtx.range(f"read.{type}.combine"):
+    with profiler.range(f"read.{type}.combine"):
         return IOReaderData.combine(rdatas)
 
 
@@ -113,9 +135,18 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         self.mode_cfg = mode_cfg
         self._stage = stage
 
-        # created here so that the worker processes inherit it with their dataset copy
-        self._nvtx = NvtxAnnotator(
-            cf.get("profiling", {}).get("loader_nvtx_annotate", False), "loader."
+        # Created here without opening a file so workers inherit only serializable state.
+        # Each worker lazily opens its own JSONL output after it forks.
+        profiling_cfg = cf.get("profiling", {})
+        loader_timing_enabled = profiling_cfg.get("loader_phase_timing", False)
+        self._loader_profiler = LoaderPhaseProfiler(
+            timing_enabled=loader_timing_enabled,
+            nvtx_enabled=profiling_cfg.get("loader_nvtx_annotate", False),
+            output_dir=get_path_run(cf) if loader_timing_enabled else None,
+            rank=cf.rank,
+            run_id=cf.general.run_id,
+            stage=stage,
+            prefix="loader.",
         )
 
         self.mini_epoch = 0
@@ -411,7 +442,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         num_steps_input: int,
         input_data: list,
         input_tokens: list,
-        nvtx: NvtxAnnotator,
+        nvtx: LoaderPhaseProfiler,
         mask: torch.Tensor | None = None,
     ) -> tuple[StreamData, dict | None]:
         """
@@ -471,7 +502,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_data: list,
         output_tokens: list,
         target_mask,
-        nvtx: NvtxAnnotator,
+        nvtx: LoaderPhaseProfiler,
     ) -> StreamData:
         """
         Generate stream data for output
@@ -532,7 +563,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         output_tokens: list,
         output_mask,
         input_mask,
-        nvtx: NvtxAnnotator,
+        nvtx: LoaderPhaseProfiler,
     ) -> StreamData:
         """
         Return one batch of data
@@ -592,7 +623,12 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         return stream_data
 
     def _get_data_windows(
-        self, base_idx, num_forecast_steps, num_steps_input_max, stream_ds, nvtx: NvtxAnnotator
+        self,
+        base_idx,
+        num_forecast_steps,
+        num_steps_input_max,
+        stream_ds,
+        nvtx: LoaderPhaseProfiler,
     ):
         """
         Collect all data needed for current stream to potentially amortize costs by
@@ -696,7 +732,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         target_cfgs = self.mode_cfg.get("target_input", {})
 
         # get/coordinate masks
-        with self._nvtx.range("masks"):
+        with self._loader_profiler.range("masks"):
             masks_streams, num_source_samples, num_target_samples = self._get_source_target_masks(
                 mode
             )
@@ -726,7 +762,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         for stream_name, stream_data in self.streams_datasets.items():
             stream_info, stream_ds = stream_data.info, stream_data.readers
             (target_masks, source_masks, source_to_target) = masks_streams[stream_name]
-            stream_nvtx = self._nvtx.child(f"stream.{stream_name}.")
+            stream_nvtx = self._loader_profiler.child(f"stream.{stream_name}.")
 
             # max number of input steps
             input_steps = np.array([sc.get("num_steps_input", 1) for _, sc in source_cfgs.items()])
@@ -799,7 +835,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         source_in_steps = input_steps.max().item()
         target_in_steps = np.array([tc.get("num_steps_input", 1) for _, tc in target_cfgs.items()])
         target_in_steps = 1 if len(target_in_steps) == 0 else target_in_steps.max().item()
-        with self._nvtx.range("preprocess_batch"):
+        with self._loader_profiler.range("preprocess_batch"):
             batch = self._preprocess_model_batch(batch, source_in_steps, target_in_steps)
 
         return batch
@@ -811,7 +847,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         Return :
             batch of data
         """
-        with self._nvtx.range("iter_setup"):
+        with self._loader_profiler.range("iter_setup"):
             iter_start, iter_end = self.worker_workset()
             logger.info(f"iter_start={iter_start}, iter_end={iter_end}, len={self.len}")
 
@@ -820,6 +856,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         worker_info = torch.utils.data.get_worker_info()
         worker_id = 0 if worker_info is None else worker_info.id
+        worker_count = 1 if worker_info is None else worker_info.num_workers
 
         # bidx is used to count the #batches that have been emitted
         # idx_raw is used to index into the dataset; the decoupling is needed
@@ -832,7 +869,12 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             # the range closes before the yield so that it does not stay open across the
             # handoff of the completed batch to the parent process
-            with self._nvtx.range(f"w{worker_id}.batch_{i}"):
+            batch_metadata = {
+                "worker_batch": i,
+                "delivery_index": i * worker_count + worker_id,
+                "forecast_steps": int(num_forecast_steps),
+            }
+            with self._loader_profiler.range(f"w{worker_id}.batch_{i}", batch_metadata):
                 # use while loop due to the scattered nature of the data in time and to
                 # ensure batches are not empty
                 attempt = 0
@@ -840,14 +882,18 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     idx: TIndex = perms[idx_raw % perms.shape[0]]
                     idx_raw += 1
 
-                    with self._nvtx.range(f"attempt_{attempt}"):
-                        with self._nvtx.range("get_batch"):
+                    attempt_metadata = {
+                        "attempt": attempt,
+                        "temporal_index": int(idx),
+                    }
+                    with self._loader_profiler.range(f"attempt_{attempt}", attempt_metadata):
+                        with self._loader_profiler.range("get_batch"):
                             batch = self._get_batch(idx, num_forecast_steps)
 
                         # ensure the batch is valid, i.e. not completely empty and no NaN values
                         # student teacher has no classical targets
                         mode = self.mode_cfg.get("training_mode")
-                        with self._nvtx.range("validate_batch"):
+                        with self._loader_profiler.range("validate_batch"):
                             not_valid = batch.sources_empty() or batch.is_nan()
                             not_valid = not_valid or (
                                 batch.targets_empty() if "masking" in mode else False

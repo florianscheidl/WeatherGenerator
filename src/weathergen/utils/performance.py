@@ -11,11 +11,12 @@
 
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import torch
 
@@ -223,6 +224,152 @@ class NvtxAnnotator:
         return nvtx_range(f"{self.prefix}{name}")
 
 
+class _LoaderPhaseWriter:
+    """Process-local JSONL writer shared by child profiler prefixes."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        output_dir: Path | None,
+        rank: int,
+        run_id: str,
+        stage: str,
+    ) -> None:
+        if enabled and output_dir is None:
+            raise ValueError("loader phase timing requires an output directory")
+        self.enabled = enabled
+        self.output_dir = output_dir
+        self.rank = rank
+        self.run_id = run_id
+        self.stage = stage
+        self.stack: list[dict[str, Any]] = []
+        self._file: TextIO | None = None
+        self._pid: int | None = None
+        self._write_failed = False
+
+    def _worker_id(self) -> int | None:
+        worker_info = torch.utils.data.get_worker_info()
+        return None if worker_info is None else worker_info.id
+
+    def _get_file(self) -> tuple[TextIO, int | None, int]:
+        pid = os.getpid()
+        worker_id = self._worker_id()
+        if self._file is not None and self._pid != pid:
+            # Do not retain a file object inherited from a process that happened to write
+            # before the DataLoader forked. Normal multi-worker use opens only after fork.
+            self._file.close()
+            self._file = None
+            self.stack = []
+
+        if self._file is None:
+            assert self.output_dir is not None
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            worker_label = "main" if worker_id is None else f"{worker_id:02d}"
+            output_path = self.output_dir / (
+                f"loader_phase_timing_rank{self.rank:04d}_worker{worker_label}.jsonl"
+            )
+            self._file = output_path.open("a", encoding="utf-8", buffering=1)
+            self._pid = pid
+
+        return self._file, worker_id, pid
+
+    def write(
+        self,
+        name: str,
+        metadata: dict[str, Any],
+        context: list[dict[str, Any]],
+        start_ns: int,
+        end_ns: int,
+    ) -> None:
+        if not self.enabled or self._write_failed:
+            return
+
+        try:
+            output, worker_id, pid = self._get_file()
+            record = {
+                "schema_version": 1,
+                "clock": "time.perf_counter_ns",
+                "rank": self.rank,
+                "worker": worker_id,
+                "pid": pid,
+                "run_id": self.run_id,
+                "stage": self.stage,
+                "name": name,
+                "context": context,
+                "metadata": metadata,
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+                "duration_ns": end_ns - start_ns,
+            }
+            output.write(json.dumps(record, separators=(",", ":")) + "\n")
+            output.flush()
+        except (OSError, TypeError, ValueError):
+            # Diagnostics must never take down a loader worker. Disable subsequent writes
+            # after the first failure so a broken filesystem does not flood the logs.
+            logger.exception("Disabling loader phase timing after a write failure")
+            self._write_failed = True
+
+
+class LoaderPhaseProfiler:
+    """Record nested DataLoader phases without relying on tracing forked workers.
+
+    The object is constructed before DataLoader workers fork. It holds no open file until a
+    worker completes its first range, then writes to a rank/worker-specific JSONL file. Child
+    profilers share a process-local context stack so flat records retain their enclosing batch
+    and retry ranges. Optional NVTX emission preserves the existing timeline annotations.
+    """
+
+    def __init__(
+        self,
+        timing_enabled: bool = False,
+        nvtx_enabled: bool = False,
+        output_dir: Path | None = None,
+        rank: int = 0,
+        run_id: str = "",
+        stage: str = "",
+        prefix: str = "",
+        writer: _LoaderPhaseWriter | None = None,
+    ) -> None:
+        self.timing_enabled = timing_enabled
+        self.nvtx_enabled = nvtx_enabled
+        self.prefix = prefix
+        self._writer = writer or _LoaderPhaseWriter(timing_enabled, output_dir, rank, run_id, stage)
+
+    def child(self, prefix: str) -> "LoaderPhaseProfiler":
+        """Return a profiler with an additional name prefix and shared writer state."""
+        return LoaderPhaseProfiler(
+            timing_enabled=self.timing_enabled,
+            nvtx_enabled=self.nvtx_enabled,
+            prefix=f"{self.prefix}{prefix}",
+            writer=self._writer,
+        )
+
+    def range(
+        self, name: str, metadata: dict[str, Any] | None = None
+    ) -> AbstractContextManager[None]:
+        """Record one range and its active parent context, including on exceptions."""
+        if not self.timing_enabled and not self.nvtx_enabled:
+            return nullcontext()
+        return self._range(f"{self.prefix}{name}", metadata or {})
+
+    @contextmanager
+    def _range(self, name: str, metadata: dict[str, Any]):
+        if self.nvtx_enabled:
+            torch.cuda.nvtx.range_push(name)
+
+        start_ns = time.perf_counter_ns()
+        context = [dict(item) for item in self._writer.stack]
+        self._writer.stack.append({"name": name, "metadata": metadata})
+        try:
+            yield
+        finally:
+            end_ns = time.perf_counter_ns()
+            self._writer.stack.pop()
+            if self.nvtx_enabled:
+                torch.cuda.nvtx.range_pop()
+            self._writer.write(name, metadata, context, start_ns, end_ns)
+
+
 class InferencePhaseProfiler:
     """Record inference phase timings and emit matching NVTX ranges."""
 
@@ -239,8 +386,9 @@ class InferencePhaseProfiler:
         self.nvtx_annotate = nvtx_annotate
         self.started_ns = time.perf_counter_ns()
         self.payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "clock": "time.perf_counter_ns",
+            "started_ns": self.started_ns,
             "rank": rank,
             "world_size": world_size,
             "run_id": run_id,
@@ -269,6 +417,9 @@ class InferencePhaseProfiler:
                     {
                         "name": name,
                         "batch_idx": batch_idx,
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "duration_ns": end_ns - start_ns,
                         "start_s": (start_ns - self.started_ns) / 1e9,
                         "duration_s": (end_ns - start_ns) / 1e9,
                     }
