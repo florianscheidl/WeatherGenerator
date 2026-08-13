@@ -556,8 +556,10 @@ class DataReaderBase(metaclass=ABCMeta):
             raise ValueError(
                 f"incorrect number of {name} channels: expected {len(idx)}, got {data.shape[-1]}"
             )
-        for i, ch in enumerate(idx):
-            data[..., i] = (data[..., i] - mean[ch]) / stdev[ch]
+        channel_mean = np.asarray([mean[ch] for ch in idx])
+        channel_stdev = np.asarray([stdev[ch] for ch in idx])
+        np.subtract(data, channel_mean, out=data)
+        np.divide(data, channel_stdev, out=data)
 
         return data
 
