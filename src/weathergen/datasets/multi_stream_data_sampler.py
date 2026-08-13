@@ -58,6 +58,37 @@ def _record_reader_data_stats(metadata: dict, rdata: IOReaderData) -> None:
     )
 
 
+def _stream_read_roles(stream_datasets: list) -> tuple[bool, bool]:
+    """Return whether any reader in a stream has source and target channels."""
+    return (
+        any(len(ds.source_idx) > 0 for ds in stream_datasets),
+        any(len(ds.target_idx) > 0 for ds in stream_datasets),
+    )
+
+
+def _empty_role_data(stream_datasets: list) -> IOReaderData:
+    """Create a true empty placeholder for an intentionally inactive stream side."""
+    return IOReaderData(
+        coords=np.zeros((0, 2), dtype=np.float32),
+        geoinfos=np.zeros((0, stream_datasets[0].get_geoinfo_size()), dtype=np.float32),
+        data=np.zeros((0, 0), dtype=np.float32),
+        datetimes=np.array([], dtype="datetime64[ns]"),
+    )
+
+
+def _tokenize_role_windows(
+    tokenizer: TokenizerMasking,
+    stream_info: dict,
+    data: list[IOReaderData],
+    pad_tokens: bool,
+    role_active: bool,
+) -> list:
+    """Tokenize an active role or return empty token markers without inspecting its data."""
+    if not role_active:
+        return [(None, None) for _ in data]
+    return tokenizer.get_tokens_windows(stream_info, data, pad_tokens)
+
+
 def collect_datasources(
     stream_datasets: list,
     idx: int,
@@ -100,6 +131,8 @@ def collect_datasources(
             "reader_index": reader_index,
             "selected_channels": len(channel_idxs),
         }
+        if len(channel_idxs) == 0:
+            continue
         with profiler.range(f"read.{type}.reader_get", reader_metadata):
             rdata = get_reader_data(idx)
             _record_reader_data_stats(reader_metadata, rdata)
@@ -636,11 +669,17 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
         """
 
+        has_source, has_target = _stream_read_roles(stream_ds)
+
         # source data: iterate overall input steps
         input_data = []
-        with nvtx.range("read_source_windows"):
+        with nvtx.range("read_source_windows", {"role_active": has_source}):
             for idx in range(base_idx - num_steps_input_max + 1, base_idx + 1):
                 # TODO: check that we are not out of bounds when we go back in time
+
+                if not has_source:
+                    input_data.append(_empty_role_data(stream_ds))
+                    continue
 
                 rdata = collect_datasources(stream_ds, idx, "source", self.rng, nvtx)
 
@@ -661,9 +700,13 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         # target data: collect for all forecast steps
         output_data = []
         num_output_steps = self._get_output_length(num_forecast_steps)
-        with nvtx.range("read_target_windows"):
+        with nvtx.range("read_target_windows", {"role_active": has_target}):
             for timestep_idx in range(self.output_offset, num_output_steps):
                 step_forecast_dt = base_idx + (self.time_step * timestep_idx) // self.step_timedelta
+
+                if not has_target:
+                    output_data.append(_empty_role_data(stream_ds))
+                    continue
 
                 rdata = collect_datasources(stream_ds, step_forecast_dt, "target", self.rng, nvtx)
 
@@ -763,6 +806,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             stream_info, stream_ds = stream_data.info, stream_data.readers
             (target_masks, source_masks, source_to_target) = masks_streams[stream_name]
             stream_nvtx = self._loader_profiler.child(f"stream.{stream_name}.")
+            has_source, has_target = _stream_read_roles(stream_ds)
 
             # max number of input steps
             input_steps = np.array([sc.get("num_steps_input", 1) for _, sc in source_cfgs.items()])
@@ -780,10 +824,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             # tokenize windows
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
-            with stream_nvtx.range("tokenize_source_windows"):
-                input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
-            with stream_nvtx.range("tokenize_target_windows"):
-                output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
+            with stream_nvtx.range("tokenize_source_windows", {"role_active": has_source}):
+                input_tokens = _tokenize_role_windows(
+                    self.tokenizer, stream_info, input_data, True, has_source
+                )
+            with stream_nvtx.range("tokenize_target_windows", {"role_active": has_target}):
+                output_tokens = _tokenize_role_windows(
+                    self.tokenizer, stream_info, output_data, False, has_target
+                )
 
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target
