@@ -104,6 +104,13 @@ streams: ???
 # type of zarr_store
 zarr_store: "zip" # "zarr" for LocalStore, "zip" for ZipStore
 
+# Expensive, opt-in runtime traces.
+profiling:
+  enabled: False
+  memory_snapshot:
+    # Record the root rank's PyTorch CUDA allocator history and dump it after inference.
+    enabled: False
+
 general:
 
   # mutable parameters

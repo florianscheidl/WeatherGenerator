@@ -23,6 +23,7 @@ import weathergen.common.config as config
 import weathergen.utils.cli as cli
 from weathergen.common.logger import init_loggers
 from weathergen.train.trainer import Trainer
+from weathergen.utils.profiling import memory_snapshot_session
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,8 @@ def run_inference(args):
 
     trainer = Trainer(cf.train_logging)
     try:
-        trainer.inference(cf, devices, args.from_run_id, args.mini_epoch)
+        with memory_snapshot_session(cf):
+            trainer.inference(cf, devices, args.from_run_id, args.mini_epoch)
     except Exception:
         extype, value, tb = sys.exc_info()
         traceback.print_exc()
