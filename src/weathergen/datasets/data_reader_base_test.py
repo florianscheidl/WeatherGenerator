@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from weathergen.datasets.data_reader_base import DataReaderBase
+from weathergen.datasets.data_reader_base import (
+    DataReaderBase,
+    ReaderData,
+    point_selection_indices,
+)
 
 
 def _normalize_channel_loop(
@@ -56,3 +60,44 @@ def test_normalize_rejects_wrong_channel_count() -> None:
             np.ones(2),
             "target",
         )
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_point_selection_indices_match_reader_data_shuffle(shuffle: bool) -> None:
+    seed = 19
+    expected = point_selection_indices(12, np.random.default_rng(seed), shuffle, 5)
+    assert expected is not None
+
+    data = np.arange(12, dtype=np.float32)[:, None]
+    reader_data = ReaderData(
+        coords=np.column_stack((data[:, 0], -data[:, 0])),
+        geoinfos=data.copy(),
+        data=data.copy(),
+        datetimes=np.arange(12).astype("datetime64[h]"),
+    )
+
+    reader_data.shuffle(np.random.default_rng(seed), shuffle, 5)
+
+    np.testing.assert_array_equal(reader_data.data[:, 0], expected)
+
+
+@pytest.mark.parametrize(
+    ("num_datapoints", "shuffle", "num_subset"),
+    [(12, False, -1), (12, False, 13), (0, True, 5)],
+)
+def test_point_selection_indices_noop_does_not_advance_rng(
+    num_datapoints: int, shuffle: bool, num_subset: int
+) -> None:
+    rng = np.random.default_rng(23)
+    untouched_rng = np.random.default_rng(23)
+
+    result = point_selection_indices(num_datapoints, rng, shuffle, num_subset)
+
+    assert result is None
+    assert rng.integers(1_000_000) == untouched_rng.integers(1_000_000)
+
+
+def test_point_selection_indices_equal_cap_retains_legacy_draw() -> None:
+    result = point_selection_indices(8, np.random.default_rng(3), False, 8)
+
+    np.testing.assert_array_equal(result, np.arange(8))

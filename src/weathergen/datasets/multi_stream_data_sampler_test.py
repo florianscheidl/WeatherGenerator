@@ -92,3 +92,30 @@ def test_collect_datasources_skips_reader_with_no_channels_for_side():
     inactive.get_source.assert_not_called()
     active.get_source.assert_called_once_with(3)
     assert result.data.shape == (2, 1)
+
+
+def test_collect_datasources_uses_reader_boundary_target_sampling():
+    sampled_data = ReaderData(
+        coords=np.zeros((3, 2), dtype=np.float32),
+        geoinfos=np.zeros((3, 1), dtype=np.float32),
+        data=np.ones((3, 1), dtype=np.float32),
+        datetimes=np.zeros(3, dtype="datetime64[ns]"),
+    )
+    sampled_data.shuffle = Mock(side_effect=AssertionError("late sampling must not run"))
+    reader = Mock(
+        source_idx=[],
+        target_idx=[0],
+        supports_early_target_sampling=True,
+        stream_info={"max_num_targets": 3, "shuffle_target": False},
+    )
+    reader.get_target_sampled.return_value = sampled_data
+    reader.normalize_target_channels.side_effect = lambda data: data
+    reader.normalize_geoinfos.side_effect = lambda data: data
+    rng = np.random.default_rng(1)
+
+    result = collect_datasources([reader], 4, "target", rng)
+
+    reader.get_target_sampled.assert_called_once_with(4, rng, False, 3)
+    reader.get_target.assert_not_called()
+    sampled_data.shuffle.assert_not_called()
+    assert result.data.shape == (3, 1)

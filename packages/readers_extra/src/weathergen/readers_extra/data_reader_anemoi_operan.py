@@ -59,6 +59,8 @@ def dt2cal(dt):
 class DataReaderAnemoiOperan(DataReaderAnemoi):
     "Wrapper for Anemoi datasets"
 
+    supports_early_target_sampling = False
+
     def __init__(
         self,
         tw_handler: TimeWindowHandler,
@@ -141,7 +143,7 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
         didx_end = t_idxs[-1] + 1
 
         try:
-            data, geoinfos = _read_projected_channels(
+            data, geoinfos, _ = _read_projected_channels(
                 self.ds,
                 didx_start,
                 didx_end,
