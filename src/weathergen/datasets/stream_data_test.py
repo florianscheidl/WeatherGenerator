@@ -7,11 +7,28 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-"""Tests for reproducibility of spoofed stream data."""
+"""Tests for stream data initialization and reproducibility."""
 
 import numpy as np
+import torch
 
-from weathergen.datasets.stream_data import spoof
+from weathergen.datasets.stream_data import StreamData, spoof
+
+
+def test_empty_targets_use_writer_compatible_defaults():
+    """A skipped target step remains a valid empty output for validation writing."""
+    stream_data = StreamData(idx=0, input_steps=1, output_steps=2, healpix_cells=12)
+
+    for coords, times, idxs_inv in zip(
+        stream_data.target_coords_raw,
+        stream_data.target_times_raw,
+        stream_data.idxs_inv,
+        strict=True,
+    ):
+        assert isinstance(coords, torch.Tensor)
+        assert coords.shape == (0, 2)
+        assert times.shape == (0,)
+        assert idxs_inv is None
 
 
 def _spoof(rng: np.random.Generator):

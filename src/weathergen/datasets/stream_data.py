@@ -91,14 +91,16 @@ class StreamData:
         # initialize empty members
         self.sample_idx = idx
         self.target_coords = [torch.tensor([]) for _ in range(output_steps)]
-        self.target_coords_raw = [[] for _ in range(output_steps)]
+        self.target_coords_raw = [
+            torch.empty((0, 2), dtype=torch.float32) for _ in range(output_steps)
+        ]
         self.target_times_raw = [np.array([], dtype="datetime64[ns]") for _ in range(output_steps)]
         # this is not directly used but to precompute index in compute_idxs_predict()
         self.target_coords_lens = [
             torch.tensor([0 for _ in range(self.healpix_cells)]) for _ in range(output_steps)
         ]
         self.target_tokens = [torch.tensor([]) for _ in range(output_steps)]
-        self.idxs_inv = [torch.tensor([], dtype=torch.int64) for _ in range(output_steps)]
+        self.idxs_inv: list[torch.Tensor | None] = [None for _ in range(output_steps)]
 
         # source tokens per cell
         self.source_tokens_cells = [None for _ in range(self.input_steps)]
