@@ -185,6 +185,25 @@ does not isolate reader filtering alone.
 Worker-count sweeps need dedicated execution-arm YAMLs so that `data_loading` is
 logged only once. They are outside this fixed eight-worker matrix.
 
+### HEALPix host-memory diagnostic
+
+If `o96_o256` at HEALPix level 6 is killed for host-memory exhaustion, run this
+matched pair with one DataLoader worker per rank:
+
+```bash
+launch_spatial_resolution o96_o256 5 data_parallel_single_worker
+launch_spatial_resolution o96_o256 6 data_parallel_single_worker
+```
+
+Run both jobs on the same branch and with the same node-memory allocation. The
+dedicated execution arm changes only `data_loading.num_workers` from eight to one;
+memory pinning and all model, stream, sampling, and execution settings remain fixed.
+With four data-parallel ranks this reduces the node from 32 to four DataLoader
+workers. Interpret level 6 succeeding only in this pair as evidence that replicated
+worker state or queued batches caused the host OOM. If level 6 still fails, a
+follow-up zero-worker run is needed to distinguish worker overhead from memory held
+by the four training processes themselves.
+
 ## Verification and interpretation
 
 ```bash
