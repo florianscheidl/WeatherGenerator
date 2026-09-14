@@ -126,6 +126,21 @@ def main() -> None:
     logger.info("Resolved-config SHA256 signatures (compare between branches):")
     logger.info(json.dumps(signatures, indent=2, sort_keys=True))
 
+    for level in (5, 6):
+        verify_launcher_overlays("o96_o256", level, "data_parallel_single_worker")
+        diagnostic = load("o96_o256", level, "data_parallel_single_worker")
+        diagnostic_flat = flatten(diagnostic)
+        changed = {
+            key
+            for key in diagnostic_flat.keys() | frozen.keys()
+            if diagnostic_flat.get(key) != frozen.get(key)
+        }
+        assert changed <= {"healpix_level", "data_loading.num_workers"}, changed
+        assert diagnostic["healpix_level"] == level
+        assert diagnostic["data_loading"]["num_workers"] == 1
+
+    logger.info("Verified matched HEALPix 5/6 single-worker host-memory diagnostics.")
+
 
 if __name__ == "__main__":
     main()
