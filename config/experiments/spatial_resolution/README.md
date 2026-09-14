@@ -88,7 +88,11 @@ Develop baseline, O96/O256 at level 5:
 ../WeatherGenerator-private/hpc/launch-slurm.py \
   --nodes=1 --time=30:00 \
   --base-config config/experiments/spatial_resolution/base.yml \
-  --config config/experiments/spatial_resolution/base.yml:config/experiments/spatial_resolution/input_o96_o256.yml:config/experiments/spatial_resolution/healpix_5.yml:config/experiments/spatial_resolution/data_parallel.yml
+  --config \
+    config/experiments/spatial_resolution/base.yml \
+    config/experiments/spatial_resolution/input_o96_o256.yml \
+    config/experiments/spatial_resolution/healpix_5.yml \
+    config/experiments/spatial_resolution/data_parallel.yml
 ```
 
 Reader branch, N320/H512 at level 6:
@@ -97,7 +101,11 @@ Reader branch, N320/H512 at level 6:
 ../WeatherGenerator-private/hpc/launch-slurm.py \
   --nodes=1 --time=30:00 \
   --base-config config/experiments/spatial_resolution/base.yml \
-  --config config/experiments/spatial_resolution/base.yml:config/experiments/spatial_resolution/input_n320_h512.yml:config/experiments/spatial_resolution/healpix_6.yml:config/experiments/spatial_resolution/spatial_local.yml
+  --config \
+    config/experiments/spatial_resolution/base.yml \
+    config/experiments/spatial_resolution/input_n320_h512.yml \
+    config/experiments/spatial_resolution/healpix_6.yml \
+    config/experiments/spatial_resolution/spatial_local.yml
 ```
 
 Allow more wall time if needed to observe at least 100 optimizer steps after
