@@ -45,7 +45,6 @@ def load(variant: str, level: int, arm: str) -> dict:
             None,
             None,
             ROOT / "base.yml",
-            ROOT / "base.yml",
             ROOT / f"input_{variant}.yml",
             ROOT / f"healpix_{level}.yml",
             ROOT / f"{arm}.yml",
@@ -53,6 +52,20 @@ def load(variant: str, level: int, arm: str) -> dict:
     # run_train reloads this directory after config merging on both code bases.
     cf.streams = config.load_streams(Path(cf.streams_directory))
     return OmegaConf.to_container(config._strip_interpolation(cf), resolve=False)
+
+
+def verify_launcher_overlays(variant: str, level: int, arm: str) -> None:
+    """Ensure separately MLflow-logged extra configs have no repeated parameter keys."""
+    paths = (
+        ROOT / f"input_{variant}.yml",
+        ROOT / f"healpix_{level}.yml",
+        ROOT / f"{arm}.yml",
+    )
+    keys_seen: set[str] = set()
+    for path in paths:
+        keys = set(OmegaConf.load(path).keys())
+        assert keys_seen.isdisjoint(keys), (path, keys_seen & keys)
+        keys_seen.update(keys)
 
 
 def main() -> None:
@@ -79,6 +92,7 @@ def main() -> None:
     for variant in INPUTS:
         for level in (5, 6):
             for arm in ARMS:
+                verify_launcher_overlays(variant, level, arm)
                 cf = load(variant, level, arm)
                 current = flatten(cf)
                 changed = {
@@ -108,6 +122,7 @@ def main() -> None:
 
     logger.info("Verified 18 merged configurations (six resolution cells x three execution arms).")
     logger.info("Only source filenames, HEALPix level, and declared execution switches differ.")
+    logger.info("Launcher overlays have disjoint MLflow parameter keys.")
     logger.info("Resolved-config SHA256 signatures (compare between branches):")
     logger.info(json.dumps(signatures, indent=2, sort_keys=True))
 

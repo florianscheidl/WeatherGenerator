@@ -47,9 +47,12 @@ with experiment-wide overrides explicitly recorded:
   4096 samples per mini-epoch, 56 mini-epochs, and logging cadence are retained.
   Runtime batch/world-size adaptations still differ between execution arms.
 
-Private platform configuration can override a base config. The commands below
-therefore also apply `base.yml` first as an overwrite, before input/level/arm.
-This preserves platform paths but reasserts the experimental model settings.
+The launcher receives `base.yml` only through `--base-config`. Do not repeat it
+under `--config`: the launcher logs each extra YAML separately to MLflow, where
+repeating a top-level parameter such as `data_loading` with another value fails.
+The input, HEALPix, and execution overlays deliberately have disjoint top-level
+keys. Platform-specific configuration should provide paths rather than overwrite
+the model settings fixed in `base.yml`.
 
 ## Resolution and execution matrix
 
@@ -89,7 +92,6 @@ Develop baseline, O96/O256 at level 5:
   --nodes=1 --time=30:00 \
   --base-config config/experiments/spatial_resolution/base.yml \
   --config \
-    config/experiments/spatial_resolution/base.yml \
     config/experiments/spatial_resolution/input_o96_o256.yml \
     config/experiments/spatial_resolution/healpix_5.yml \
     config/experiments/spatial_resolution/data_parallel.yml
@@ -102,7 +104,6 @@ Reader branch, N320/H512 at level 6:
   --nodes=1 --time=30:00 \
   --base-config config/experiments/spatial_resolution/base.yml \
   --config \
-    config/experiments/spatial_resolution/base.yml \
     config/experiments/spatial_resolution/input_n320_h512.yml \
     config/experiments/spatial_resolution/healpix_6.yml \
     config/experiments/spatial_resolution/spatial_local.yml
