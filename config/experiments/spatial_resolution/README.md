@@ -133,13 +133,19 @@ enable spatial size four, reader-boundary filtering, and rank-local physical
 targets/loss:
 
 ```bash
-launch_spatial_resolution o96_o256 5 spatial_local
-launch_spatial_resolution n320_o256 5 spatial_local
-launch_spatial_resolution n320_h512 5 spatial_local
+launch_spatial_resolution o96_o256 5 spatial_local (did not run)
+launch_spatial_resolution n320_o256 5 spatial_local irywhymm ✅
+launch_spatial_resolution n320_h512 5 spatial_local f4ivwuu2 ✅
 
-launch_spatial_resolution o96_o256 6 spatial_local
-launch_spatial_resolution n320_o256 6 spatial_local
-launch_spatial_resolution n320_h512 6 spatial_local
+launch_spatial_resolution o96_o256 6 spatial_local (did not run)
+launch_spatial_resolution n320_o256 6 spatial_local ciouv41u ✅
+launch_spatial_resolution n320_h512 6 spatial_local mb6gxclo ✅
+
+launch_spatial_resolution n320_o256 7 spatial_local zjzy9ugj cpu OOM
+launch_spatial_resolution n320_h512 7 spatial_local si9wu12k cpu OOM
+
+launch_spatial_resolution n320_o256 8 spatial_local
+launch_spatial_resolution n320_h512 8 spatial_local
 ```
 
 The twelve jobs above are the primary capability comparison. Record whether each
@@ -157,7 +163,7 @@ launch_spatial_resolution o96_o256 5 data_parallel rv3vj7ap
 launch_spatial_resolution n320_o256 5 data_parallel ziwwbnii
 launch_spatial_resolution n320_h512 5 data_parallel oxeq5dr9
 
-launch_spatial_resolution o96_o256 6 data_parallel x6blzdqm
+launch_spatial_resolution o96_o256 6 data_parallel x6blzdqm -> insufficient CPU memory.
 launch_spatial_resolution n320_o256 6 data_parallel txqwrj44
 launch_spatial_resolution n320_h512 6 data_parallel k3h1irm8
 ```
