@@ -1,0 +1,9 @@
+# (C) Copyright 2026 WeatherGenerator contributors.
+# Licensed under the Apache License, Version 2.0.
+
+# Reader branch only: four Jupiter nodes, one sixteen-rank spatial group.
+encoder_spatial_parallel_size: 16
+spatial_local_physical_loss: True
+spatial_local_validation: False
+data_loading:
+  reader_spatial_filtering: True

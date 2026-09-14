@@ -141,6 +141,16 @@ def main() -> None:
 
     logger.info("Verified matched HEALPix 5/6 single-worker host-memory diagnostics.")
 
+    for level, arm, spatial_size in ((7, "spatial_local_8", 8), (7, "spatial_local_16", 16)):
+        verify_launcher_overlays("n320_o256", level, arm)
+        demonstration = load("n320_o256", level, arm)
+        assert demonstration["healpix_level"] == level
+        assert demonstration["encoder_spatial_parallel_size"] == spatial_size
+        assert demonstration["spatial_local_physical_loss"] is True
+        assert demonstration["data_loading"]["reader_spatial_filtering"] is True
+
+    logger.info("Verified HEALPix-7 spatial-size 8/16 demonstration configurations.")
+
 
 if __name__ == "__main__":
     main()
