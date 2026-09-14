@@ -86,23 +86,39 @@ independent ten-minute job with a generated run ID. Ten minutes is intended only
 to determine whether the configuration reaches and starts training; it is not a
 throughput or sustained-memory measurement.
 
-Define this helper once in the shell. Its three arguments are the input-resolution
-name, HEALPix level, and execution arm. The three YAMLs passed through `--config`
-have disjoint top-level MLflow parameter keys.
+Define this helper once in the shell. Its arguments are the input-resolution name,
+HEALPix level, execution arm, and optional node count (default one). For
+`spatial_local`, one, two, and four Jupiter nodes select spatial-parallel sizes four,
+eight, and sixteen, respectively. Other execution arms remain single-node. The three
+YAMLs passed through `--config` have disjoint top-level MLflow parameter keys.
 
 ```bash
 launch_spatial_resolution() {
   input_resolution="$1"
   healpix_level="$2"
   execution_arm="$3"
+  nodes="${4:-1}"
+
+  case "${execution_arm}:${nodes}" in
+    spatial_local:1) execution_config="spatial_local" ;;
+    spatial_local:2) execution_config="spatial_local_8" ;;
+    spatial_local:4) execution_config="spatial_local_16" ;;
+    data_parallel:1|data_parallel_single_worker:1|spatial_full_read:1)
+      execution_config="${execution_arm}"
+      ;;
+    *)
+      echo "unsupported execution arm/node count: ${execution_arm}/${nodes}" >&2
+      return 2
+      ;;
+  esac
 
   ../WeatherGenerator-private/hpc/launch-slurm.py \
-    --nodes=1 --time=10:00 \
+    --nodes="${nodes}" --time=10:00 \
     --base-config config/experiments/spatial_resolution/base.yml \
     --config \
       "config/experiments/spatial_resolution/input_${input_resolution}.yml" \
       "config/experiments/spatial_resolution/healpix_${healpix_level}.yml" \
-      "config/experiments/spatial_resolution/${execution_arm}.yml"
+      "config/experiments/spatial_resolution/${execution_config}.yml"
 }
 ```
 
@@ -145,6 +161,19 @@ launch_spatial_resolution n320_h512 6 spatial_local
 The twelve jobs above are the primary capability comparison. Record whether each
 job reaches its first optimizer step, the number of completed steps before the
 wall time, and the failure class if it does not start training.
+
+For the HEALPix-7 demonstration, increase the single spatial group across two or
+four nodes with the fourth helper argument:
+
+```bash
+launch_spatial_resolution n320_o256 7 spatial_local 2  # spatial size 8
+launch_spatial_resolution n320_o256 7 spatial_local 4  # spatial size 16
+```
+
+These are capacity fallbacks, not directly matched throughput comparisons with the
+one-node matrix. Each Jupiter node contributes four ranks; the helper deliberately
+keeps one spatial group spanning all ranks. Try two nodes first, then four only if
+the two-node job still exhausts host memory.
 
 ### Reader branch: same-code data-parallel controls
 
