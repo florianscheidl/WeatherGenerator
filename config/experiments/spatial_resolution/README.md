@@ -153,13 +153,13 @@ switches off. They separate a branch/base-code difference from the cumulative
 spatial feature when a develop and spatial-local result differ:
 
 ```bash
-launch_spatial_resolution o96_o256 5 data_parallel
-launch_spatial_resolution n320_o256 5 data_parallel
-launch_spatial_resolution n320_h512 5 data_parallel
+launch_spatial_resolution o96_o256 5 data_parallel rv3vj7ap
+launch_spatial_resolution n320_o256 5 data_parallel ziwwbnii
+launch_spatial_resolution n320_h512 5 data_parallel oxeq5dr9
 
-launch_spatial_resolution o96_o256 6 data_parallel
-launch_spatial_resolution n320_o256 6 data_parallel
-launch_spatial_resolution n320_h512 6 data_parallel
+launch_spatial_resolution o96_o256 6 data_parallel x6blzdqm
+launch_spatial_resolution n320_o256 6 data_parallel txqwrj44
+launch_spatial_resolution n320_h512 6 data_parallel k3h1irm8
 ```
 
 ### Reader branch: spatial full-read attribution controls
