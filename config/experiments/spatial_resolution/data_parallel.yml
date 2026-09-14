@@ -1,0 +1,8 @@
+# (C) Copyright 2026 WeatherGenerator contributors.
+# Licensed under the Apache License, Version 2.0.
+
+encoder_spatial_parallel_size: 1
+spatial_local_physical_loss: False
+spatial_local_validation: False
+data_loading:
+  reader_spatial_filtering: False
