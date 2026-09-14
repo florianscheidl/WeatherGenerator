@@ -79,45 +79,111 @@ The full-read control still includes the branch's always-active spatial behavior
 (including local source token construction and local target coordinates). It is
 not an exact recreation of the pre-investigation baseline.
 
-## Launch examples
+## Direct launch commands
 
-Run from the repository root, after checking out the intended branch and setting
-up its locked environment. These commands submit one job each; select each of the
-three input overlays and both HEALPix overlays for the full matrix.
+Run these blocks from the repository root on Jupiter. Each invocation submits one
+independent ten-minute job with a generated run ID. Ten minutes is intended only
+to determine whether the configuration reaches and starts training; it is not a
+throughput or sustained-memory measurement.
 
-Develop baseline, O96/O256 at level 5:
-
-```bash
-../WeatherGenerator-private/hpc/launch-slurm.py \
-  --nodes=1 --time=30:00 \
-  --base-config config/experiments/spatial_resolution/base.yml \
-  --config \
-    config/experiments/spatial_resolution/input_o96_o256.yml \
-    config/experiments/spatial_resolution/healpix_5.yml \
-    config/experiments/spatial_resolution/data_parallel.yml
-```
-
-Reader branch, N320/H512 at level 6:
+Define this helper once in the shell. Its three arguments are the input-resolution
+name, HEALPix level, and execution arm. The three YAMLs passed through `--config`
+have disjoint top-level MLflow parameter keys.
 
 ```bash
-../WeatherGenerator-private/hpc/launch-slurm.py \
-  --nodes=1 --time=30:00 \
-  --base-config config/experiments/spatial_resolution/base.yml \
-  --config \
-    config/experiments/spatial_resolution/input_n320_h512.yml \
-    config/experiments/spatial_resolution/healpix_6.yml \
-    config/experiments/spatial_resolution/spatial_local.yml
+launch_spatial_resolution() {
+  input_resolution="$1"
+  healpix_level="$2"
+  execution_arm="$3"
+
+  ../WeatherGenerator-private/hpc/launch-slurm.py \
+    --nodes=1 --time=10:00 \
+    --base-config config/experiments/spatial_resolution/base.yml \
+    --config \
+      "config/experiments/spatial_resolution/input_${input_resolution}.yml" \
+      "config/experiments/spatial_resolution/healpix_${healpix_level}.yml" \
+      "config/experiments/spatial_resolution/${execution_arm}.yml"
+}
 ```
 
-Allow more wall time if needed to observe at least 100 optimizer steps after
-startup. The sample/mini-epoch settings are training limits, not a 100-step stop.
-At the capacity boundary, repeat both the last passing and first failing cases,
-and run the reader branch with `spatial_full_read.yml` for attribution. A reader
-branch `data_parallel.yml` run provides a same-code non-spatial control.
+### Develop: primary data-parallel baseline
 
-Retry develop's first failure with `--options data_loading.num_workers=1` as a
-separately labelled capacity check. This distinguishes loader concurrency limits
-from per-sample GPU capacity; it is not part of the fixed eight-worker matrix.
+Check out `exp/spatial-resolution-experiment-develop`. These are the six valid
+primary configurations on develop:
+
+```bash
+launch_spatial_resolution o96_o256 5 data_parallel
+launch_spatial_resolution n320_o256 5 data_parallel
+launch_spatial_resolution n320_h512 5 data_parallel
+
+launch_spatial_resolution o96_o256 6 data_parallel
+launch_spatial_resolution n320_o256 6 data_parallel
+launch_spatial_resolution n320_h512 6 data_parallel
+```
+
+Within each HEALPix level, the three jobs isolate native input resolution as far
+as an end-to-end run permits. Within each input row, levels 5 and 6 primarily test
+the larger HEALPix latent grid, though token fragmentation and local assimilation
+also change with the level.
+
+### Reader branch: primary complete spatial path
+
+Check out `exp/spatial-resolution-experiment-reader-data-parallel`. These six jobs
+enable spatial size four, reader-boundary filtering, and rank-local physical
+targets/loss:
+
+```bash
+launch_spatial_resolution o96_o256 5 spatial_local
+launch_spatial_resolution n320_o256 5 spatial_local
+launch_spatial_resolution n320_h512 5 spatial_local
+
+launch_spatial_resolution o96_o256 6 spatial_local
+launch_spatial_resolution n320_o256 6 spatial_local
+launch_spatial_resolution n320_h512 6 spatial_local
+```
+
+The twelve jobs above are the primary capability comparison. Record whether each
+job reaches its first optimizer step, the number of completed steps before the
+wall time, and the failure class if it does not start training.
+
+### Reader branch: same-code data-parallel controls
+
+These six jobs run the reader-branch code with spatial size one and all locality
+switches off. They separate a branch/base-code difference from the cumulative
+spatial feature when a develop and spatial-local result differ:
+
+```bash
+launch_spatial_resolution o96_o256 5 data_parallel
+launch_spatial_resolution n320_o256 5 data_parallel
+launch_spatial_resolution n320_h512 5 data_parallel
+
+launch_spatial_resolution o96_o256 6 data_parallel
+launch_spatial_resolution n320_o256 6 data_parallel
+launch_spatial_resolution n320_h512 6 data_parallel
+```
+
+### Reader branch: spatial full-read attribution controls
+
+These six jobs enable spatial size four while leaving reader filtering and local
+physical targets/loss off:
+
+```bash
+launch_spatial_resolution o96_o256 5 spatial_full_read
+launch_spatial_resolution n320_o256 5 spatial_full_read
+launch_spatial_resolution n320_h512 5 spatial_full_read
+
+launch_spatial_resolution o96_o256 6 spatial_full_read
+launch_spatial_resolution n320_o256 6 spatial_full_read
+launch_spatial_resolution n320_h512 6 spatial_full_read
+```
+
+Run the controls only where they resolve an ambiguity in the primary twelve jobs.
+The full-read arm still includes the branch's always-active spatial behavior,
+including local source token construction and local target coordinates, so it
+does not isolate reader filtering alone.
+
+Worker-count sweeps need dedicated execution-arm YAMLs so that `data_loading` is
+logged only once. They are outside this fixed eight-worker matrix.
 
 ## Verification and interpretation
 
