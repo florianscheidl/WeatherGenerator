@@ -234,7 +234,10 @@ def spatial_lp_loss(
     mask_nan = ~torch.isnan(target)
     pred = pred[0] if pred.shape[0] == 0 else pred.mean(0)
     diff_p = torch.pow(
-        torch.abs(torch.where(mask_nan, target, 0) - torch.where(mask_nan, pred, 0)), p_norm
+        torch.abs(
+            torch.where(mask_nan, target, 0) - torch.where(mask_nan, pred, 0)
+        ), 
+        p_norm
     )
     if weights_points is not None:
         diff_p = (diff_p.transpose(1, 0) * weights_points).transpose(1, 0)
