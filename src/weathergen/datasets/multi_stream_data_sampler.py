@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import dataclasses
+import inspect
 import logging
 import pathlib
 from collections.abc import Sequence
@@ -33,8 +34,9 @@ from weathergen.datasets.utils import (
     get_tokens_lens,
 )
 from weathergen.readers_extra.registry import get_extra_reader
-from weathergen.train.utils import Stage, get_batch_size_from_config
+from weathergen.train.utils import TRAIN, VAL, Stage, get_batch_size_from_config
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
+from weathergen.utils.spatial_shard import SpatialShard
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -103,29 +105,39 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
         # Ranks in one encoder-spatial group must consume the same batch. Data
         # parallelism therefore operates across groups, not across individual ranks.
         spatial_parallel_size = get_encoder_spatial_parallel_size(cf)
-        self.spatial_parallel_size = spatial_parallel_size
-        self.spatial_parallel_rank = cf.rank % spatial_parallel_size
+        self.spatial_shard = SpatialShard.from_global_rank(
+            cf.healpix_level,
+            spatial_parallel_size,
+            cf.rank,
+        )
+        self.spatial_parallel_size = self.spatial_shard.spatial_parallel_size
+        self.spatial_parallel_rank = self.spatial_shard.spatial_rank
         self.rank = cf.rank // spatial_parallel_size
         self.world_size = cf.world_size // spatial_parallel_size
         self.repeat_data = cf.data_loading.get("repeat_data_in_mini_epoch", False)
 
         # initialise healpic
         self.healpix_level = cf.healpix_level
-        self.num_healpix_cells = 12 * 4**self.healpix_level
-        if self.num_healpix_cells % spatial_parallel_size:
-            raise ValueError(
-                f"number of HEALPix cells ({self.num_healpix_cells}) must be divisible by "
-                f"encoder_spatial_parallel_size ({spatial_parallel_size})"
-            )
-        self.local_num_healpix_cells = self.num_healpix_cells // spatial_parallel_size
-        self.local_cell_start = self.spatial_parallel_rank * self.local_num_healpix_cells
-        self.local_cell_end = self.local_cell_start + self.local_num_healpix_cells
+        self.num_healpix_cells = self.spatial_shard.num_cells
+        self.local_num_healpix_cells = self.spatial_shard.cells_per_rank
+        self.local_cell_start = self.spatial_shard.cell_start
+        self.local_cell_end = self.spatial_shard.cell_end
+        # Reader-boundary early filtering: fixed-grid readers drop non-local rows
+        # right after decode instead of during tokenization. Off by default; only
+        # meaningful with more than one spatial rank.
+        self.reader_spatial_filtering = (
+            bool(cf.data_loading.get("reader_spatial_filtering", False))
+            and spatial_parallel_size > 1
+        )
         self.masker = Masker(cf.healpix_level, stage, cf.streams, self.mode_cfg)
         self.tokenizer = TokenizerMasking(
             cf.healpix_level,
             self.masker,
-            self.local_cell_start,
-            self.local_cell_end,
+            self.spatial_shard,
+            local_target_values=(
+                (stage == TRAIN and bool(cf.get("spatial_local_physical_loss", False)))
+                or (stage == VAL and bool(cf.get("spatial_local_validation", False)))
+            ),
         )
         if spatial_parallel_size > 1:
             logger.info(
@@ -267,6 +279,15 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         msg = f"Unsupported stream type {stream_info['type']}"
                         f"for stream name '{stream_name}'."
                         raise ValueError(msg)
+
+            # Fixed-grid readers that take a spatial_shard support early
+            # filtering (DataReaderAnemoi and subclasses like anemoi_operan);
+            # other readers return global data and rely on the tokenizer's late
+            # filtering.
+            if self.reader_spatial_filtering and (
+                "spatial_shard" in inspect.signature(dataset.__init__).parameters
+            ):
+                kwargs["spatial_shard"] = self.spatial_shard
 
             for fname in stream_info.get("filenames", [pathlib.Path()]):
                 fname = pathlib.Path(fname)
@@ -504,7 +525,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 stream_data.add_target_coords(self._stage, timestep_idx, tc, tc_l, rdata.is_spoof)
 
             if "target_values" in mode:
-                (tt_cells, tt_t, tt_c, idxs_inv) = self.tokenizer.get_target_values(
+                (tt_cells, tt_t, tt_c, idxs_inv, row_ids) = self.tokenizer.get_target_values(
                     stream_info,
                     rdata,
                     token_data,
@@ -513,7 +534,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 )
 
                 stream_data.add_target_values(
-                    self._stage, timestep_idx, tt_cells, tt_c, tt_t, idxs_inv, rdata.is_spoof
+                    self._stage,
+                    timestep_idx,
+                    tt_cells,
+                    tt_c,
+                    tt_t,
+                    idxs_inv,
+                    row_ids,
+                    rdata.is_spoof,
                 )
 
         return stream_data
@@ -608,6 +636,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
                     len(stream_ds[0].mean[stream_ds[0].source_idx]),
+                    self.rng,
                 )
                 rdata.is_spoof = True
 
@@ -630,6 +659,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                     time_win.start,
                     stream_ds[0].get_geoinfo_size(),
                     len(stream_ds[0].mean[stream_ds[0].target_idx]),
+                    self.rng,
                 )
                 rdata.is_spoof = True
 

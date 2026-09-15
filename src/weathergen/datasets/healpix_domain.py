@@ -8,6 +8,40 @@
 # nor does it submit to any jurisdiction.
 
 import numpy as np
+from astropy_healpix.healpy import ang2pix
+from numpy.typing import NDArray
+
+from weathergen.utils.spatial_shard import SpatialShard
+
+
+def theta_phi_to_standard_coords(coords):
+    thetas = ((90.0 - coords[:, 0]) / 180.0) * np.pi
+    phis = ((coords[:, 1] + 180.0) / 360.0) * 2.0 * np.pi
+
+    return thetas, phis
+
+
+def shard_grid_point_rows(
+    shard: SpatialShard,
+    latitudes: NDArray[np.float32],
+    longitudes: NDArray[np.float32],
+) -> NDArray[np.int64]:
+    """Rows of a fixed grid whose points fall in the shard's cell range.
+
+    Cells must be assigned exactly as in the tokenizer (`hpy_cell_splits`) so
+    that filtering at the reader boundary keeps precisely the rows that late
+    filtering during tokenization would keep.
+
+    Rows with non-finite coordinates (e.g. off-disk geostationary pixels)
+    belong to no rank: the unfiltered path drops them in the later NaN
+    cleanup, so the union of all ranks still matches the cleaned full read.
+    """
+    valid = np.isfinite(latitudes) & np.isfinite(longitudes)
+    coords = np.stack([latitudes[valid], longitudes[valid]], axis=1)
+    thetas, phis = theta_phi_to_standard_coords(coords)
+    cell_ids = np.full(latitudes.shape, -1, dtype=np.int64)
+    cell_ids[valid] = ang2pix(2**shard.healpix_level, thetas, phis, nest=True)
+    return np.flatnonzero((cell_ids >= shard.cell_start) & (cell_ids < shard.cell_end))
 
 
 def build_local_healpix_cell_splits(

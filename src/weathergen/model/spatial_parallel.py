@@ -10,6 +10,15 @@
 import torch
 
 
+def zero_gradient_module_dependency(
+    module: torch.nn.Module,
+    dummy_input: torch.Tensor,
+) -> torch.Tensor:
+    """Run a module while contributing exactly zero to the surrounding graph."""
+
+    return module(dummy_input).sum() * 0
+
+
 def select_packed_cell_shard(
     tokens: torch.Tensor,
     cell_lens: torch.Tensor,
@@ -45,6 +54,48 @@ def select_packed_cell_shard(
         )
 
     return tokens[selected_tokens], cell_lens_2d[:, cell_start:cell_end].flatten()
+
+
+def ensure_packed_cell_shard(
+    tokens: torch.Tensor,
+    global_cell_lens: torch.Tensor,
+    num_cells: int,
+    cell_start: int,
+    cell_end: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return rank-local packed tokens from either global or already-local input.
+
+    During the target-coordinate transition, the batch retains global per-cell
+    lengths for prediction reassembly but may carry only this rank's expanded
+    coordinate rows. Global packed inputs are selected as before; local inputs
+    pass through without another copy.
+    """
+
+    if global_cell_lens.numel() % num_cells:
+        raise ValueError("global_cell_lens does not contain a whole number of HEALPix grids")
+    if not 0 <= cell_start < cell_end <= num_cells:
+        raise ValueError(
+            f"invalid HEALPix cell range [{cell_start}, {cell_end}) for {num_cells} cells"
+        )
+
+    local_cell_lens = global_cell_lens.reshape(-1, num_cells)[:, cell_start:cell_end].flatten()
+    local_token_count = int(local_cell_lens.sum().item())
+    global_token_count = int(global_cell_lens.sum().item())
+
+    if tokens.shape[0] == local_token_count:
+        return tokens, local_cell_lens
+    if tokens.shape[0] == global_token_count:
+        return select_packed_cell_shard(
+            tokens,
+            global_cell_lens,
+            num_cells,
+            cell_start,
+            cell_end,
+        )
+    raise ValueError(
+        f"packed token length mismatch: tensor has {tokens.shape[0]} rows; expected either "
+        f"{local_token_count} local or {global_token_count} global rows"
+    )
 
 
 def select_healpix_neighborhood_shard(

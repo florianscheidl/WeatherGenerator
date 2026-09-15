@@ -31,6 +31,7 @@ from weathergen.utils.distributed import (
     get_encoder_spatial_parallel_group,
     get_encoder_spatial_parallel_size,
 )
+from weathergen.utils.spatial_shard import SpatialShard
 
 
 class EncoderModule(torch.nn.Module):
@@ -48,19 +49,19 @@ class EncoderModule(torch.nn.Module):
         self.cf = cf
 
         self.healpix_level = cf.healpix_level
-        self.num_healpix_cells = 12 * 4**self.healpix_level
         self.spatial_parallel_size = get_encoder_spatial_parallel_size(cf)
-        if self.num_healpix_cells % self.spatial_parallel_size:
-            raise ValueError(
-                f"number of HEALPix cells ({self.num_healpix_cells}) must be divisible by "
-                f"encoder_spatial_parallel_size ({self.spatial_parallel_size})"
-            )
         self.spatial_parallel_group, self.spatial_parallel_rank = (
             get_encoder_spatial_parallel_group(cf)
         )
-        self.local_num_healpix_cells = self.num_healpix_cells // self.spatial_parallel_size
-        self.local_cell_start = self.spatial_parallel_rank * self.local_num_healpix_cells
-        self.local_cell_end = self.local_cell_start + self.local_num_healpix_cells
+        self.spatial_shard = SpatialShard(
+            healpix_level=self.healpix_level,
+            spatial_parallel_size=self.spatial_parallel_size,
+            spatial_rank=self.spatial_parallel_rank,
+        )
+        self.num_healpix_cells = self.spatial_shard.num_cells
+        self.local_num_healpix_cells = self.spatial_shard.cells_per_rank
+        self.local_cell_start = self.spatial_shard.cell_start
+        self.local_cell_end = self.spatial_shard.cell_end
 
         self.cf = cf
         self.sources_size = sources_size

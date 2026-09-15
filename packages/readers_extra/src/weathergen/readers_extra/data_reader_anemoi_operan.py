@@ -7,12 +7,11 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-import logging
 from pathlib import Path
 from typing import override
 
 import numpy as np
-from anemoi.datasets.data import MissingDateError
+from numpy.typing import NDArray
 
 from weathergen.datasets.data_reader_anemoi import DataReaderAnemoi
 from weathergen.datasets.data_reader_base import (
@@ -21,8 +20,7 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
 )
 from weathergen.train.utils import Stage
-
-_logger = logging.getLogger(__name__)
+from weathergen.utils.spatial_shard import SpatialShard
 
 
 def dt2cal(dt):
@@ -65,6 +63,7 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
         filename: Path,
         stream_info: dict,
         stage: Stage,
+        spatial_shard: SpatialShard | None = None,
     ) -> None:
         """
         Construct data reader for anemoi dataset
@@ -75,16 +74,26 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
             filename (and path) of dataset
         stream_info :
             information about stream
+        spatial_shard :
+            when set, source reads return only grid rows in this rank's HEALPix
+            cell range; targets remain global. Rows with NaN coordinates (e.g.
+            off-disk geostationary pixels) belong to no rank and are dropped at
+            the reader instead of in the later NaN cleanup.
 
         Returns
         -------
         None
         """
 
-        super().__init__(tw_handler, filename, stream_info, stage)
+        super().__init__(tw_handler, filename, stream_info, stage, spatial_shard)
 
     @override
-    def _get(self, idx: TIndex, channels_idx: list[int]) -> ReaderData:
+    def _get(
+        self,
+        idx: TIndex,
+        channels_idx: list[int],
+        grid_rows: NDArray[np.int64] | None = None,
+    ) -> ReaderData:
         """
         Get data for window (for either source or target, through public interface)
 
@@ -94,6 +103,8 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
             Index of temporal window
         channels_idx : np.array
             Selection of channels
+        grid_rows : np.array, optional
+            When given, only these grid rows (per timestep) are returned
 
         Returns
         -------
@@ -128,59 +139,19 @@ class DataReaderAnemoiOperan(DataReaderAnemoi):
         else:
             t_idxs = [t_idxs[datetimes_mask][-1].item()]
 
-        # _get from DataReaderAnemoi
-
         if self.ds is None or self.len == 0 or len(t_idxs) == 0:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
         assert t_idxs[0] >= 0, "index must be non-negative"
-        didx_start = t_idxs[0]
         # End is inclusive
-        didx_end = t_idxs[-1] + 1
-
-        # extract number of time steps and collapse ensemble dimension
-        # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
-        # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
-        # sampling is required here
-        try:
-            data = self.ds[didx_start:didx_end][:, :, 0].astype(np.float32)
-        except MissingDateError as e:
-            _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
+        rd = self._read_window(t_idxs[0], t_idxs[-1] + 1, channels_idx, grid_rows)
+        if rd is None:
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
-
-        # coords-first representation and collapse multiple steps
-        data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
-
-        # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
-        # extract channels
-        data = data[:, list(channels_idx)]
-
-        # construct lat/lon coords
-        latlon = np.concatenate(
-            [
-                np.expand_dims(self.latitudes, 0),
-                np.expand_dims(self.longitudes, 0),
-            ],
-            axis=0,
-        ).transpose()
-        # repeat latlon len(t_idxs) times
-        coords = np.vstack((latlon,) * len(t_idxs))
-
-        # date time matching #data points of data
-        # Assuming a fixed frequency for the dataset
-        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // len(t_idxs))
-
-        rd = ReaderData(
-            coords=coords,
-            geoinfos=geoinfos,
-            data=data,
-            datetimes=datetimes,
-        )
-        # check_reader_data(rd, dtr)
+        # The selected timestep may lie before the window start (latest available
+        # sample), so the base class's check_reader_data window check is skipped.
 
         return rd
