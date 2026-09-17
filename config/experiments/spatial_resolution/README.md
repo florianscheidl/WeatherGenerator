@@ -113,7 +113,7 @@ launch_spatial_resolution() {
   esac
 
   ../WeatherGenerator-private/hpc/launch-slurm.py \
-    --nodes="${nodes}" --time=10:00 \
+    --nodes="${nodes}" --time=50:00 \
     --base-config config/experiments/spatial_resolution/base.yml \
     --config \
       "config/experiments/spatial_resolution/input_${input_resolution}.yml" \
@@ -173,7 +173,7 @@ four nodes with the fourth helper argument:
 
 ```bash
 launch_spatial_resolution n320_o256 7 spatial_local 2  # spatial size 8
-launch_spatial_resolution n320_o256 7 spatial_local 4  # spatial size 16
+launch_spatial_resolution n320_h512 7 spatial_local 4  # spatial size 16
 ```
 
 These are capacity fallbacks, not directly matched throughput comparisons with the
