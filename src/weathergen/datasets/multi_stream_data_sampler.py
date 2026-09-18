@@ -26,6 +26,7 @@ from weathergen.datasets.data_reader_base import (
     TIndex,
 )
 from weathergen.datasets.data_reader_obs import DataReaderObs
+from weathergen.datasets.healpix_domain import get_local_healpix_cell_range
 from weathergen.datasets.masking import Masker
 from weathergen.datasets.stream_data import StreamData, spoof
 from weathergen.datasets.tokenizer_masking import TokenizerMasking
@@ -34,7 +35,7 @@ from weathergen.datasets.utils import (
 )
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import Stage, get_batch_size_from_config
-from weathergen.utils.distributed import is_root
+from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
 type StreamName = str
@@ -100,15 +101,48 @@ class MultiStreamDataSampler(torch.utils.data.IterableDataset):
 
         self.mini_epoch = 0
         self.mask_value = 0.0
-        self.rank = cf.rank
-        self.world_size = cf.world_size
+        # Ranks in one encoder-spatial group must consume the same batch. Data
+        # parallelism therefore operates across groups, not across individual ranks.
+        spatial_parallel_size = get_encoder_spatial_parallel_size(cf)
+        self.spatial_parallel_size = spatial_parallel_size
+        self.spatial_parallel_rank = cf.rank % spatial_parallel_size
+        self.rank = cf.rank // spatial_parallel_size
+        self.world_size = cf.world_size // spatial_parallel_size
         self.repeat_data = cf.data_loading.get("repeat_data_in_mini_epoch", False)
 
         # initialise healpic
         self.healpix_level = cf.healpix_level
         self.num_healpix_cells = 12 * 4**self.healpix_level
+        self.spatial_parent_level = cf.get("encoder_spatial_parallel_parent_level", 1)
+        self.local_cell_start, self.local_cell_end = get_local_healpix_cell_range(
+            self.healpix_level,
+            spatial_parallel_size,
+            self.spatial_parallel_rank,
+            self.spatial_parent_level,
+        )
+        self.local_num_healpix_cells = self.local_cell_end - self.local_cell_start
         self.masker = Masker(cf.healpix_level, stage, cf.streams, self.mode_cfg)
-        self.tokenizer = TokenizerMasking(cf.healpix_level, self.masker)
+        self.tokenizer = TokenizerMasking(
+            cf.healpix_level,
+            self.masker,
+            self.local_cell_start,
+            self.local_cell_end,
+        )
+        if spatial_parallel_size > 1:
+            descendants_per_parent = 4 ** (self.healpix_level - self.spatial_parent_level)
+            parent_start = self.local_cell_start // descendants_per_parent
+            parent_end = self.local_cell_end // descendants_per_parent
+            logger.info(
+                "Encoder spatial rank %d/%d owns level-%d parents [%d, %d) "
+                "and constructs source HEALPix cells [%d, %d)",
+                self.spatial_parallel_rank,
+                spatial_parallel_size,
+                self.spatial_parent_level,
+                parent_start,
+                parent_end,
+                self.local_cell_start,
+                self.local_cell_end,
+            )
 
         forecast_cfg = FORECAST_DEFAULTS | OmegaConf.to_object(mode_cfg.get("forecast", {}))
         self.output_offset = forecast_cfg["offset"]
@@ -532,6 +566,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             num_steps_input,
             num_output_steps,
             self.num_healpix_cells,
+            source_healpix_cells=self.local_num_healpix_cells,
         )
 
         stream_data = self._build_stream_data_input(
@@ -703,7 +738,9 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             # tokenize windows
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
-            input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
+            input_tokens = self.tokenizer.get_tokens_windows(
+                stream_info, input_data, True, local_source=True
+            )
             output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
 
             for sidx, source_mask in enumerate(source_masks.masks):
@@ -791,7 +828,13 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 # ensure the batch is valid, i.e. not completely empty and no NaN values
                 # student teacher has no classical targets
                 mode = self.mode_cfg.get("training_mode")
-                not_valid = batch.sources_empty() or batch.is_nan()
+                # A valid global sample may have no observations in one rank's
+                # local source domain. All spatial ranks must still emit the
+                # same sample and enter encoder collectives in lockstep.
+                local_sources_empty = batch.sources_empty()
+                not_valid = (
+                    local_sources_empty if self.spatial_parallel_size == 1 else False
+                ) or batch.is_nan()
                 not_valid = not_valid or (batch.targets_empty() if "masking" in mode else False)
 
                 # skip completely empty batch item or when all targets are empty -> no grad
@@ -822,12 +865,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # happens for each mini_epoch, for train and validation, and independently for each DDP
             # worker. After the bit-wise copy, the rng seed needs to be made unique for
             # DDP workers, loader process, mini_epoch.
-            dist = torch.distributed
             self.data_loader_rng_seed *= (
-                (((dist.get_rank() + 1) * 73) if dist.is_initialized() else 1)
-                * ((worker_info.id + 1) * 37)
-                * (self.mini_epoch + 13)
-                * 7
+                ((self.rank + 1) * 73) * ((worker_info.id + 1) * 37) * (self.mini_epoch + 13) * 7
             )
             # split workload
             per_worker = (local_end - local_start) // worker_info.num_workers

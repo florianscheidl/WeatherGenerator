@@ -66,6 +66,12 @@ num_register_tokens: 0
 
 healpix_level: 5
 
+# Split every stream's embedding and local assimilation across this many
+# consecutive distributed ranks. Keep complete cells at this parent level
+# together on one rank (nested HEALPix ordering).
+encoder_spatial_parallel_size: 4
+encoder_spatial_parallel_parent_level: 1
+
 # Use 2D RoPE instead of traditional global positional encoding
 # When True: uses 2D RoPE based on healpix cell coordinates (lat/lon)
 # When False: uses traditional pe_global positional encoding
