@@ -100,6 +100,9 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         100 * row.total_s / parent_total.get((row.stream, row.parent), float("nan"))
         for row in stats.itertuples()
     ]
+    # share of the stream total, i.e. of the sum of the stream's top-level operations
+    stream_total = stats[stats["parent"].isna()].groupby("stream")["total_s"].sum()
+    stats["pct_total"] = 100 * stats["total_s"] / stats["stream"].map(stream_total)
     return stats
 
 
@@ -135,16 +138,28 @@ def _fmt(value: float, spec: str) -> str:
     return "" if pd.isna(value) else format(value, spec)
 
 
-def print_table(header: list[tuple[str, int]], rows: list[list[str]]) -> None:
-    width = max([len(r[0]) for r in rows] + [len(header[0][0])])
+def print_table(
+    header: list[tuple[str, int]], rows: list[list[str]], footer: list[str] | None = None
+) -> None:
+    width = max([len(r[0]) for r in rows + [footer or [""]]] + [len(header[0][0])])
+
+    def fmt_row(r: list[str]) -> str:
+        cells = zip(r[1:], header[1:], strict=False)
+        return r[0].ljust(width) + "".join(c.rjust(w) for c, (_, w) in cells)
+
     line = header[0][0].ljust(width) + "".join(h.rjust(w) for h, w in header[1:])
     print(line)
     print("-" * len(line))
     for r in rows:
-        print(
-            r[0].ljust(width)
-            + "".join(c.rjust(w) for c, (_, w) in zip(r[1:], header[1:], strict=False))
-        )
+        print(fmt_row(r))
+    if footer is not None:
+        print("-" * len(line))
+        print(fmt_row(footer))
+
+
+def _stream_total(s: pd.DataFrame, col: str = "total_s") -> float:
+    """Sum of the top-level operations (rows without a parent) of one stream."""
+    return s.loc[s["parent"].isna(), col].sum()
 
 
 def report(stats: pd.DataFrame, df: pd.DataFrame) -> None:
@@ -157,6 +172,7 @@ def report(stats: pd.DataFrame, df: pd.DataFrame) -> None:
         ("p95[ms]", 10),
         ("max[ms]", 10),
         ("%parent", 9),
+        ("%total", 9),
     ]
     for stream, s in stats.groupby("stream", sort=True):
         n_proc = df[df["stream"] == stream][["host", "pid"]].drop_duplicates().shape[0]
@@ -175,13 +191,16 @@ def report(stats: pd.DataFrame, df: pd.DataFrame) -> None:
                     _fmt(r.p95_ms, ".3f"),
                     _fmt(r.max_ms, ".3f"),
                     _fmt(r.pct_parent, ".1f"),
+                    _fmt(r.pct_total, ".1f"),
                 ]
             )
-        print_table(header, rows)
+        total = _stream_total(s)
+        footer = ["total (sum of top level)", "", f"{total:.3f}"] + [""] * 5 + ["100.0"]
+        print_table(header, rows, footer)
 
 
 def report_compare(stats_a: pd.DataFrame, stats_b: pd.DataFrame, name_a: str, name_b: str):
-    cols = ["calls", "total_s", "mean_ms", "pct_parent"]
+    cols = ["calls", "total_s", "mean_ms", "pct_parent", "pct_total"]
     merged = stats_a.merge(
         stats_b, on=["stream", "path"], how="outer", suffixes=("_a", "_b")
     ).assign(
@@ -199,6 +218,8 @@ def report_compare(stats_a: pd.DataFrame, stats_b: pd.DataFrame, name_a: str, na
         ("ratio", 8),
         ("total A[s]", 12),
         ("total B[s]", 12),
+        ("%total A", 10),
+        ("%total B", 10),
     ]
     for stream, s in merged.groupby("stream", sort=True):
         print(f"\n=== {stream}")
@@ -216,9 +237,14 @@ def report_compare(stats_a: pd.DataFrame, stats_b: pd.DataFrame, name_a: str, na
                     _fmt(r.ratio, ".2f"),
                     _fmt(r.total_s_a, ".3f"),
                     _fmt(r.total_s_b, ".3f"),
+                    _fmt(r.pct_total_a, ".1f"),
+                    _fmt(r.pct_total_b, ".1f"),
                 ]
             )
-        print_table(header, rows)
+        total_a, total_b = _stream_total(s, "total_s_a"), _stream_total(s, "total_s_b")
+        footer = ["total (sum of top level)"] + [""] * 4
+        footer += [_fmt(total_b / total_a, ".2f"), f"{total_a:.3f}", f"{total_b:.3f}"]
+        print_table(header, rows, footer + ["100.0", "100.0"])
     return merged[["stream", "path"] + [f"{c}_{x}" for c in cols for x in "ab"] + ["ratio"]]
 
 
