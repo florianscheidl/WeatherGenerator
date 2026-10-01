@@ -35,7 +35,7 @@ class DataReaderObs(DataReaderBase):
 
         self.filename = filename
         sname = stream_info["name"]
-        with io_timer(f"{sname} : obs init : zarr.open"):
+        with io_timer(sname, "obs init : zarr.open"):
             self.z = zarr.open(filename, mode="r")
             self.data = self.z["data"]
             self.dt = self.z["dates"]  # datetime only
@@ -50,7 +50,7 @@ class DataReaderObs(DataReaderBase):
 
         # To read idx convert to a string, format e.g.: 197001010000
         base_date_str = dt_obj.strftime("%Y%m%d%H%M")
-        with io_timer(f"{sname} : obs init : open hourly index + colnames"):
+        with io_timer(sname, "obs init : open hourly index + colnames"):
             self.hrly_index = self.z[f"idx_{base_date_str}_1"]
             self.colnames = list(self.data.attrs["colnames"])
 
@@ -107,7 +107,7 @@ class DataReaderObs(DataReaderBase):
         _logger.info(f"{sname} geoinfos : {self.geoinfo_channels}")
 
         # load additional properties (mean, var)
-        with io_timer(f"{sname} : obs init : load properties"):
+        with io_timer(sname, "obs init : load properties"):
             self._load_properties()
         self.mean = np.array(self.properties["means"])  # [data_idx]
         self.stdev = np.sqrt(np.array(self.properties["vars"]))  # [data_idx])
@@ -115,7 +115,7 @@ class DataReaderObs(DataReaderBase):
         self.stdev_geoinfo = np.sqrt(np.array(self.properties["vars"])[self.geoinfo_idx])
 
         # Create index for samples
-        with io_timer(f"{sname} : obs init : setup sample index"):
+        with io_timer(sname, "obs init : setup sample index"):
             self._setup_sample_index()
 
         self.len = min(len(self.indices_start), len(self.indices_end))
@@ -277,18 +277,18 @@ class DataReaderObs(DataReaderBase):
         end_row = self.indices_end[idx]
 
         sname = self.stream_info["name"]
-        with io_timer(f"{sname} : obs _get : read coords"):
+        with io_timer(sname, "obs _get : read coords"):
             coords = self.data.oindex[start_row:end_row, self.coords_idx]
-        with io_timer(f"{sname} : obs _get : read geoinfos"):
+        with io_timer(sname, "obs _get : read geoinfos"):
             geoinfos = (
                 self.data.oindex[start_row:end_row, self.geoinfo_idx]
                 if len(self.geoinfo_idx) > 0
                 else np.zeros((coords.shape[0], 0), np.float32)
             )
 
-        with io_timer(f"{sname} : obs _get : read data"):
+        with io_timer(sname, "obs _get : read data"):
             data = self.data.oindex[start_row:end_row, channels_idx]
-        with io_timer(f"{sname} : obs _get : read dates"):
+        with io_timer(sname, "obs _get : read dates"):
             datetimes = self.dt[start_row:end_row][:, 0]
 
         # indices_start, indices_end above work with [t_start, t_end] and violate

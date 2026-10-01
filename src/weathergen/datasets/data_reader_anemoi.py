@@ -73,10 +73,10 @@ class DataReaderAnemoi(DataReaderTimestep):
 
         # open  dataset to peak that it is compatible with requested parameters
         sname = stream_info["name"]
-        with io_timer(f"{sname} : anemoi init : open_dataset"):
+        with io_timer(sname, "anemoi init : open_dataset"):
             ds0: Dataset = anemoi_datasets.open_dataset(filename)
         # If there is no overlap with the time range, the dataset will be empty
-        with io_timer(f"{sname} : anemoi init : read dates"):
+        with io_timer(sname, "anemoi init : read dates"):
             ds0_dates = ds0.dates
         if tw_handler.t_start >= ds0_dates[-1] or tw_handler.t_end <= ds0_dates[0]:
             name = stream_info["name"]
@@ -95,7 +95,7 @@ class DataReaderAnemoi(DataReaderTimestep):
                 f"subsampling_rate specified for anemoi dataset for stream {name}. "
                 + "Use frequency instead."
             )
-        with io_timer(f"{sname} : anemoi init : open_dataset subset"):
+        with io_timer(sname, "anemoi init : open_dataset subset"):
             ds: Dataset = anemoi_datasets.open_dataset(
                 ds0, **kwargs, start=tw_handler.t_start, end=tw_handler.t_end
             )
@@ -123,7 +123,7 @@ class DataReaderAnemoi(DataReaderTimestep):
             self.len = len(ds)
 
         # caches lats and lons
-        with io_timer(f"{sname} : anemoi init : read lat/lon"):
+        with io_timer(sname, "anemoi init : read lat/lon"):
             self.latitudes = _clip_lat(ds.latitudes)
             self.longitudes = _clip_lon(ds.longitudes)
 
@@ -158,7 +158,7 @@ class DataReaderAnemoi(DataReaderTimestep):
             self.geoinfo_idx = [ds.variables.index(ch) for ch in self.geoinfo_channels]
 
         # set geoinfo normalization statistics
-        with io_timer(f"{sname} : anemoi init : read statistics"):
+        with io_timer(sname, "anemoi init : read statistics"):
             statistics = ds.statistics
         if len(self.geoinfo_idx) > 0:
             self.mean_geoinfo = statistics["mean"][self.geoinfo_idx]
@@ -228,7 +228,7 @@ class DataReaderAnemoi(DataReaderTimestep):
         # sampling is required here
         sname = self.stream_info["name"]
         try:
-            with io_timer(f"{sname} : anemoi _get : read data"):
+            with io_timer(sname, "anemoi _get : read data"):
                 data = self.ds[didx_start:didx_end][:, :, self.ens_member].astype(np.float32)
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
@@ -236,7 +236,7 @@ class DataReaderAnemoi(DataReaderTimestep):
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
-        with io_timer(f"{sname} : anemoi _get : reshape + select channels + coords"):
+        with io_timer(sname, "anemoi _get : reshape + select channels + coords"):
             # coords-first representation and collapse multiple steps
             data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
 

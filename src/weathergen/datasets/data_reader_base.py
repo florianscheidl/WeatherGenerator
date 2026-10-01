@@ -386,7 +386,7 @@ class DataReaderBase(metaclass=ABCMeta):
         source data (coords, geoinfos, data, datetimes)
         """
 
-        with io_timer(f"{self.stream_info['name']} : reader get_source"):
+        with io_timer(self.stream_info["name"], "reader get_source"):
             rdata = self._get(idx, self.source_idx)
 
         return rdata
@@ -405,7 +405,7 @@ class DataReaderBase(metaclass=ABCMeta):
         target data (coords, geoinfos, data, datetimes)
         """
 
-        with io_timer(f"{self.stream_info['name']} : reader get_target"):
+        with io_timer(self.stream_info["name"], "reader get_target"):
             rdata = self._get(idx, self.target_idx)
 
         return rdata

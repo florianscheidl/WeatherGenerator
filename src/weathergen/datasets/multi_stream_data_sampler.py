@@ -78,14 +78,14 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
         sname = ds.stream_info["name"]
         # get source (of potentially multi-step length)
         rdata = get_reader_data(idx)
-        with io_timer(f"{sname} : {type} shuffle + remove nan coords"):
+        with io_timer(sname, f"{type} shuffle + remove nan coords"):
             rdata = rdata.shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
-        with io_timer(f"{sname} : {type} normalize"):
+        with io_timer(sname, f"{type} normalize"):
             rdata.data = normalize_channels(rdata.data)
             rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
         rdatas += [rdata]
 
-    with io_timer(f"{stream_datasets[0].stream_info['name']} : {type} combine readers"):
+    with io_timer(stream_datasets[0].stream_info["name"], f"{type} combine readers"):
         return IOReaderData.combine(rdatas)
 
 
@@ -269,7 +269,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         f"Opening dataset with type: {ds_type}"
                         + f" from stream config {stream_name}.",
                     )
-                with io_timer(f"{stream_name} : reader construction ({ds_type})"):
+                with io_timer(stream_name, f"reader construction ({ds_type})"):
                     ds = dataset(filename=filename, **kwargs)
 
                 streams_datasets[stream_name].readers += [ds]
@@ -540,7 +540,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         )
 
         sname = stream_info["name"]
-        with io_timer(f"{sname} : build stream data input"):
+        with io_timer(sname, "build stream data input"):
             stream_data = self._build_stream_data_input(
                 modes,
                 stream_data,
@@ -552,7 +552,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 input_mask,
             )
 
-        with io_timer(f"{sname} : build stream data output"):
+        with io_timer(sname, "build stream data output"):
             stream_data = self._build_stream_data_output(
                 modes,
                 stream_data,
@@ -705,16 +705,16 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # input_data and output_data is conceptually consecutive but differs
             # in source and target channels; overlap in one window when self.output_offset=0
             i_max = input_steps.max().item()
-            with io_timer(f"{stream_name} : get data windows (read + preprocess)"):
+            with io_timer(stream_name, "get data windows (read + preprocess)"):
                 (input_data, output_data) = self._get_data_windows(
                     idx, num_forecast_steps, i_max, stream_ds
                 )
 
             # tokenize windows
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
-            with io_timer(f"{stream_name} : tokenize input windows"):
+            with io_timer(stream_name, "tokenize input windows"):
                 input_tokens = self.tokenizer.get_tokens_windows(stream_info, input_data, True)
-            with io_timer(f"{stream_name} : tokenize output windows"):
+            with io_timer(stream_name, "tokenize output windows"):
                 output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
 
             for sidx, source_mask in enumerate(source_masks.masks):
