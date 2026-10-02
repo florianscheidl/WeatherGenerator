@@ -1,0 +1,10 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+
+# Eight consecutive ranks share one batch. Every level-1 HEALPix parent and all
+# of its descendant stream tokens remain on exactly one rank through embedding
+# and local assimilation.
+encoder_spatial_parallel_size: 8
+encoder_spatial_parallel_parent_level: 1
