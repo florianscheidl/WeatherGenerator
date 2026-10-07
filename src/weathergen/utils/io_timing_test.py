@@ -62,3 +62,30 @@ def test_timing_and_nvtx_together(monkeypatch, tmp_path, nvtx_calls):
     assert paths == [f"outer{io_timing.PATH_SEP}inner", "outer"]
     io_timing._out.close()
     monkeypatch.setattr(io_timing, "_out", None)
+
+
+def test_memory_sampler_started_by_io_timer(monkeypatch):
+    started: list[str] = []
+    monkeypatch.setattr(io_timing, "IO_TIMING_ENABLED", False)
+    monkeypatch.setattr(io_timing, "NVTX_ENABLED", False)
+    monkeypatch.setattr(io_timing, "MEMORY_ENABLED", True)
+    monkeypatch.setattr(io_timing, "_ensure_memory_sampler", lambda: started.append("start"))
+    with io_timing.io_timer("ERA5", "read"):
+        pass
+    assert started == ["start"]
+
+
+def test_lock_is_released_in_forked_child():
+    """A lock held by another thread (the sampler) at fork time must not block the child."""
+    import os  # noqa: PLC0415
+
+    io_timing._out_lock.acquire()
+    try:
+        pid = os.fork()
+        if pid == 0:  # child: the module lock must be a fresh, free one
+            free = io_timing._out_lock.acquire(blocking=False)
+            os._exit(0 if free else 1)
+        _, status = os.waitpid(pid, 0)
+    finally:
+        io_timing._out_lock.release()
+    assert os.WEXITSTATUS(status) == 0
