@@ -17,7 +17,8 @@ loader workers start):
   ``./io_timing``). Every process (rank, data loader worker) writes its own file
   ``io_timing_<host>_<pid>.jsonl`` with one record per timed call.
   Each record holds ``stream``, ``op``, ``path`` (the ops of the enclosing timers and this
-  one, joined by ``PATH_SEP``), ``t_start`` (epoch seconds), ``dt`` (seconds), ``pid``, ``host``.
+  one, joined by ``PATH_SEP``), ``t_start`` (epoch seconds), ``dt`` (seconds), ``pid``, ``tid``,
+  ``host``.
 - ``WEATHERGEN_IO_TIMING_LOG=0`` suppresses the per-call log lines on the
   ``weathergen.io_timing`` logger (INFO, ``io_timing : <stream> : <op> : <seconds>``).
 
@@ -135,6 +136,7 @@ def _timed(stream: str, op: str) -> Generator[None]:
                 "t_start": t_wall,
                 "dt": dt,
                 "pid": os.getpid(),
+                "tid": threading.get_ident(),
                 "host": _HOST,
             }
         )
@@ -154,6 +156,7 @@ def io_event(stream: str, op: str) -> None:
             "t_start": time.time(),
             "dt": 0.0,
             "pid": os.getpid(),
+            "tid": threading.get_ident(),
             "host": _HOST,
         }
     )
