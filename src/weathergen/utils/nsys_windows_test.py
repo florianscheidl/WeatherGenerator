@@ -80,3 +80,31 @@ def test_env_unknown_window(monkeypatch):
     monkeypatch.setenv(nsys_windows.ENV_VAR, "startup,bogus")
     with pytest.raises(ValueError):
         NsysWindows.from_config({})
+
+
+def test_stop_after_capture(calls):
+    w = NsysWindows(warmup_steps=1, steady_steps=2, stop_after_capture=True)
+    reached: list[int] = []
+    with pytest.raises(nsys_windows.NsysCaptureDone):
+        w.before_data_iter()
+        for step in range(10):
+            w.before_step(step)
+            w.after_forward(step)
+            w.after_step(step)
+            reached.append(step)
+    # raised by the hook closing the last window (steady: steps 1..2), never earlier
+    assert reached == [0, 1]
+    assert calls == ["start", "stop", "start", "stop"]
+
+
+def test_stop_after_startup_only(calls):
+    w = NsysWindows(steady=False, stop_after_capture=True)
+    w.before_data_iter()
+    with pytest.raises(nsys_windows.NsysCaptureDone):
+        w.after_forward(0)
+
+
+def test_stop_env(monkeypatch):
+    monkeypatch.setenv(nsys_windows.ENV_VAR_STOP, "1")
+    w = NsysWindows.from_config({"profiling": {"nsys_windows": {"enabled": True}}})
+    assert w is not None and w.stop_after_capture

@@ -29,12 +29,19 @@ Config (all optional, disabled unless ``profiling.nsys_windows.enabled``)::
         steady: true
         warmup_steps: 2
         steady_steps: 4
+        stop_after_capture: false
 
 The environment variable ``WEATHERGEN_NSYS_WINDOWS`` (comma-separated subset of ``startup``,
 ``steady``; set by ``launch-slurm.py --nsys-windows``) enables exactly the listed windows and
 takes precedence over ``startup``/``steady`` in the config, so that the number of windows
 matches the ``repeat:N`` of the nsys command line; ``warmup_steps``/``steady_steps`` still come
 from the config.
+
+With ``stop_after_capture`` (or ``WEATHERGEN_NSYS_STOP_AFTER_CAPTURE=1``, set by
+``launch-slurm.py --nsys-stop-after-capture``) the hook that closes the last enabled window
+raises ``NsysCaptureDone``, which ``Trainer.run`` catches to return without validation or
+checkpointing, so the nsys reports are finalized and the job ends. All ranks reach the same
+step, so they leave together.
 
 Each window boundary is also written as an ``nsys-window`` event to the io_timing records
 (``WEATHERGEN_IO_TIMING=1``), so that these can be split per window afterwards.
@@ -53,6 +60,11 @@ IO_EVENT_STREAM = "nsys-window"
 STARTUP = "startup"
 STEADY = "steady"
 ENV_VAR = "WEATHERGEN_NSYS_WINDOWS"
+ENV_VAR_STOP = "WEATHERGEN_NSYS_STOP_AFTER_CAPTURE"
+
+
+class NsysCaptureDone(Exception):  # noqa: N818 (control flow, not an error)
+    """Raised after the last enabled window closed, if the run is to end there."""
 
 
 class NsysWindows:
@@ -64,11 +76,13 @@ class NsysWindows:
         steady: bool = True,
         warmup_steps: int = 2,
         steady_steps: int = 4,
+        stop_after_capture: bool = False,
     ) -> None:
         self.startup = startup
         self.steady = steady
         self.warmup_steps = warmup_steps
         self.steady_steps = steady_steps
+        self.stop_after_capture = stop_after_capture
         self._open: str | None = None
         self._done: set[str] = set()
 
@@ -92,6 +106,8 @@ class NsysWindows:
             steady=steady,
             warmup_steps=wcf.get("warmup_steps", 2),
             steady_steps=wcf.get("steady_steps", 4),
+            stop_after_capture=wcf.get("stop_after_capture", False)
+            or os.environ.get(ENV_VAR_STOP, "") in ("1", "true"),
         )
 
     def _start(self, name: str) -> None:
@@ -113,6 +129,9 @@ class NsysWindows:
         _logger.info(f"nsys window '{name}' closed")
         self._open = None
         self._done.add(name)
+        enabled = {n for n, on in ((STARTUP, self.startup), (STEADY, self.steady)) if on}
+        if self.stop_after_capture and enabled <= self._done:
+            raise NsysCaptureDone
 
     def before_data_iter(self) -> None:
         """Call right before the data loader is iterated (workers start prefetching there)."""

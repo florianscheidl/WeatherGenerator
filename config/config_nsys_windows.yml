@@ -19,3 +19,5 @@ profiling:
     steady: True
     warmup_steps: 2
     steady_steps: 4
+    # end the run after the last window (skips validation/checkpointing)
+    stop_after_capture: False

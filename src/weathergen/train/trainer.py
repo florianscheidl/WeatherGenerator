@@ -49,7 +49,7 @@ from weathergen.train.utils import (
     validation_sample_limit_reached,
 )
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
-from weathergen.utils.nsys_windows import NsysWindows
+from weathergen.utils.nsys_windows import NsysCaptureDone, NsysWindows
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
 from weathergen.utils.utils import get_dtype
@@ -414,7 +414,11 @@ class Trainer(TrainerBase):
                 logger.info(
                     f"Mini_epoch {mini_epoch} of {self.training_cfg.num_mini_epochs}: train."
                 )
-            self.train(mini_epoch)
+            try:
+                self.train(mini_epoch)
+            except NsysCaptureDone:
+                logger.info("All nsys capture windows done, stopping the run.")
+                return
 
             if is_root():
                 logger.info(
