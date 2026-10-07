@@ -39,7 +39,7 @@ def test_disabled_without_config(monkeypatch):
 
 def test_two_windows_in_order(calls):
     log: list[str] = []
-    run_loop(NsysWindows(warmup_steps=2, steady_steps=4), 10, log)
+    run_loop(NsysWindows(warmup_steps=2, steady_steps=4, stop_after_capture=False), 10, log)
     assert calls == ["start", "stop", "start", "stop"]
     # startup closes after the first forward; steady covers steps 2..5
     assert [e for e in log if e.endswith("None")] == [
@@ -55,14 +55,16 @@ def test_two_windows_in_order(calls):
 
 
 def test_windows_open_once(calls):
-    w = NsysWindows(warmup_steps=1, steady_steps=1)
+    w = NsysWindows(warmup_steps=1, steady_steps=1, stop_after_capture=False)
     run_loop(w, 3, [])
     run_loop(w, 3, [])  # second mini-epoch
     assert calls == ["start", "stop", "start", "stop"]
 
 
 def test_only_steady(calls):
-    run_loop(NsysWindows(startup=False, warmup_steps=1, steady_steps=2), 5, [])
+    run_loop(
+        NsysWindows(startup=False, warmup_steps=1, steady_steps=2, stop_after_capture=False), 5, []
+    )
     assert calls == ["start", "stop"]
 
 
@@ -105,7 +107,16 @@ def test_stop_after_startup_only(calls):
         w.after_forward(0)
 
 
-def test_stop_env(monkeypatch):
+def test_stop_default_on_and_env_override(monkeypatch):
+    cf = {"profiling": {"nsys_windows": {"enabled": True}}}
+    monkeypatch.delenv(nsys_windows.ENV_VAR_STOP, raising=False)
+    w = NsysWindows.from_config(cf)
+    assert w is not None and w.stop_after_capture
+    monkeypatch.setenv(nsys_windows.ENV_VAR_STOP, "0")
+    w = NsysWindows.from_config(cf)
+    assert w is not None and not w.stop_after_capture
+    # the environment also overrides an explicit config value, in both directions
+    cf["profiling"]["nsys_windows"]["stop_after_capture"] = False
     monkeypatch.setenv(nsys_windows.ENV_VAR_STOP, "1")
-    w = NsysWindows.from_config({"profiling": {"nsys_windows": {"enabled": True}}})
+    w = NsysWindows.from_config(cf)
     assert w is not None and w.stop_after_capture
