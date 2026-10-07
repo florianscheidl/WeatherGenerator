@@ -71,9 +71,10 @@ def test_env_overrides_config(monkeypatch):
     monkeypatch.setenv(nsys_windows.ENV_VAR, "steady")
     w = NsysWindows.from_config(cf)
     assert w is not None and not w.startup and w.steady and w.warmup_steps == 3
-    monkeypatch.setenv(nsys_windows.ENV_VAR, "startup,steady")
-    w = NsysWindows.from_config({})
-    assert w is not None and w.startup and w.steady
+    for value in ("startup,steady", "startup:steady"):
+        monkeypatch.setenv(nsys_windows.ENV_VAR, value)
+        w = NsysWindows.from_config({})
+        assert w is not None and w.startup and w.steady
 
 
 def test_env_unknown_window(monkeypatch):

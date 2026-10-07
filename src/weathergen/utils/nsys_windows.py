@@ -31,11 +31,11 @@ Config (all optional, disabled unless ``profiling.nsys_windows.enabled``)::
         steady_steps: 4
         stop_after_capture: false
 
-The environment variable ``WEATHERGEN_NSYS_WINDOWS`` (comma-separated subset of ``startup``,
-``steady``; set by ``launch-slurm.py --nsys-windows``) enables exactly the listed windows and
-takes precedence over ``startup``/``steady`` in the config, so that the number of windows
-matches the ``repeat:N`` of the nsys command line; ``warmup_steps``/``steady_steps`` still come
-from the config.
+The environment variable ``WEATHERGEN_NSYS_WINDOWS`` (comma- or colon-separated subset of
+``startup``, ``steady``; set by ``launch-slurm.py --nsys-windows``) enables exactly the listed
+windows and takes precedence over ``startup``/``steady`` in the config, so that the number of
+windows matches the ``repeat:N`` of the nsys command line; ``warmup_steps``/``steady_steps``
+still come from the config.
 
 With ``stop_after_capture`` (or ``WEATHERGEN_NSYS_STOP_AFTER_CAPTURE=1``, set by
 ``launch-slurm.py --nsys-stop-after-capture``) the hook that closes the last enabled window
@@ -94,7 +94,7 @@ class NsysWindows:
         steady = wcf.get("steady", True)
         env = os.environ.get(ENV_VAR, "")
         if env:
-            names = {n.strip() for n in env.split(",") if n.strip()}
+            names = {n.strip() for n in env.replace(":", ",").split(",") if n.strip()}
             unknown = names - {STARTUP, STEADY}
             if unknown:
                 raise ValueError(f"{ENV_VAR}: unknown window(s) {sorted(unknown)}")
