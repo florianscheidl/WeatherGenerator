@@ -21,6 +21,11 @@ loader workers start):
 - ``WEATHERGEN_IO_TIMING_LOG=0`` suppresses the per-call log lines on the
   ``weathergen.io_timing`` logger (INFO, ``io_timing : <stream> : <op> : <seconds>``).
 
+- ``WEATHERGEN_IO_TIMING_NVTX=1`` additionally makes every ``io_timer`` open an NVTX range
+  ``io:<stream> : <op>`` for Nsight Systems, independent of ``WEATHERGEN_IO_TIMING``. It is
+  also on in nsys runs launched with ``launch-slurm.py --nsys-profiling`` (which sets
+  ``WEATHERGEN_NSYS_PROFILING=1``). Nested timers give nested ranges.
+
 Analyze the output with ``scripts/analyze_io_timing.py``.
 """
 
@@ -43,6 +48,9 @@ def _env_flag(name: str, default: str) -> bool:
 
 
 IO_TIMING_ENABLED = _env_flag("WEATHERGEN_IO_TIMING", "0")
+NVTX_ENABLED = _env_flag("WEATHERGEN_IO_TIMING_NVTX", "0") or _env_flag(
+    "WEATHERGEN_NSYS_PROFILING", "0"
+)
 _LOG_ENABLED = _env_flag("WEATHERGEN_IO_TIMING_LOG", "1")
 _OUT_DIR = pathlib.Path(os.environ.get("WEATHERGEN_IO_TIMING_DIR", "io_timing"))
 _HOST = socket.gethostname()
@@ -73,10 +81,40 @@ def _write(record: dict) -> None:
 
 @contextmanager
 def io_timer(stream: str, op: str) -> Generator[None]:
-    """Record the wall-clock time spent in the ``with`` block as ``op`` of ``stream``."""
-    if not IO_TIMING_ENABLED:
+    """Record the wall-clock time spent in the ``with`` block as ``op`` of ``stream``.
+
+    Also marks the block with an NVTX range if ``NVTX_ENABLED``.
+    """
+    if not (IO_TIMING_ENABLED or NVTX_ENABLED):
         yield
         return
+    if NVTX_ENABLED:
+        _nvtx_push(f"io:{stream} : {op}")
+    try:
+        if IO_TIMING_ENABLED:
+            with _timed(stream, op):
+                yield
+        else:
+            yield
+    finally:
+        if NVTX_ENABLED:
+            _nvtx_pop()
+
+
+def _nvtx_push(name: str) -> None:
+    import torch  # noqa: PLC0415 (lazy: keep this module importable without torch)
+
+    torch.cuda.nvtx.range_push(name)
+
+
+def _nvtx_pop() -> None:
+    import torch  # noqa: PLC0415
+
+    torch.cuda.nvtx.range_pop()
+
+
+@contextmanager
+def _timed(stream: str, op: str) -> Generator[None]:
     ops = getattr(_stack, "ops", None)
     if ops is None:
         ops = _stack.ops = []
