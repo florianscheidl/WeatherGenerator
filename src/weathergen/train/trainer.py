@@ -418,6 +418,11 @@ class Trainer(TrainerBase):
                 self.train(mini_epoch)
             except NsysCaptureDone:
                 logger.info("All nsys capture windows done, stopping the run.")
+                # leave together and tear down, or the ranks still running their NCCL heartbeat
+                # monitor report a lost TCPStore when rank 0 (the store server) exits first
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+                    torch.distributed.destroy_process_group()
                 return
 
             if is_root():

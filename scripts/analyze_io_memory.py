@@ -12,6 +12,7 @@ USAGE EXAMPLES (from the root of the repo):
   uv run scripts/analyze_io_memory.py logs/<run-id>/profiling/io_timing/
   uv run scripts/analyze_io_memory.py logs/<run-id>/profiling/io_timing/ --window startup
   uv run scripts/analyze_io_memory.py logs/<run-id>/profiling/io_timing/ --memory-csv memory.csv
+  uv run scripts/analyze_io_memory.py logs/<run-id>/profiling/io_timing/ --plot memory.png
 """
 
 import argparse
@@ -179,6 +180,141 @@ def report_memory(mem: pd.DataFrame, bin_s: float) -> pd.DataFrame:
     return timeline
 
 
+# Chart colors: categorical slots 1-4 of the reference palette, validated for adjacent-pair CVD
+# and normal-vision separation (aqua and yellow are low-contrast on the surface, hence the
+# direct labels on the GPU lines). Ink and grid are neutral.
+SURFACE, INK, INK_2, GRID, BAND = "#fcfcfb", "#0b0b0b", "#52514e", "#e6e5e1", "#eceae4"
+C_MAIN, C_WORKERS, C_GPU_ALLOC, C_GPU_RESERVED = "#2a78d6", "#eb6834", "#1baf7a", "#eda100"
+GIB = 1024.0
+
+
+def plot_memory(
+    timeline: pd.DataFrame,
+    spans: dict[str, tuple[float, float]],
+    path: Path,
+    title: str = "Memory footprint",
+) -> None:
+    """Write the memory chart: host PSS stacked (main vs. workers) and, if sampled, GPU lines.
+
+    ``spans`` are the nsys capture windows in seconds since the run start (shaded bands).
+    """
+    import matplotlib  # noqa: PLC0415 (only needed for --plot)
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt  # noqa: PLC0415
+
+    has_gpu = timeline["gpu_reserved_mib"].notna().any()
+    fig, axes = plt.subplots(
+        2 if has_gpu else 1,
+        1,
+        figsize=(10, 6.6 if has_gpu else 4.4),
+        sharex=True,
+        gridspec_kw={"height_ratios": [3, 2]} if has_gpu else None,
+        facecolor=SURFACE,
+        squeeze=False,
+    )
+    axes = axes[:, 0]
+    t = timeline["t_s"].to_numpy()
+
+    for ax in axes:
+        ax.set_facecolor(SURFACE)
+        ax.grid(axis="y", color=GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(INK_2)
+        ax.tick_params(colors=INK_2, labelsize=9)
+        for t_open, t_close in spans.values():
+            ax.axvspan(t_open, t_close, color=BAND, zorder=0, linewidth=0)
+    for name, (t_open, _) in spans.items():
+        axes[0].text(
+            t_open,
+            1.02,
+            name,
+            transform=axes[0].get_xaxis_transform(),
+            color=INK_2,
+            fontsize=9,
+            ha="left",
+            va="bottom",
+        )
+
+    ax = axes[0]
+    ax.stackplot(
+        t,
+        timeline["main_mib"] / GIB,
+        timeline["workers_mib"] / GIB,
+        colors=[C_MAIN, C_WORKERS],
+        edgecolor=SURFACE,
+        linewidth=1.0,
+        labels=["rank processes (main)", "data loader workers"],
+        zorder=2,
+    )
+    ax.set_ylim(0, timeline["total_mib"].max() / GIB * 1.2)
+    ax.set_ylabel("Host memory, PSS (GiB)", color=INK, fontsize=10)
+    ax.legend(loc="upper left", frameon=False, fontsize=9, labelcolor=INK_2)
+    peak = timeline.loc[timeline["total_mib"].idxmax()]
+    ax.plot(
+        [peak.t_s],
+        [peak.total_mib / GIB],
+        "o",
+        color=INK,
+        markersize=5,
+        markeredgecolor=SURFACE,
+        markeredgewidth=2,
+        zorder=4,
+    )
+    ax.annotate(
+        f"peak {peak.total_mib / GIB:.1f} GiB at {peak.t_s:.0f} s",
+        (peak.t_s, peak.total_mib / GIB),
+        xytext=(8, 8),
+        textcoords="offset points",
+        color=INK,
+        fontsize=9,
+    )
+
+    if has_gpu:
+        ax = axes[1]
+        for col, color, label in (
+            ("gpu_reserved_mib", C_GPU_RESERVED, "reserved"),
+            ("gpu_alloc_mib", C_GPU_ALLOC, "allocated"),
+        ):
+            series = timeline[["t_s", col]].dropna()
+            ax.plot(series["t_s"], series[col] / GIB, color=color, linewidth=2, zorder=3)
+            ax.annotate(
+                f"{label} {series[col].max() / GIB:.1f} GiB (peak)",
+                (series["t_s"].iloc[-1], series[col].iloc[-1] / GIB),
+                xytext=(0, 7),
+                textcoords="offset points",
+                color=INK_2,
+                fontsize=9,
+                ha="right",
+                va="bottom",
+            )
+        ax.set_ylim(0, timeline["gpu_reserved_mib"].max() / GIB * 1.25)
+        ax.set_ylabel("GPU memory, PyTorch allocator (GiB)", color=INK, fontsize=10)
+        ax.margins(x=0)
+    axes[-1].set_xlabel("time since first record (s)", color=INK_2, fontsize=10)
+    axes[0].set_xlim(t.min(), t.max())
+    fig.suptitle(title, color=INK, fontsize=12, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(path, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def window_bounds(df: pd.DataFrame, t0: float) -> dict[str, tuple[float, float]]:
+    """nsys capture windows as (open, close) in seconds since ``t0``, over all processes."""
+    events = df[df["stream"] == EVENT_STREAM]
+    spans: dict[str, tuple[float, float]] = {}
+    for name in sorted({op.rsplit(" ", 1)[0] for op in events["op"]}):
+        opens = events.loc[events["op"] == f"{name} open", "t_start"]
+        closes = events.loc[events["op"] == f"{name} close", "t_start"]
+        if not opens.empty:
+            end = closes.max() if not closes.empty else df["t_start"].max()
+            spans[name] = (opens.min() - t0, end - t0)
+    return spans
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -193,9 +329,13 @@ def main() -> None:
     parser.add_argument(
         "--memory-csv", type=Path, help="also write the node-wide memory timeline to this CSV"
     )
+    parser.add_argument(
+        "--plot", type=Path, help="also draw the memory chart to this image (.png, .svg, .pdf)"
+    )
     args = parser.parse_args()
 
     df = load(args.run)
+    spans = window_bounds(df, df["t_start"].min())
     if args.window:
         df = select_window(df, args.window)
     mem = df[df["stream"] == MEMORY_STREAM]
@@ -208,6 +348,14 @@ def main() -> None:
     if args.memory_csv:
         timeline.to_csv(args.memory_csv, index=False)
         print(f"Wrote {args.memory_csv}")
+    if args.plot:
+        title = "Memory footprint" + (f", window {args.window}" if args.window else "")
+        run_ids = [p for p in args.run[0].resolve().parts if p == "io_timing"]
+        if run_ids and len(args.run[0].resolve().parts) >= 4:
+            title += f" — run {args.run[0].resolve().parts[-3]}"
+        shown = {args.window: spans[args.window]} if args.window else spans
+        plot_memory(timeline, shown, args.plot, title)
+        print(f"Wrote {args.plot}")
 
 
 if __name__ == "__main__":

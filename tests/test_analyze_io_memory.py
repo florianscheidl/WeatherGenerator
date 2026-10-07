@@ -111,3 +111,26 @@ def test_end_to_end_cli(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "peak 1600 MiB" in out and "worker0" in out
     assert csv.exists() and "total_mib" in csv.read_text()
+
+
+def test_plot_writes_image_with_and_without_gpu(mem, tmp_path):
+    pytest.importorskip("matplotlib")
+    timeline = ana.memory_timeline(mem, 1.0)
+    spans = {"startup": (0.5, 2.5)}
+    with_gpu = tmp_path / "with_gpu.png"
+    ana.plot_memory(timeline, spans, with_gpu, title="t")
+    assert with_gpu.stat().st_size > 1000
+    no_gpu = tmp_path / "no_gpu.png"
+    ana.plot_memory(timeline.assign(gpu_reserved_mib=float("nan")), {}, no_gpu)
+    assert no_gpu.stat().st_size > 1000
+
+
+def test_window_bounds_relative_to_run_start():
+    df = pd.DataFrame.from_records(
+        [
+            {"stream": "nsys-window", "op": "startup open", "t_start": 1010.0},
+            {"stream": "nsys-window", "op": "startup close", "t_start": 1030.0},
+            {"stream": "memory", "op": "sample", "t_start": 1000.0},
+        ]
+    )
+    assert ana.window_bounds(df, 1000.0) == {"startup": (10.0, 30.0)}
