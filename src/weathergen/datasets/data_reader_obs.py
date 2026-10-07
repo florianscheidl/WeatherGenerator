@@ -22,6 +22,7 @@ from weathergen.datasets.data_reader_base import (
     check_reader_data,
 )
 from weathergen.train.utils import Stage
+from weathergen.utils.io_timing import io_timer
 
 _logger = logging.getLogger(__name__)
 
@@ -33,9 +34,11 @@ class DataReaderObs(DataReaderBase):
         super().__init__(tw_handler, stream_info)
 
         self.filename = filename
-        self.z = zarr.open(filename, mode="r")
-        self.data = self.z["data"]
-        self.dt = self.z["dates"]  # datetime only
+        sname = stream_info["name"]
+        with io_timer(sname, "obs init : zarr.open"):
+            self.z = zarr.open(filename, mode="r")
+            self.data = self.z["data"]
+            self.dt = self.z["dates"]  # datetime only
         base_dt_raw = stream_info.get("base_datetime", "1970-01-01T00:00:00")
         format_str = "%Y-%m-%dT%H:%M:%S"
 
@@ -47,8 +50,9 @@ class DataReaderObs(DataReaderBase):
 
         # To read idx convert to a string, format e.g.: 197001010000
         base_date_str = dt_obj.strftime("%Y%m%d%H%M")
-        self.hrly_index = self.z[f"idx_{base_date_str}_1"]
-        self.colnames = list(self.data.attrs["colnames"])
+        with io_timer(sname, "obs init : open hourly index + colnames"):
+            self.hrly_index = self.z[f"idx_{base_date_str}_1"]
+            self.colnames = list(self.data.attrs["colnames"])
 
         data_colnames = [col for col in self.colnames if "obsvalue" in col]
 
@@ -89,7 +93,6 @@ class DataReaderObs(DataReaderBase):
         self.coords_idx = [self.colnames.index(lat_name), self.colnames.index(lon_name)]
 
         # geoinfo channels
-        sname = stream_info["name"]
         geoinfo_channels = stream_info.get("geoinfo_channels")
         assert geoinfo_channels is not None, (
             f"{sname}: 'geoinfo_channels' must be specified in the stream config."
@@ -104,14 +107,16 @@ class DataReaderObs(DataReaderBase):
         _logger.info(f"{sname} geoinfos : {self.geoinfo_channels}")
 
         # load additional properties (mean, var)
-        self._load_properties()
+        with io_timer(sname, "obs init : load properties"):
+            self._load_properties()
         self.mean = np.array(self.properties["means"])  # [data_idx]
         self.stdev = np.sqrt(np.array(self.properties["vars"]))  # [data_idx])
         self.mean_geoinfo = np.array(self.properties["means"])[self.geoinfo_idx]
         self.stdev_geoinfo = np.sqrt(np.array(self.properties["vars"])[self.geoinfo_idx])
 
         # Create index for samples
-        self._setup_sample_index()
+        with io_timer(sname, "obs init : setup sample index"):
+            self._setup_sample_index()
 
         self.len = min(len(self.indices_start), len(self.indices_end))
 
@@ -271,15 +276,20 @@ class DataReaderObs(DataReaderBase):
         start_row = self.indices_start[idx]
         end_row = self.indices_end[idx]
 
-        coords = self.data.oindex[start_row:end_row, self.coords_idx]
-        geoinfos = (
-            self.data.oindex[start_row:end_row, self.geoinfo_idx]
-            if len(self.geoinfo_idx) > 0
-            else np.zeros((coords.shape[0], 0), np.float32)
-        )
+        sname = self.stream_info["name"]
+        with io_timer(sname, "obs _get : read coords"):
+            coords = self.data.oindex[start_row:end_row, self.coords_idx]
+        with io_timer(sname, "obs _get : read geoinfos"):
+            geoinfos = (
+                self.data.oindex[start_row:end_row, self.geoinfo_idx]
+                if len(self.geoinfo_idx) > 0
+                else np.zeros((coords.shape[0], 0), np.float32)
+            )
 
-        data = self.data.oindex[start_row:end_row, channels_idx]
-        datetimes = self.dt[start_row:end_row][:, 0]
+        with io_timer(sname, "obs _get : read data"):
+            data = self.data.oindex[start_row:end_row, channels_idx]
+        with io_timer(sname, "obs _get : read dates"):
+            datetimes = self.dt[start_row:end_row][:, 0]
 
         # indices_start, indices_end above work with [t_start, t_end] and violate
         # our convention [t_start, t_end) where endpoint is excluded

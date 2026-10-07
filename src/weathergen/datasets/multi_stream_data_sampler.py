@@ -36,6 +36,7 @@ from weathergen.datasets.utils import (
 from weathergen.readers_extra.registry import get_extra_reader
 from weathergen.train.utils import TRAIN, VAL, Stage, get_batch_size_from_config
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
+from weathergen.utils.io_timing import io_timer
 from weathergen.utils.spatial_shard import SpatialShard
 
 type AnyDataReader = DataReaderBase | DataReaderAnemoi | DataReaderObs
@@ -76,15 +77,18 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
         else:
             assert False, "invalid value for argument `type`"
 
+        sname = ds.stream_info["name"]
         # get source (of potentially multi-step length)
-        rdata = (
-            get_reader_data(idx).shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
-        )
-        rdata.data = normalize_channels(rdata.data)
-        rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
+        rdata = get_reader_data(idx)
+        with io_timer(sname, f"{type} shuffle + remove nan coords"):
+            rdata = rdata.shuffle(rng, shuffle, num_subset).remove_nan_coords_and_geoinfos()
+        with io_timer(sname, f"{type} normalize"):
+            rdata.data = normalize_channels(rdata.data)
+            rdata.geoinfos = ds.normalize_geoinfos(rdata.geoinfos)
         rdatas += [rdata]
 
-    return IOReaderData.combine(rdatas)
+    with io_timer(stream_datasets[0].stream_info["name"], f"{type} combine readers"):
+        return IOReaderData.combine(rdatas)
 
 
 @dataclasses.dataclass
@@ -312,7 +316,8 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         f"Opening dataset with type: {ds_type}"
                         + f" from stream config {stream_name}.",
                     )
-                ds = dataset(filename=filename, **kwargs)
+                with io_timer(stream_name, f"reader construction ({ds_type})"):
+                    ds = dataset(filename=filename, **kwargs)
 
                 streams_datasets[stream_name].readers += [ds]
 
@@ -589,27 +594,30 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             source_healpix_cells=self.local_num_healpix_cells,
         )
 
-        stream_data = self._build_stream_data_input(
-            modes,
-            stream_data,
-            base_idx,
-            stream_info,
-            num_steps_input,
-            input_data,
-            input_tokens,
-            input_mask,
-        )
+        sname = stream_info["name"]
+        with io_timer(sname, "build stream data input"):
+            stream_data = self._build_stream_data_input(
+                modes,
+                stream_data,
+                base_idx,
+                stream_info,
+                num_steps_input,
+                input_data,
+                input_tokens,
+                input_mask,
+            )
 
-        stream_data = self._build_stream_data_output(
-            modes,
-            stream_data,
-            base_idx,
-            stream_info,
-            num_forecast_steps,
-            output_data,
-            output_tokens,
-            output_mask,
-        )
+        with io_timer(sname, "build stream data output"):
+            stream_data = self._build_stream_data_output(
+                modes,
+                stream_data,
+                base_idx,
+                stream_info,
+                num_forecast_steps,
+                output_data,
+                output_tokens,
+                output_mask,
+            )
 
         return stream_data
 
@@ -754,16 +762,19 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
             # input_data and output_data is conceptually consecutive but differs
             # in source and target channels; overlap in one window when self.output_offset=0
             i_max = input_steps.max().item()
-            (input_data, output_data) = self._get_data_windows(
-                idx, num_forecast_steps, i_max, stream_ds
-            )
+            with io_timer(stream_name, "get data windows (read + preprocess)"):
+                (input_data, output_data) = self._get_data_windows(
+                    idx, num_forecast_steps, i_max, stream_ds
+                )
 
             # tokenize windows
             # *_tokens = [ (cells_idx, cells_idx_lens), ... ] with length = #time_steps
-            input_tokens = self.tokenizer.get_tokens_windows(
-                stream_info, input_data, True, local_source=True
-            )
-            output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
+            with io_timer(stream_name, "tokenize input windows"):
+                input_tokens = self.tokenizer.get_tokens_windows(
+                    stream_info, input_data, True, local_source=True
+                )
+            with io_timer(stream_name, "tokenize output windows"):
+                output_tokens = self.tokenizer.get_tokens_windows(stream_info, output_data, False)
 
             for sidx, source_mask in enumerate(source_masks.masks):
                 # Map each source to its target

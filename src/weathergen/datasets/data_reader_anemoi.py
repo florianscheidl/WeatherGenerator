@@ -29,6 +29,7 @@ from weathergen.datasets.data_reader_base import (
 from weathergen.datasets.healpix_domain import shard_grid_point_rows
 from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
+from weathergen.utils.io_timing import io_timer
 from weathergen.utils.spatial_shard import SpatialShard
 
 _logger = logging.getLogger(__name__)
@@ -81,9 +82,13 @@ class DataReaderAnemoi(DataReaderTimestep):
                 _logger.info("Ignoring filename and using anemoi_config option.")
 
         # open  dataset to peak that it is compatible with requested parameters
-        ds0: Dataset = anemoi_datasets.open_dataset(filename)
+        sname = stream_info["name"]
+        with io_timer(sname, "anemoi init : open_dataset"):
+            ds0: Dataset = anemoi_datasets.open_dataset(filename)
         # If there is no overlap with the time range, the dataset will be empty
-        if tw_handler.t_start >= ds0.dates[-1] or tw_handler.t_end <= ds0.dates[0]:
+        with io_timer(sname, "anemoi init : read dates"):
+            ds0_dates = ds0.dates
+        if tw_handler.t_start >= ds0_dates[-1] or tw_handler.t_end <= ds0_dates[0]:
             name = stream_info["name"]
             _logger.warning(f"{name} is not supported over data loader window. Stream is skipped.")
             super().__init__(tw_handler, stream_info)
@@ -100,9 +105,10 @@ class DataReaderAnemoi(DataReaderTimestep):
                 f"subsampling_rate specified for anemoi dataset for stream {name}. "
                 + "Use frequency instead."
             )
-        ds: Dataset = anemoi_datasets.open_dataset(
-            ds0, **kwargs, start=tw_handler.t_start, end=tw_handler.t_end
-        )
+        with io_timer(sname, "anemoi init : open_dataset subset"):
+            ds: Dataset = anemoi_datasets.open_dataset(
+                ds0, **kwargs, start=tw_handler.t_start, end=tw_handler.t_end
+            )
 
         period = np.timedelta64(ds.frequency)
         data_start_time = ds.dates[0]
@@ -127,8 +133,9 @@ class DataReaderAnemoi(DataReaderTimestep):
             self.len = len(ds)
 
         # caches lats and lons
-        self.latitudes = _clip_lat(ds.latitudes)
-        self.longitudes = _clip_lon(ds.longitudes)
+        with io_timer(sname, "anemoi init : read lat/lon"):
+            self.latitudes = _clip_lat(ds.latitudes)
+            self.longitudes = _clip_lon(ds.longitudes)
 
         # Anemoi fixed grids expose one lat/lon per grid row for the whole dataset,
         # so the rank-local row selection is computed once here and reused for
@@ -175,9 +182,11 @@ class DataReaderAnemoi(DataReaderTimestep):
             self.geoinfo_idx = [ds.variables.index(ch) for ch in self.geoinfo_channels]
 
         # set geoinfo normalization statistics
+        with io_timer(sname, "anemoi init : read statistics"):
+            statistics = ds.statistics
         if len(self.geoinfo_idx) > 0:
-            self.mean_geoinfo = ds.statistics["mean"][self.geoinfo_idx]
-            self.stdev_geoinfo = ds.statistics["stdev"][self.geoinfo_idx]
+            self.mean_geoinfo = statistics["mean"][self.geoinfo_idx]
+            self.stdev_geoinfo = statistics["stdev"][self.geoinfo_idx]
         else:
             self.mean_geoinfo = np.zeros(0)
             self.stdev_geoinfo = np.ones(0)
@@ -190,8 +199,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         self.properties = {
             "stream_id": 0,
         }
-        self.mean = ds.statistics["mean"]
-        self.stdev = ds.statistics["stdev"]
+        self.mean = statistics["mean"]
+        self.stdev = statistics["stdev"]
 
     @override
     def init_empty(self) -> None:
@@ -281,16 +290,18 @@ class DataReaderAnemoi(DataReaderTimestep):
         # ds is a wrapper around zarr with get_coordinate_selection not being exposed since
         # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
         # sampling is required here
+        sname = self.stream_info["name"]
         try:
-            if grid_rows is None:
-                data = self.ds[didx_start:didx_end][:, :, 0]
-            else:
-                # Decode one timestep at a time and filter to the rank-local grid
-                # rows immediately, so the transient decode buffer holds a single
-                # global timestep instead of the whole window.
-                data = np.stack(
-                    [self.ds[i][:, 0][:, grid_rows] for i in range(didx_start, didx_end)]
-                )
+            with io_timer(sname, "anemoi _get : read data"):
+                if grid_rows is None:
+                    data = self.ds[didx_start:didx_end][:, :, 0]
+                else:
+                    # Decode one timestep at a time and filter to the rank-local grid
+                    # rows immediately, so the transient decode buffer holds a single
+                    # global timestep instead of the whole window.
+                    data = np.stack(
+                        [self.ds[i][:, 0][:, grid_rows] for i in range(didx_start, didx_end)]
+                    )
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
             return None
@@ -298,30 +309,31 @@ class DataReaderAnemoi(DataReaderTimestep):
         data = data.astype(np.float32)
         num_steps = didx_end - didx_start
 
-        # coords-first representation and collapse multiple steps
-        data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
+        with io_timer(sname, "anemoi _get : reshape + select channels + coords"):
+            # coords-first representation and collapse multiple steps
+            data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
 
-        # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
-        # extract channels
-        data = data[:, list(channels_idx)]
+            # extract geoinfo channels (can be time-varying, so read from dataset)
+            geoinfos = data[:, list(self.geoinfo_idx)]
+            # extract channels
+            data = data[:, list(channels_idx)]
 
-        # construct lat/lon coords
-        lats = self.latitudes if grid_rows is None else self.latitudes[grid_rows]
-        lons = self.longitudes if grid_rows is None else self.longitudes[grid_rows]
-        latlon = np.concatenate(
-            [
-                np.expand_dims(lats, 0),
-                np.expand_dims(lons, 0),
-            ],
-            axis=0,
-        ).transpose()
-        # repeat latlon num_steps times
-        coords = np.vstack((latlon,) * num_steps)
+            # construct lat/lon coords
+            lats = self.latitudes if grid_rows is None else self.latitudes[grid_rows]
+            lons = self.longitudes if grid_rows is None else self.longitudes[grid_rows]
+            latlon = np.concatenate(
+                [
+                    np.expand_dims(lats, 0),
+                    np.expand_dims(lons, 0),
+                ],
+                axis=0,
+            ).transpose()
+            # repeat latlon num_steps times
+            coords = np.vstack((latlon,) * num_steps)
 
-        # date time matching #data points of data
-        # Assuming a fixed frequency for the dataset
-        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // num_steps)
+            # date time matching #data points of data
+            # Assuming a fixed frequency for the dataset
+            datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // num_steps)
 
         return ReaderData(
             coords=coords,

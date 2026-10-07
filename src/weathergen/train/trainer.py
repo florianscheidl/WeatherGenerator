@@ -49,6 +49,7 @@ from weathergen.train.utils import (
     validation_sample_limit_reached,
 )
 from weathergen.utils.distributed import get_encoder_spatial_parallel_size, is_root
+from weathergen.utils.nsys_windows import NsysWindows
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
 from weathergen.utils.utils import get_dtype
@@ -91,6 +92,7 @@ class Trainer(TrainerBase):
         self.perf_tracker: ThroughputTracker | NullThroughputTracker = NullThroughputTracker()
         self.t_training_start: float = 0
         self.training_loop_annotation_context = contextlib.nullcontext
+        self.nsys_windows: NsysWindows | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -187,6 +189,7 @@ class Trainer(TrainerBase):
             )
         if cf.get("profiling", {}).get("nvtx_annotate", False):
             self.training_loop_annotation_context = nvtx_range
+        self.nsys_windows = NsysWindows.from_config(cf)
 
     def get_target_aux_calculators(self, mode_cfg):
         """
@@ -459,6 +462,8 @@ class Trainer(TrainerBase):
 
         apply_fct_to_blocks(self.model, cf.freeze_modules, set_to_eval)
 
+        if self.nsys_windows is not None:
+            self.nsys_windows.before_data_iter()
         dataset_iter = iter(self.data_loader)
 
         self.optimizer.zero_grad()
@@ -466,6 +471,8 @@ class Trainer(TrainerBase):
         # training loop
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):
+            if self.nsys_windows is not None:
+                self.nsys_windows.before_step(bidx)
             with self.training_loop_annotation_context(f"batch_{bidx}"):
                 if cf.data_loading.get("memory_pinning", False):
                     # pin memory for faster CPU-GPU transfer
@@ -482,6 +489,8 @@ class Trainer(TrainerBase):
                         model_params=self.model_params,
                         batch=batch.get_source_samples(),
                     )
+                    if self.nsys_windows is not None:
+                        self.nsys_windows.after_forward(bidx)
 
                     targets_and_auxs = {}
                     for loss_name, target_aux in self.target_and_aux_calculators.items():
@@ -555,6 +564,9 @@ class Trainer(TrainerBase):
             # EMA update
             if self.validate_with_ema:
                 self.ema_model.update(self.cf.general.istep * batch_size_total, batch_size_total)
+
+            if self.nsys_windows is not None:
+                self.nsys_windows.after_step(bidx)
 
             self.perf_tracker.step(
                 batch,
