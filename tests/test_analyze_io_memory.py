@@ -1,4 +1,4 @@
-"""Tests for the memory part of scripts/analyze_io_timing.py (standalone script, loaded by path)."""
+"""Tests for the memory part of scripts/analyze_io_memory.py (standalone script, loaded by path)."""
 
 import importlib.util
 import json
@@ -9,7 +9,7 @@ import pytest
 pd = pytest.importorskip("pandas")
 
 _SPEC = importlib.util.spec_from_file_location(
-    "analyze_io_timing", Path(__file__).parents[1] / "scripts" / "analyze_io_timing.py"
+    "analyze_io_memory", Path(__file__).parents[1] / "scripts" / "analyze_io_memory.py"
 )
 ana = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ana)
@@ -105,7 +105,7 @@ def test_end_to_end_cli(tmp_path, capsys, monkeypatch):
     (d / "io_timing_h_100.jsonl").write_text("\n".join(json.dumps(r) for r in RECORDS))
     csv = tmp_path / "memory.csv"
     monkeypatch.setattr(
-        "sys.argv", ["analyze_io_timing.py", str(d), "--memory-csv", str(csv), "--memory-bin", "1"]
+        "sys.argv", ["analyze_io_memory.py", str(d), "--memory-csv", str(csv), "--memory-bin", "1"]
     )
     ana.main()
     out = capsys.readouterr().out

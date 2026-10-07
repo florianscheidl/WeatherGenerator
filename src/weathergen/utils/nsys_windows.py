@@ -43,8 +43,9 @@ checkpointing, so the nsys reports are finalized and the job ends. All ranks rea
 step, so they leave together. ``WEATHERGEN_NSYS_STOP_AFTER_CAPTURE=0``/``1`` overrides the
 config (``launch-slurm.py --no-nsys-stop-after-capture`` sets it to 0).
 
-Each window boundary is also written as an ``nsys-window`` event to the io_timing records
-(``WEATHERGEN_IO_TIMING=1``), so that these can be split per window afterwards.
+Each window boundary is also written as an ``nsys-window`` event to the io_timing JSON Lines
+files while memory sampling is on (``launch-slurm.py --io-timing-memory``), so that the memory
+samples can be split per window afterwards (``scripts/analyze_io_memory.py --window``).
 """
 
 import logging

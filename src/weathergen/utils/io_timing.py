@@ -7,39 +7,30 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-"""Opt-in wall-clock timing of data reading I/O and preprocessing.
+"""Annotations of data reading and preprocessing for profiling.
 
-On the HPC clusters switch it on with ``launch-slurm.py --io-timing`` (and
-``--io-timing-memory [SECONDS]`` for memory samples), which sets the variables below for the job
-and writes to ``logs/<run-id>/profiling/io_timing/``.
+``io_timer(stream, op)`` marks a block of the data pipeline with an NVTX range
+``io:<stream> : <op>`` for Nsight Systems; nested timers give nested ranges. The ranges are on
+in nsys runs (``launch-slurm.py --nsys-profiling``, which sets ``WEATHERGEN_NSYS_PROFILING=1``)
+and with ``WEATHERGEN_IO_TIMING_NVTX=1``; otherwise ``io_timer`` is a no-op.
 
 Environment variables (read once at import, so set them before the process and its data
-loader workers start):
+loader workers start; on the clusters ``launch-slurm.py`` sets them per job):
 
-- ``WEATHERGEN_IO_TIMING=1`` enables timing. When disabled, ``io_timer`` is a no-op.
-- ``WEATHERGEN_IO_TIMING_DIR`` is the directory for the JSON Lines output (default
-  ``./io_timing``). Every process (rank, data loader worker) writes its own file
-  ``io_timing_<host>_<pid>.jsonl`` with one record per timed call.
-  Each record holds ``stream``, ``op``, ``path`` (the ops of the enclosing timers and this
-  one, joined by ``PATH_SEP``), ``t_start`` (epoch seconds), ``dt`` (seconds), ``pid``, ``host``.
-- ``WEATHERGEN_IO_TIMING_LOG=0`` suppresses the per-call log lines on the
-  ``weathergen.io_timing`` logger (INFO, ``io_timing : <stream> : <op> : <seconds>``).
+- ``WEATHERGEN_IO_TIMING_MEMORY=1`` (``launch-slurm.py --io-timing-memory``) starts a
+  background thread in every process that uses ``io_timer`` (rank, data loader workers) which
+  appends host-memory samples to JSON Lines files; see ``weathergen.utils.memory_sampler``.
+  ``WEATHERGEN_IO_TIMING_MEMORY_INTERVAL`` is the sampling period in seconds (default 1). The
+  capture-window boundaries of ``weathergen.utils.nsys_windows`` are recorded as events in the
+  same files while this is on.
+- ``WEATHERGEN_IO_TIMING_DIR`` is the directory of those files (default ``./io_timing``; the
+  launcher uses ``logs/<run-id>/profiling/io_timing``). Every process writes its own file
+  ``io_timing_<host>_<pid>.jsonl``.
 
-- ``WEATHERGEN_IO_TIMING_NVTX=1`` additionally makes every ``io_timer`` open an NVTX range
-  ``io:<stream> : <op>`` for Nsight Systems, independent of ``WEATHERGEN_IO_TIMING``. It is
-  also on in nsys runs launched with ``launch-slurm.py --nsys-profiling`` (which sets
-  ``WEATHERGEN_NSYS_PROFILING=1``). Nested timers give nested ranges.
-
-- ``WEATHERGEN_IO_TIMING_MEMORY=1`` starts a background thread in every process that uses
-  ``io_timer`` (rank, data loader workers) which appends host-memory samples to the same JSON
-  Lines files (``stream`` = ``memory``); see ``weathergen.utils.memory_sampler``.
-  ``WEATHERGEN_IO_TIMING_MEMORY_INTERVAL`` is the sampling period in seconds (default 1).
-
-Analyze the output with ``scripts/analyze_io_timing.py``.
+Analyze the memory samples with ``scripts/analyze_io_memory.py``.
 """
 
 import json
-import logging
 import os
 import pathlib
 import socket
@@ -49,27 +40,18 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TextIO
 
-_logger = logging.getLogger("weathergen.io_timing")
-
 
 def _env_flag(name: str, default: str) -> bool:
     return os.environ.get(name, default).lower() in ("1", "true", "yes")
 
 
-IO_TIMING_ENABLED = _env_flag("WEATHERGEN_IO_TIMING", "0")
 NVTX_ENABLED = _env_flag("WEATHERGEN_IO_TIMING_NVTX", "0") or _env_flag(
     "WEATHERGEN_NSYS_PROFILING", "0"
 )
 MEMORY_ENABLED = _env_flag("WEATHERGEN_IO_TIMING_MEMORY", "0")
-_LOG_ENABLED = _env_flag("WEATHERGEN_IO_TIMING_LOG", "1")
 _OUT_DIR = pathlib.Path(os.environ.get("WEATHERGEN_IO_TIMING_DIR", "io_timing"))
 _HOST = socket.gethostname()
 
-# Separator of the ops of the enclosing timers in a record's ``path``.
-PATH_SEP = " > "
-
-# Per-thread stack of the enclosing timers' ops, to record nesting.
-_stack = threading.local()
 # Output file of the current process; reopened after a fork (data loader workers).
 _out: TextIO | None = None
 _out_pid: int | None = None
@@ -106,11 +88,8 @@ def write_record(record: dict) -> None:
 
 @contextmanager
 def io_timer(stream: str, op: str) -> Generator[None]:
-    """Record the wall-clock time spent in the ``with`` block as ``op`` of ``stream``.
-
-    Also marks the block with an NVTX range if ``NVTX_ENABLED``.
-    """
-    if not (IO_TIMING_ENABLED or NVTX_ENABLED or MEMORY_ENABLED):
+    """Mark the ``with`` block as ``op`` of ``stream`` with an NVTX range, if enabled."""
+    if not (NVTX_ENABLED or MEMORY_ENABLED):
         yield
         return
     if MEMORY_ENABLED:
@@ -118,11 +97,7 @@ def io_timer(stream: str, op: str) -> Generator[None]:
     if NVTX_ENABLED:
         _nvtx_push(f"io:{stream} : {op}")
     try:
-        if IO_TIMING_ENABLED:
-            with _timed(stream, op):
-                yield
-        else:
-            yield
+        yield
     finally:
         if NVTX_ENABLED:
             _nvtx_pop()
@@ -146,38 +121,12 @@ def _nvtx_pop() -> None:
     torch.cuda.nvtx.range_pop()
 
 
-@contextmanager
-def _timed(stream: str, op: str) -> Generator[None]:
-    ops = getattr(_stack, "ops", None)
-    if ops is None:
-        ops = _stack.ops = []
-    ops.append(op)
-    path = PATH_SEP.join(ops)
-    t_wall = time.time()
-    t0 = time.perf_counter()
-    try:
-        yield
-    finally:
-        dt = time.perf_counter() - t0
-        ops.pop()
-        write_record(
-            {
-                "stream": stream,
-                "op": op,
-                "path": path,
-                "t_start": t_wall,
-                "dt": dt,
-                "pid": os.getpid(),
-                "host": _HOST,
-            }
-        )
-        if _LOG_ENABLED:
-            _logger.info(f"io_timing : {stream} : {op} : {dt:.6f}")
-
-
 def io_event(stream: str, op: str) -> None:
-    """Record an instantaneous marker (``dt`` = 0), e.g. the boundaries of a capture window."""
-    if not IO_TIMING_ENABLED:
+    """Record an instantaneous marker, e.g. the boundaries of a capture window.
+
+    Only while memory sampling is on: the markers split the memory samples by window.
+    """
+    if not MEMORY_ENABLED:
         return
     write_record(
         {
