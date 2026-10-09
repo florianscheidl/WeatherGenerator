@@ -9,10 +9,11 @@
 
 """Utilities for measuring training throughput metrics."""
 
+import contextlib
 import logging
 import time
-from collections.abc import Callable
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 
 import torch
 
@@ -194,6 +195,30 @@ def nvtx_range(name):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
+
+
+def nvtx_context(cf) -> Callable[[str], AbstractContextManager]:
+    """``nvtx_range`` if ``profiling.nvtx_annotate`` is set in ``cf``, else a no-op context."""
+    if (cf.get("profiling") or {}).get("nvtx_annotate", False):
+        return nvtx_range
+    return lambda name: contextlib.nullcontext()
+
+
+def annotate_next[T](
+    iterable: Iterable[T], annotate: Callable[[str], AbstractContextManager], name: str
+) -> Iterator[T]:
+    """Yield the items of ``iterable``, each ``next()`` call inside ``annotate(name)``.
+
+    Makes the time the training loop waits for the data loader visible as a range.
+    """
+    it = iter(iterable)
+    while True:
+        with annotate(name):
+            try:
+                item = next(it)
+            except StopIteration:
+                return
+        yield item
 
 
 def _nvtx_push(name: str):

@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 import weathergen.train.loss_modules as LossModules
 from weathergen.model.model import ModelOutput
 from weathergen.train.target_and_aux_module_base import TargetAuxOutput
+from weathergen.utils.performance import nvtx_context
 from weathergen.utils.train_logger import Stage
 
 _logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class LossCalculator:
         self.cf = cf
         self.stage = stage
         self.device = device
+        self.annotate = nvtx_context(cf)
         self.loss_hist = []
         self.losses_unweighted_hist = []
         self.stddev_unweighted_hist = []
@@ -91,9 +93,10 @@ class LossCalculator:
             target = targets_and_aux[loss_term_name]
             for weight, calculator in calc_term:
                 if weight > 0.0:
-                    loss_values = calculator.compute_loss(
-                        preds=preds, targets=target, metadata=metadata
-                    )
+                    with self.annotate(f"loss:{calculator.name}"):
+                        loss_values = calculator.compute_loss(
+                            preds=preds, targets=target, metadata=metadata
+                        )
                     loss = loss + weight * loss_values.loss
                     losses_all[calculator.name] = loss_values.losses_all
                     losses_all[calculator.name]["loss_avg"] = loss_values.loss
