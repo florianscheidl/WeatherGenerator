@@ -15,6 +15,11 @@ Typical use, comparing two encodings of the same dataset:
 Under ``srun --ntasks N`` every task reads a disjoint, interleaved subset of the windows
 and writes its own ``<output>.rank<k>.jsonl``, which measures concurrent reads from the
 same dataset.
+
+With ``--nvtx`` each ``_get`` call is an NVTX range ``benchmark.get`` (``benchmark.get.warmup``
+for warmup windows) with the reader's steps nested inside as ``reader.<step>``. Run under
+``nsys profile -t nvtx`` and summarise with ``nsys stats -r nvtx_sum``. Needs a CUDA build of
+torch; the ranges add a few microseconds per window to the timings.
 """
 
 import argparse
@@ -45,6 +50,7 @@ from weathergen.train.utils import (
     filter_config_by_enabled,
     get_active_stage_config,
 )
+from weathergen.utils.performance import NvtxAnnotator
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +113,11 @@ def _parse_args() -> argparse.Namespace:
         "--checksum",
         action="store_true",
         help="Store a hash of each window's data, to check two encodings return equal values.",
+    )
+    parser.add_argument(
+        "--nvtx",
+        action="store_true",
+        help="Emit NVTX ranges around each _get call and its steps, for nsys.",
     )
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument(
@@ -247,7 +258,10 @@ def main() -> None:
         stage_cfg.time_window_step,
     )
     started = time.perf_counter()
-    reader = DataReaderAnemoi(tw_handler, filename, stream_info, stage)
+    nvtx = NvtxAnnotator(args.nvtx, "benchmark.")
+    reader = DataReaderAnemoi(
+        tw_handler, filename, stream_info, stage, nvtx=NvtxAnnotator(args.nvtx, "reader.")
+    )
     init_seconds = time.perf_counter() - started
     if reader.ds is None:
         raise RuntimeError(f"Reader for {filename} is empty over {tw_handler}")
@@ -303,12 +317,13 @@ def main() -> None:
     with output.open("w") as out:
         out.write(json.dumps({"header": header}, default=str) + "\n")
         for position, idx in enumerate(indices):
+            warmup = position < args.warmup
             t_idxs, _ = reader._get_dataset_idxs(idx)
             started_ns = time.perf_counter_ns()
-            rd = reader._get(idx, channels)
+            with nvtx.range("get.warmup" if warmup else "get"):
+                rd = reader._get(idx, channels)
             duration_ns = time.perf_counter_ns() - started_ns
 
-            warmup = position < args.warmup
             num_steps = len(t_idxs)
             record: dict[str, Any] = {
                 "idx": int(idx),

@@ -28,6 +28,7 @@ from weathergen.datasets.data_reader_base import (
 )
 from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
+from weathergen.utils.performance import NvtxAnnotator
 
 _logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         filename: Path,
         stream_info: dict,
         stage: Stage,
+        *,
+        nvtx: NvtxAnnotator | None = None,
     ) -> None:
         """
         Construct data reader for anemoi dataset
@@ -51,11 +54,15 @@ class DataReaderAnemoi(DataReaderTimestep):
             filename (and path) of dataset
         stream_info :
             information about stream
+        nvtx :
+            annotator for the steps of _get; off by default
 
         Returns
         -------
         None
         """
+
+        self.nvtx = nvtx if nvtx is not None else NvtxAnnotator(False)
 
         # use anemoi_config if it's defined; ignore filename in this case
         data_paths = stream_info.get("data_paths", [])
@@ -201,7 +208,9 @@ class DataReaderAnemoi(DataReaderTimestep):
         ReaderData providing coords, geoinfos, data, datetimes
         """
 
-        (t_idxs, dtr) = self._get_dataset_idxs(idx)
+        nvtx = self.nvtx
+        with nvtx.range("dataset_idxs"):
+            (t_idxs, dtr) = self._get_dataset_idxs(idx)
 
         if self.ds is None or self.len == 0 or len(t_idxs) == 0:
             return ReaderData.empty(
@@ -218,35 +227,44 @@ class DataReaderAnemoi(DataReaderTimestep):
         # subsetting is pushed to the ctor via frequency argument; this also ensures that no sub-
         # sampling is required here
         try:
-            data = self.ds[didx_start:didx_end][:, :, self.ens_member].astype(np.float32)
+            with nvtx.range("read"):
+                data = self.ds[didx_start:didx_end]
         except MissingDateError as e:
             _logger.debug(f"Date not present in anemoi dataset: {str(e)}. Skipping.")
             return ReaderData.empty(
                 num_data_fields=len(channels_idx), num_geo_fields=len(self.geoinfo_idx)
             )
 
+        with nvtx.range("select_ens_astype"):
+            data = data[:, :, self.ens_member].astype(np.float32)
+
         # coords-first representation and collapse multiple steps
-        data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
+        with nvtx.range("transpose_reshape"):
+            data = data.transpose([0, 2, 1]).reshape((data.shape[0] * data.shape[2], -1))
 
         # extract geoinfo channels (can be time-varying, so read from dataset)
-        geoinfos = data[:, list(self.geoinfo_idx)]
+        with nvtx.range("select_geoinfos"):
+            geoinfos = data[:, list(self.geoinfo_idx)]
         # extract channels
-        data = data[:, list(channels_idx)]
+        with nvtx.range("select_channels"):
+            data = data[:, list(channels_idx)]
 
         # construct lat/lon coords
-        latlon = np.concatenate(
-            [
-                np.expand_dims(self.latitudes, 0),
-                np.expand_dims(self.longitudes, 0),
-            ],
-            axis=0,
-        ).transpose()
-        # repeat latlon len(t_idxs) times
-        coords = np.vstack((latlon,) * len(t_idxs))
+        with nvtx.range("coords"):
+            latlon = np.concatenate(
+                [
+                    np.expand_dims(self.latitudes, 0),
+                    np.expand_dims(self.longitudes, 0),
+                ],
+                axis=0,
+            ).transpose()
+            # repeat latlon len(t_idxs) times
+            coords = np.vstack((latlon,) * len(t_idxs))
 
         # date time matching #data points of data
         # Assuming a fixed frequency for the dataset
-        datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // len(t_idxs))
+        with nvtx.range("datetimes"):
+            datetimes = np.repeat(self.ds.dates[didx_start:didx_end], len(data) // len(t_idxs))
 
         rd = ReaderData(
             coords=coords,
@@ -254,7 +272,8 @@ class DataReaderAnemoi(DataReaderTimestep):
             data=data,
             datetimes=datetimes,
         )
-        check_reader_data(rd, dtr)
+        with nvtx.range("check_reader_data"):
+            check_reader_data(rd, dtr)
 
         return rd
 

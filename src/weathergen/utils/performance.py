@@ -12,7 +12,7 @@
 import logging
 import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 
 import torch
 
@@ -194,6 +194,30 @@ def nvtx_range(name):
         yield
     finally:
         torch.cuda.nvtx.range_pop()
+
+
+class NvtxAnnotator:
+    """Emit nested NVTX ranges under a shared name prefix, or nothing when disabled.
+
+    It keeps no records: it is meant for code that also runs in DataLoader worker processes,
+    where no run directory is available to write to and the trace is the only sink. An
+    annotator is created before the workers start and is copied into each of them together
+    with the dataset, so one flag covers parent and workers.
+    """
+
+    def __init__(self, enabled: bool, prefix: str = "") -> None:
+        self.enabled = enabled
+        self.prefix = prefix
+
+    def child(self, prefix: str) -> "NvtxAnnotator":
+        """Return an annotator that prepends ``prefix`` to this one's range names."""
+        return NvtxAnnotator(self.enabled, f"{self.prefix}{prefix}")
+
+    def range(self, name: str) -> AbstractContextManager[None]:
+        """Context manager for one NVTX range; a no-op context when annotation is off."""
+        if not self.enabled:
+            return nullcontext()
+        return nvtx_range(f"{self.prefix}{name}")
 
 
 def _nvtx_push(name: str):
