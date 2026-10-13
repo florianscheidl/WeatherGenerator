@@ -8,18 +8,22 @@ by a header (dataset layout, versions, job info) and a summary line.
 
 Typical use, comparing two encodings of the same dataset:
 
-  uv run python scripts/benchmark_anemoi_reader.py --stream ERA5 --output v2.jsonl
-  uv run python scripts/benchmark_anemoi_reader.py --stream ERA5 --output v3.jsonl \\
+  uv run python scripts/zarr_investigation/benchmark_anemoi_reader.py --stream ERA5
+  uv run python scripts/zarr_investigation/benchmark_anemoi_reader.py --stream ERA5 \\
       --filename /path/to/dataset-v3.zarr
 
-Under ``srun --ntasks N`` every task reads a disjoint, interleaved subset of the windows
-and writes its own ``<output>.rank<k>.jsonl``, which measures concurrent reads from the
-same dataset.
+The output is named ``<dataset>_<shards>_<UTC time>[_<job>].jsonl`` in ``--output-dir``, where
+``<shards>`` is ``shards<n>`` with n chunks per shard, or ``unsharded``; ``--output`` names it
+explicitly instead. Under ``srun --ntasks N`` every task reads a disjoint, interleaved subset
+of the windows and writes its own ``<output>.rank<k>.jsonl``, which measures concurrent reads
+from the same dataset.
 
 With ``--nvtx`` each ``_get`` call is an NVTX range ``benchmark.get`` (``benchmark.get.warmup``
-for warmup windows) with the reader's steps nested inside as ``reader.<step>``. Run under
-``nsys profile -t nvtx`` and summarise with ``nsys stats -r nvtx_sum``. Needs a CUDA build of
-torch; the ranges add a few microseconds per window to the timings.
+for warmup windows) with the reader's steps nested inside as ``reader.<step>``. ``--nsys``
+re-launches the script under ``nsys profile`` with ``--nvtx``, writing the trace to
+``<trace-dir>/<output name>.nsys-rep`` so trace and JSONL pair up by name; summarise it with
+``nsys stats -r nvtx_sum``. Needs a CUDA build of torch and nsys on PATH; the ranges add a few
+microseconds per window to the timings.
 """
 
 import argparse
@@ -29,7 +33,9 @@ import logging
 import os
 import platform
 import resource
+import shutil
 import socket
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +59,11 @@ from weathergen.train.utils import (
 from weathergen.utils.performance import NvtxAnnotator
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_OUTPUT_DIR = Path("profiling/zarr_experiment_results/anemoi_reader_benchmark")
+DEFAULT_TRACE_DIR = Path("profiling/zarr_experiment_results/profiler_traces")
+# Set on the process re-launched under nsys: its trace path, and the guard against re-launching.
+_NSYS_TRACE_ENV = "WEATHERGEN_BENCHMARK_NSYS_TRACE"
 
 _ARRAY_METADATA_KEYS = (
     "zarr_format",
@@ -119,12 +130,27 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Emit NVTX ranges around each _get call and its steps, for nsys.",
     )
+    parser.add_argument(
+        "--nsys",
+        action="store_true",
+        help="Re-launch under nsys profile with --nvtx, tracing to --trace-dir.",
+    )
+    parser.add_argument(
+        "--nsys-trace", default="nvtx,osrt", help="APIs nsys traces (its --trace option)."
+    )
+    parser.add_argument(
+        "--nsys-python-sampling",
+        action="store_true",
+        help="Also sample Python stacks at 1 kHz, e.g. to look inside reader.read.",
+    )
+    parser.add_argument("--trace-dir", type=Path, default=DEFAULT_TRACE_DIR)
     parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="JSONL output (default: results/anemoi_reader_benchmark/<stream>_<time>.jsonl).",
+        help="JSONL output (default: <output-dir>/<dataset>_<shards>_<time>.jsonl).",
     )
     return parser.parse_args()
 
@@ -194,16 +220,43 @@ def _window_indices(reader: DataReaderAnemoi, args: argparse.Namespace) -> NDArr
     return indices
 
 
-def _output_path(args: argparse.Namespace, stream: str, rank: int, num_tasks: int) -> Path:
-    output = args.output
-    if output is None:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
-        job = os.environ.get("SLURM_JOB_ID")
-        name = f"{stream}_{stamp}" + (f"_{job}" if job else "")
-        output = Path("results/anemoi_reader_benchmark") / f"{name}.jsonl"
-    if num_tasks > 1:
-        output = output.with_suffix(f".rank{rank}.jsonl")
-    return output
+def _run_name(filename: Path, array: dict[str, Any]) -> str:
+    """<dataset>_<shards>_<UTC time>[_<job>], with the job's start time so all tasks agree."""
+    dataset = filename.name.removesuffix(".zarr")
+    if array["shards"] is None:
+        shards = "unsharded"
+    else:
+        shards = f"shards{int(np.prod(array['shards']) // np.prod(array['chunks']))}"
+    job_start = os.environ.get("SLURM_JOB_START_TIME")
+    started = datetime.fromtimestamp(int(job_start), UTC) if job_start else datetime.now(UTC)
+    job = os.environ.get("SLURM_JOB_ID")
+    return f"{dataset}_{shards}_{started:%Y%m%dT%H%M%S}" + (f"_{job}" if job else "")
+
+
+def _task_output_path(output: Path, rank: int, num_tasks: int) -> Path:
+    return output.with_suffix(f".rank{rank}.jsonl") if num_tasks > 1 else output
+
+
+def _exec_under_nsys(args: argparse.Namespace, output: Path, task_output: Path) -> None:
+    """Replace this process by the same benchmark under nsys, with NVTX ranges enabled."""
+    nsys = shutil.which("nsys")
+    if nsys is None:
+        raise RuntimeError("--nsys needs nsys on PATH (e.g. ml Nsight-Systems)")
+    trace = args.trace_dir / f"{task_output.stem}.nsys-rep"
+    if trace.exists():
+        raise FileExistsError(f"Trace already exists: {trace}")
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    command = [nsys, "profile", f"--trace={args.nsys_trace}", f"--output={trace}"]
+    if args.nsys_python_sampling:
+        command += ["--python-sampling=true", "--python-sampling-frequency=1000"]
+    # The base output, not the task's: the re-launched process adds the rank suffix itself.
+    command += [sys.executable, "-u", __file__, *sys.argv[1:], "--nvtx", "--output", str(output)]
+    logger.info("Re-launching under nsys, trace %s", trace)
+    os.environ[_NSYS_TRACE_ENV] = str(trace)
+    # execv drops buffered output, so flush what is already written.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(nsys, command)
 
 
 def _summary(durations_ns: list[int], decoded_bytes: int, output_bytes: int) -> dict[str, Any]:
@@ -250,6 +303,13 @@ def main() -> None:
         raise ValueError(f"Stream {stream} uses anemoi_config; only filenames are supported")
     stream_info["data_paths"] = cf.get("data_paths", [])
     filename = _resolve_filename(cf, stream_info, args.filename)
+    array = _array_metadata(filename)
+    output = args.output or args.output_dir / f"{_run_name(filename, array)}.jsonl"
+    task_output = _task_output_path(output, rank, num_tasks)
+    if task_output.exists():
+        raise FileExistsError(f"Output already exists: {task_output}")
+    if args.nsys and _NSYS_TRACE_ENV not in os.environ:
+        _exec_under_nsys(args, output, task_output)
 
     tw_handler = TimeWindowHandler(
         stage_cfg.start_date,
@@ -283,7 +343,7 @@ def main() -> None:
         "time_window_handler": str(tw_handler),
         "frequency": str(reader.ds.frequency),
         "dataset_shape": list(reader.ds.shape),
-        "array": _array_metadata(filename),
+        "array": array,
         "channels": args.channels,
         "num_channels": len(channels),
         "order": args.order,
@@ -302,19 +362,17 @@ def main() -> None:
         "zarr_threading_max_workers": zarr.config.get("threading.max_workers"),
         "anemoi_datasets_version": getattr(anemoi_datasets, "__version__", "unknown"),
         "numpy_version": np.__version__,
+        "nsys_trace": os.environ.get(_NSYS_TRACE_ENV),
         "argv": vars(args),
     }
-    output = _output_path(args, stream, rank, num_tasks)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists():
-        raise FileExistsError(f"Output already exists: {output}")
-    logger.info("Writing %d windows of %s to %s", len(indices), filename, output)
+    task_output.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Writing %d windows of %s to %s", len(indices), filename, task_output)
 
     durations_ns: list[int] = []
     decoded_bytes = 0
     output_bytes = 0
     num_empty = 0
-    with output.open("w") as out:
+    with task_output.open("w") as out:
         out.write(json.dumps({"header": header}, default=str) + "\n")
         for position, idx in enumerate(indices):
             warmup = position < args.warmup
