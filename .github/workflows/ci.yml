@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "develop"]
+    branches: [ "main", "develop", "develop-ssl-diffusion-v2" ]
   pull_request:
-    branches: [ "main", "develop"]
+    branches: [ "main", "develop", "develop-ssl-diffusion-v2" ]
     paths-ignore:
       - "CHANGELOG.md"
       - "README.md"
