@@ -267,6 +267,9 @@ anemoi-datasets = { git = "https://github.com/tjhunter/anemoi-datasets", tag = "
 
 
 [tool.pytest.ini_options]
+# Unit tests sit next to the code as *_test.py. GPU integration tests in
+# integration_tests/ are run explicitly by scripts/actions.sh.
+testpaths = ["src", "packages/common/src"]
 log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"

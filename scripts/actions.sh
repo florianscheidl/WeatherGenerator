@@ -77,7 +77,8 @@ case "$1" in
   unit-test)
     (
       cd "$SCRIPT_DIR" || exit 1
-      uv run --extra cpu pytest src/
+      # Test locations come from testpaths in pyproject.toml.
+      uv run --extra cpu pytest
     )
     ;;
   toml-check)
