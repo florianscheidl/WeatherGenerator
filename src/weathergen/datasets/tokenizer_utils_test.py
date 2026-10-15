@@ -1,7 +1,11 @@
-"""Tests for vectorized get_target_coords_local.
+"""Tests for vectorized get_target_coords_local and hpy_splits.
 
-Equivalence cases compare against the frozen split/cat path. The standalone
-two-cell case asserts hand-checked columns and does not call the original.
+get_target_coords_local: equivalence cases compare against the frozen split/cat
+path. The standalone two-cell case asserts hand-checked columns and does not call
+the original.
+
+hpy_splits: the hl=1 case asserts hand-checked tokens and does not call a frozen
+original. TokenizerMasking always converts coords to torch before tokenize_space.
 """
 
 import numpy as np
@@ -13,6 +17,7 @@ from weathergen.datasets.tokenizer import Tokenizer
 from weathergen.datasets.tokenizer_utils import (
     _rotate_points_per_cell,
     get_target_coords_local,
+    hpy_splits,
     theta_phi_to_standard_coords,
 )
 from weathergen.datasets.utils import s2tor3, vecs_to_rots
@@ -264,19 +269,21 @@ def test_get_target_coords_local_known_two_cells():
 
     ref = torch.tensor([1.0, 0.0, 0.0])
     vertex_off = ref - p
-    neighbor_off = ref - torch.stack(
-        [torch.tensor([p[i, 2], p[i, 1], -p[i, 0]]) for i in range(2)]
-    )
+    neighbor_off = ref - torch.stack([torch.tensor([p[i, 2], p[i, 1], -p[i, 0]]) for i in range(2)])
     for row, cell in ((0, 0), (1, 1)):
         local = torch.full((12,), 0.1 if cell == 0 else 0.2)
         for base in (6, 21, 36, 51, 66):
-            torch.testing.assert_close(got[row, base : base + 3], vertex_off[row], atol=1e-5, rtol=0)
+            torch.testing.assert_close(
+                got[row, base : base + 3], vertex_off[row], atol=1e-5, rtol=0
+            )
             torch.testing.assert_close(got[row, base + 3 : base + 15], local, atol=0, rtol=0)
         # First four neighbor triples (81:93). Columns 95-98 are then overwritten
         # with sin/cos of lat/lon (production layout).
         for k in range(4):
             col = 81 + 3 * k
-            torch.testing.assert_close(got[row, col : col + 3], neighbor_off[row], atol=1e-5, rtol=0)
+            torch.testing.assert_close(
+                got[row, col : col + 3], neighbor_off[row], atol=1e-5, rtol=0
+            )
 
     # Production overwrites these four columns after the neighbor block.
     torch.testing.assert_close(got[:, 98], torch.sin(coords[:, 0]))
@@ -330,3 +337,72 @@ def test_get_target_coords_local_matches_original(target_geometry, n_points, n_g
     new = get_target_coords_local(**kwargs)
     assert old.shape == new.shape
     torch.testing.assert_close(new, old, atol=0.0, rtol=0.0, equal_nan=True)
+
+
+def test_hpy_splits_known_layout_hl1():
+    """Hand-checked nest layout at hl=1 (48 cells). Does not use the frozen original.
+
+    Four lat/lon points (degrees). Nest ids are ``ang2pix(nside=2, ..., nest=True)``
+    after ``theta_phi_to_standard_coords`` (same as production):
+
+      row 0:  80N,   0E  -> cell 11, theta smallest of the three northern points
+      row 1:  70N,   0E  -> cell 11, theta largest of those three
+      row 2:  75N,   0E  -> cell 11, theta between row 0 and row 1
+      row 3:  80S, 180E  -> cell 32
+
+    Theta order in cell 11 is therefore rows 0, 2, 1. token_size=2.
+
+    pad_tokens=True stores index+1; leftover slots are 0 (padding row):
+      cell 11: [1, 3] then [2, 0]
+      cell 32: [4, 0]
+
+    pad_tokens=False stores raw rows; last token may be short:
+      cell 11: [0, 2] then [1]
+      cell 32: [3]
+    """
+    hl = 1
+    token_size = 2
+    num_cells = 12 * 4**hl
+    cell_north = 11
+    cell_south = 32
+    coords = torch.tensor(
+        [
+            [80.0, 0.0],
+            [70.0, 0.0],
+            [75.0, 0.0],
+            [-80.0, 180.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    thetas, phis = theta_phi_to_standard_coords(coords)
+    cells = ang2pix(2**hl, thetas, phis, nest=True)
+    assert cells.tolist() == [cell_north, cell_north, cell_north, cell_south]
+    assert float(thetas[0]) < float(thetas[2]) < float(thetas[1])
+
+    idxs, lens = hpy_splits(coords, hl, token_size, pad_tokens=True, offset_step=0)
+    assert len(idxs) == num_cells
+    for cell_i, (toks, tok_lens) in enumerate(zip(idxs, lens, strict=True)):
+        if cell_i == cell_north:
+            assert tok_lens == [2, 2]
+            assert torch.equal(toks[0], torch.tensor([1, 3], dtype=toks[0].dtype))
+            assert torch.equal(toks[1], torch.tensor([2, 0], dtype=toks[1].dtype))
+        elif cell_i == cell_south:
+            assert tok_lens == [2]
+            assert torch.equal(toks[0], torch.tensor([4, 0], dtype=toks[0].dtype))
+        else:
+            assert toks == []
+            assert tok_lens == []
+
+    idxs, lens = hpy_splits(coords, hl, token_size, pad_tokens=False, offset_step=0)
+    for cell_i, (toks, tok_lens) in enumerate(zip(idxs, lens, strict=True)):
+        if cell_i == cell_north:
+            assert tok_lens == [2, 1]
+            assert torch.equal(toks[0], torch.tensor([0, 2], dtype=toks[0].dtype))
+            assert torch.equal(toks[1], torch.tensor([1], dtype=toks[1].dtype))
+        elif cell_i == cell_south:
+            assert tok_lens == [1]
+            assert torch.equal(toks[0], torch.tensor([3], dtype=toks[0].dtype))
+        else:
+            assert toks == []
+            assert tok_lens == []

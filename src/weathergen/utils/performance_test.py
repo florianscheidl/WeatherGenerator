@@ -24,10 +24,10 @@ from weathergen.utils.performance import (
     compute_source_bytes,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def _no_cuda_sync():

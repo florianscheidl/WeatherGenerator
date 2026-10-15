@@ -9,10 +9,26 @@
 
 """Unit tests for collapse monitoring metrics."""
 
+import importlib.util
+import sys
+import types
+
 import pytest
 import torch
 
-from weathergen.train.collapse_monitor import CollapseMonitor
+# collapse_monitor imports weathergen.model.engines, which imports flash_attn at module
+# level; flash-attn is only in the gpu extra, so stub it for CPU runs.
+if importlib.util.find_spec("flash_attn") is None:
+    flash_attn = types.ModuleType("flash_attn")
+
+    def unavailable_flash_attention(*args, **kwargs):
+        raise AssertionError("this CPU test must not execute flash attention")
+
+    flash_attn.flash_attn_func = unavailable_flash_attention
+    flash_attn.flash_attn_varlen_func = unavailable_flash_attention
+    sys.modules["flash_attn"] = flash_attn
+
+from weathergen.train.collapse_monitor import CollapseMonitor  # noqa: E402
 
 
 @pytest.fixture
@@ -874,5 +890,9 @@ class TestSequenceVariance:
         metrics = var_monitor.compute_metrics(student_latent=latents)
 
         # var_min should decrease over steps (more dead dimensions)
-        assert metrics["collapse.student.var_min.step_0"] > metrics["collapse.student.var_min.step_1"]
-        assert metrics["collapse.student.var_min.step_1"] > metrics["collapse.student.var_min.step_2"]
+        assert (
+            metrics["collapse.student.var_min.step_0"] > metrics["collapse.student.var_min.step_1"]
+        )
+        assert (
+            metrics["collapse.student.var_min.step_1"] > metrics["collapse.student.var_min.step_2"]
+        )

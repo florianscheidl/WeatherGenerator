@@ -61,9 +61,7 @@ EXCLUDED_STREAMS = [
     (pathlib.Path("#test.yml"), DUMMY_STREAM_CONF),
 ]
 
-DUMMY_BASE_CONF = {
-    "foo": "bar"
-}
+DUMMY_BASE_CONF = {"foo": "bar"}
 
 
 def contains_keys(super_config, sub_config):
@@ -155,11 +153,13 @@ def config_fresh(private_config_file):
 
     return cf
 
+
 @pytest.fixture
 def base_config():
     return OmegaConf.create(DUMMY_BASE_CONF)
 
-@pytest.fixure
+
+@pytest.fixture
 def base_file(base_config):
     with tempfile.NamedTemporaryFile("w+") as temp:
         temp.write(OmegaConf.to_yaml(base_config))
@@ -323,7 +323,10 @@ def test_load_multiple_streams_content(streams_dir, rel_path, cf):
 
     streams = config.load_streams(streams_dir)
 
-    assert all(is_equal(stream, expected) for stream, expected in zip(streams.values(), expected))
+    assert all(
+        is_equal(stream, expected)
+        for stream, expected in zip(streams.values(), expected, strict=False)
+    )
 
 
 def test_load_duplicate_streams(streams_dir):
