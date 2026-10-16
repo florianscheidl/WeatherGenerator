@@ -580,6 +580,20 @@ class Trainer(TrainerBase):
 
         self.dataset.advance()
 
+        # log training time at the end of the mini-epoch
+        if is_root():
+            total_training_time = time.time() - self.t_training_start
+            self.train_logger.log_metrics(
+                TRAIN,
+                {
+                    "completed_mini_epoch": mini_epoch,
+                    "training_time_after_mini_epoch_seconds": total_training_time,
+                },
+            )
+            logger.info(
+                f"Training time after mini epoch {mini_epoch}: {total_training_time:.2f} seconds"
+            )
+
     def validate(self, mini_epoch, mode_cfg, batch_size):
         """
         Perform validation / test computation as specified by mode_cfg
