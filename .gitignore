@@ -122,6 +122,8 @@ ipython_config.py
 
 # uv 
 uv.lock
+# standalone package with its own lockfile
+!packages/performance/uv.lock
 
 # pdm
 #   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
