@@ -35,6 +35,7 @@ import logging
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import polars as pl
 
 logger = logging.getLogger(__name__)
@@ -579,6 +580,10 @@ def plot_standard_scaling(
                 ax.legend()
 
         ax.set_xscale(x_scale)
+        # One tick per node count present in the data, labelled with the plain value
+        node_ticks = df_plot["num_nodes"].unique().sort().to_list()
+        ax.set_xticks(node_ticks, labels=[str(n) for n in node_ticks])
+        ax.xaxis.set_minor_locator(ticker.NullLocator())
         if y_scale == "log":
             ax.set_yscale("log")
         ax.set_xlabel("Number of Nodes", fontsize=16)
