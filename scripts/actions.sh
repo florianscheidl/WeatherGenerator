@@ -4,18 +4,33 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 PRIVATE_REPO_PATH="${WEATHERGEN_PRIVATE_REPO_PATH:-$SCRIPT_DIR/../WeatherGenerator-private}"
 
+# The torch extra (see pyproject.toml) for this machine; WEATHERGEN_TORCH_EXTRA overrides it.
+# macOS: cpu (includes MPS). Linux: rocm or xpu if an AMD or Intel GPU is detected, otherwise
+# gpu (CUDA), also on login nodes without GPUs; use WEATHERGEN_TORCH_EXTRA=cpu for CPU-only.
+torch_extra() {
+  if [[ -n "${WEATHERGEN_TORCH_EXTRA:-}" ]]; then
+    echo "$WEATHERGEN_TORCH_EXTRA"
+  elif [[ "$(uname)" == "Darwin" ]]; then
+    echo cpu
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    echo gpu
+  elif [[ -e /dev/kfd ]] || command -v rocm-smi >/dev/null 2>&1 || command -v amd-smi >/dev/null 2>&1; then
+    echo rocm
+  elif command -v xpu-smi >/dev/null 2>&1; then
+    echo xpu
+  else
+    echo gpu
+  fi
+}
+
 case "$1" in
   sync)
     (
       cd "$SCRIPT_DIR" || exit 1
       # Creates a virtual environment without checking the integrity of the cache.
-      # If we are running on a mac, use the cpu extra
-      if [[ "$(uname)" == "Darwin" ]]; then
-        uv sync --all-packages --extra cpu
-        exit 0
-      fi
-      # Otherwise, use the gpu extra
-      uv sync --all-packages --extra gpu
+      extra="$(torch_extra)"
+      echo "Installing with the torch extra: $extra"
+      uv sync --all-packages --extra "$extra"
     )
     ;;
   sync-safe)
@@ -31,13 +46,9 @@ case "$1" in
       # This ensures basic integrity but it is too slow (adds 60 seconds to the sync) to do it on every sync. So we only do it on mac, where the cache is more likely to get corrupted.
       # --link-mode=copy overrides the pyproject.toml setting (symlink) to fully
       # detach installed files from the cache, so SCRATCH cleanups can't corrupt the venv.
-      # If we are running on a mac, use the cpu extra
-      if [[ "$(uname)" == "Darwin" ]]; then
-        uv sync --all-packages --extra cpu --refresh --reinstall --link-mode=copy
-        exit 0
-      fi
-      # Otherwise, use the gpu extra
-      uv sync --all-packages --extra gpu --refresh --reinstall --link-mode=copy
+      extra="$(torch_extra)"
+      echo "Installing with the torch extra: $extra"
+      uv sync --all-packages --extra "$extra" --refresh --reinstall --link-mode=copy
     )
     ;;
   lint)
