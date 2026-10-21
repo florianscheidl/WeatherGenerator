@@ -59,9 +59,27 @@ This setup is WIP. This manual only works for machines compatible with torch 2.9
     uv run --with "anemoi-datasets[remote]" anemoi-datasets create --overwrite datasets/download_configs/era5_o96_2020_1m.yaml datasets/era5-o96-2020-1pct-6h-v1.zarr
     ```
 
+### Download a pretrained model
+
+Pretrained models are hosted on Hugging Face. The model config and checkpoint are placed in
+`$WEATHERGEN_HOME/models/<run-id>`, where `WEATHERGEN_HOME` is the root of this repository.
+Run all commands from there, since `path_shared_working_dir` in `private_config.yaml` is `.`.
+
+The repository is private: log in with a token that has access to the `weathergen-dev` organization.
+
+```bash
+HF_REPO=weathergen-dev/test-preprint-model
+RUN_ID=mz7oyrr5
+WEATHERGEN_HOME=.
+uvx --from huggingface_hub hf auth login
+uvx --from huggingface_hub hf download $HF_REPO --include "*${RUN_ID}*" --local-dir $WEATHERGEN_HOME/models/$RUN_ID
+```
+
+This downloads `model_<run-id>_latest.json` and `<run-id>_latest.chkpt` (~4.2 GB).
+
 
 ### Training
 
 ```bash
-WEATHERGEN_PRIVATE_CONF=./local_config.yml uv run train --base-config ./config/era5_local.yml
+WEATHERGEN_PRIVATE_CONF=./private_config.yaml uv run train --base-config ./config/era5_local.yml
 ```
