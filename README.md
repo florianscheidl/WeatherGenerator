@@ -72,10 +72,11 @@ HF_REPO=weathergen-dev/test-preprint-model
 RUN_ID=mz7oyrr5
 WEATHERGEN_HOME=.
 uvx --from huggingface_hub hf auth login
-uvx --from huggingface_hub hf download $HF_REPO --include "*${RUN_ID}*" --local-dir $WEATHERGEN_HOME/models/$RUN_ID
+uvx --from huggingface_hub hf download $HF_REPO --include "${RUN_ID}/*" --local-dir $WEATHERGEN_HOME/models
 ```
 
-This downloads `model_<run-id>_latest.json` and `<run-id>_latest.chkpt` (~4.2 GB).
+Each model lives in a `<run-id>/` folder of the Hugging Face repo, so this downloads
+`model_<run-id>_latest.json` and `<run-id>_latest.chkpt` (~4.2 GB) to `models/<run-id>/`.
 
 
 ### Training
