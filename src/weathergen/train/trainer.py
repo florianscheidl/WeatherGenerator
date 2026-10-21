@@ -56,9 +56,10 @@ from weathergen.train.utils import (
     get_target_idxs_from_cfg,
 )
 from weathergen.utils.distributed import is_root
+from weathergen.utils.output_writer import OutputWriter
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
 from weathergen.utils.utils import get_dtype
-from weathergen.utils.validation_io import write_output
+from weathergen.utils.validation_io import prepare_output, write_output
 
 logger = logging.getLogger(__name__)
 
@@ -325,57 +326,74 @@ class Trainer(TrainerBase):
         if not compute_full_loss:
             target_aux_chunk = copy.deepcopy(targets_and_auxs[physical_loss_names[0]])
 
-        for chunk_idx, chunk in enumerate(chunks):
-            if not compute_full_loss:
-                batch.to_device_for_output_chunk(self.device, chunk)
-
-            if self.ema_model is None:
-                forecast_chunk = self.model(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                )
-            else:
-                forecast_chunk = self.ema_model.forward_eval(
-                    self.model_params,
-                    forecast_chunk,
-                    chunk,
-                )
-
-            if should_write_output:
+        # with output.async_write, chunk i is written while chunk i + 1 is computed
+        writer = (
+            OutputWriter(
+                self.cf,
+                mini_epoch,
+                asynchronous=mode_cfg.get("output", {}).get("async_write", False),
+            )
+            if should_write_output
+            else None
+        )
+        try:
+            for chunk_idx, chunk in enumerate(chunks):
                 if not compute_full_loss:
-                    target_aux = targets_and_auxs[physical_loss_names[0]]
-                    target_aux_chunk.physical = [None for _ in range(chunk[0])] + [
-                        target_aux.physical[step] for step in chunk
-                    ]
-                    target_aux_chunk.output_idxs = chunk
-                    target_output = {physical_loss_names[0]: target_aux_chunk}
+                    batch.to_device_for_output_chunk(self.device, chunk)
+
+                if self.ema_model is None:
+                    forecast_chunk = self.model(
+                        self.model_params,
+                        forecast_chunk,
+                        chunk,
+                    )
                 else:
-                    target_output = targets_and_auxs
-                write_output(
-                    self.cf,
-                    mode_cfg,
-                    batch_size,
-                    mini_epoch,
-                    bidx,
-                    denormalize_data_fct,
-                    batch,
-                    forecast_chunk,
-                    target_output,
-                )
+                    forecast_chunk = self.ema_model.forward_eval(
+                        self.model_params,
+                        forecast_chunk,
+                        chunk,
+                    )
 
-            if compute_full_loss:
-                physical += forecast_chunk.physical
-                latent += forecast_chunk.latent
-            elif chunk_idx == len(chunks) - 1:
-                physical = forecast_chunk.physical
-                latent = forecast_chunk.latent
-            else:
-                forecast_chunk.physical.clear()
-                forecast_chunk.latent = [forecast_chunk.latent[-1]]
+                if writer is not None:
+                    if not compute_full_loss:
+                        target_aux = targets_and_auxs[physical_loss_names[0]]
+                        target_aux_chunk.physical = [None for _ in range(chunk[0])] + [
+                            target_aux.physical[step] for step in chunk
+                        ]
+                        target_aux_chunk.output_idxs = chunk
+                        target_output = {physical_loss_names[0]: target_aux_chunk}
+                    else:
+                        target_output = targets_and_auxs
+                    # host copies only, so the chunk's device tensors and coordinates can be
+                    # released below while the writer still holds the data
+                    data = prepare_output(
+                        self.cf,
+                        mode_cfg,
+                        batch_size,
+                        bidx,
+                        denormalize_data_fct,
+                        batch,
+                        forecast_chunk,
+                        target_output,
+                    )
+                    if data is not None:
+                        writer.submit(data)
 
-            if not compute_full_loss:
-                batch.clear_output_chunk_coordinates(chunk)
+                if compute_full_loss:
+                    physical += forecast_chunk.physical
+                    latent += forecast_chunk.latent
+                elif chunk_idx == len(chunks) - 1:
+                    physical = forecast_chunk.physical
+                    latent = forecast_chunk.latent
+                else:
+                    forecast_chunk.physical.clear()
+                    forecast_chunk.latent = [forecast_chunk.latent[-1]]
+
+                if not compute_full_loss:
+                    batch.clear_output_chunk_coordinates(chunk)
+        finally:
+            if writer is not None:
+                writer.close()
 
         if is_diffusion:
             # single chunk; its fstep dimension is the trajectory, not forecast steps

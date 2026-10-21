@@ -231,6 +231,9 @@ validation_config:
     normalized_samples: False,
     # output streams to write; default all
     streams: null,
+    # write each forecast-step chunk (forecast.chunk_size) on a background thread while the
+    # next chunk is computed
+    async_write: False,
     }
 
   # run validation before training starts (mainly for model development)

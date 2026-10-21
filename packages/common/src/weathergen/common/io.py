@@ -757,12 +757,24 @@ class OutputBatchData:
             "Number of channel names does not align with prediction data."
         )
 
+        # inference without targets: the target has no values, so it gets no points either
+        # instead of a copy of the prediction's coords and times (keeps the target group,
+        # whose presence at step 0 encodes the forecast offset)
+        target_coords = data_coords
+        if target_data.shape[0] == 0 and preds_data.shape[0] > 0:
+            target_coords = dataclasses.replace(
+                data_coords,
+                times=data_coords.times[:0],
+                coords=data_coords.coords[:0],
+                geoinfo=data_coords.geoinfo[:0],
+            )
+
         target_dataset = OutputDataset(
             "target",
             key,
             source_interval,
             target_data,
-            **dataclasses.asdict(data_coords),
+            **dataclasses.asdict(target_coords),
         )
         prediction_dataset = OutputDataset(
             "prediction",

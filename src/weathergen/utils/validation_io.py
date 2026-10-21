@@ -14,9 +14,10 @@ import torch
 
 import weathergen.common.config as config
 import weathergen.common.io as io
-from weathergen.common.io import TimeRange, ZarrWriteConfig, zarrio_writer
+from weathergen.common.io import TimeRange, ZarrWriteConfig
 from weathergen.datasets.data_reader_base import TimeWindowHandler
 from weathergen.model.engines import LatentState
+from weathergen.utils.output_writer import write_output_store
 from weathergen.utils.utils import is_stream_reconstructed
 
 _logger = logging.getLogger(__name__)
@@ -81,6 +82,31 @@ def write_output(
 ):
     """
     Interface for writing model output
+    """
+    data = prepare_output(
+        cf, val_cfg, batch_size, batch_idx, dn_data, batch, model_output, target_aux_out
+    )
+    if data is not None:
+        store_path = config.get_path_results(cf, mini_epoch)
+        write_output_store(store_path, ZarrWriteConfig.from_config(cf), data)
+
+
+def prepare_output(
+    cf,
+    val_cfg,
+    batch_size,
+    batch_idx,
+    dn_data,
+    batch,
+    model_output,
+    target_aux_out,
+) -> io.OutputBatchData | None:
+    """
+    Collect the output of a batch (chunk) on the host, ready to be written.
+
+    Everything that touches device tensors, the batch or the model output happens here, so
+    the returned data holds only host arrays and can be written by another thread
+    (`OutputWriter`). None if there is nothing to write.
     """
 
     # TODO: how to handle multiple physical loss terms
@@ -215,7 +241,7 @@ def write_output(
 
     if len(preds_all) == 0 or np.array([p.shape[1] for pp in preds_all for p in pp]).sum() == 0:
         _logger.warning("Writing no data since predictions are empty.")
-        return
+        return None
 
     # collect source information
     sources = []
@@ -270,7 +296,7 @@ def write_output(
 
     latents_all = get_latent_output(batch, model_output) if write_latents else None
 
-    data = io.OutputBatchData(
+    return io.OutputBatchData(
         sources,
         source_intervals,
         targets_all,
@@ -287,12 +313,6 @@ def write_output(
         forecast_offset=forecast_offset,
         forecast_steps=timestep_idxs,
     )
-
-    store_path = config.get_path_results(cf, mini_epoch)
-
-    with zarrio_writer(store_path, ZarrWriteConfig.from_config(cf)) as zio:
-        for subset in data.items():
-            zio.write_zarr(subset)
 
 
 def get_latent_output(batch, model_output):

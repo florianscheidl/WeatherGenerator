@@ -22,6 +22,7 @@ from itertools import islice
 import torch
 
 import weathergen.train.trainer as trainer_module
+import weathergen.utils.output_writer as output_writer
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
 from weathergen.train.trainer import Trainer
@@ -279,8 +280,9 @@ class ProfilingTrainer(Trainer):
         Put each phase of the validation step into its own nvtx range.
 
         Like `_annotate_step_phases`. The rollout runs one forward per chunk of forecast steps
-        (`forecast.chunk_size`), so each chunk is a `forward` range. `write_output` is a module
-        function, patched in `validate`.
+        (`forecast.chunk_size`), so each chunk is a `forward` range. The output functions
+        (`prepare_output`, `write_output_store`, `write_output`) are module functions, patched
+        in `validate`.
         """
         wraps: list[tuple[object, str, str]] = [(self.model, "forward", "forward")]
         if self.ema_model is not None:
@@ -406,8 +408,16 @@ class ProfilingTrainer(Trainer):
                 stack.enter_context(memory_snapshot_session(self.cf))
             if self.profiling_cfg.annotates_nvtx:
                 self._annotate_validation_phases()
-                # a module function, so patched only while validating
-                stack.enter_context(nvtx_patched(trainer_module, "write_output", "write_output"))
+                # module functions, so patched only while validating: the chunked rollout
+                # prepares the output on the main thread and writes it in `write_output_store`,
+                # on the writer thread with `output.async_write` (its own nsys row); diffusion
+                # writes through `write_output`
+                for module, function in (
+                    (trainer_module, "write_output"),
+                    (trainer_module, "prepare_output"),
+                    (output_writer, "write_output_store"),
+                ):
+                    stack.enter_context(nvtx_patched(module, function, function))
                 stack.enter_context(self.annotate("validation"))
             super().validate(mini_epoch, mode_cfg, batch_size)
         self._log_peak_memory(VAL, "validation")

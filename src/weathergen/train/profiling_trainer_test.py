@@ -17,10 +17,11 @@ from omegaconf import OmegaConf
 pytest.importorskip("flash_attn")
 
 import weathergen.train.trainer as trainer_module  # noqa: E402
+from weathergen.common.io import ZarrWriteConfig  # noqa: E402
 from weathergen.train import profiling_trainer  # noqa: E402
 from weathergen.train.profiling_trainer import ProfilingTrainer  # noqa: E402
 from weathergen.train.trainer import Trainer  # noqa: E402
-from weathergen.utils import performance  # noqa: E402
+from weathergen.utils import output_writer, performance  # noqa: E402
 from weathergen.utils.profiling import ProfilingConfig  # noqa: E402
 
 
@@ -100,7 +101,8 @@ def _fake_validation_step(trainer, *args):
         for chunk in ([0], [1]):
             batch.to_device_for_output_chunk(None, chunk)
             trainer.model.forward()
-            trainer_module.write_output()
+            data = trainer_module.prepare_output(None, None, 1, 0, None, batch, None, {})
+            output_writer.write_output_store(None, ZarrWriteConfig(), data)
 
 
 def _annotated_inference_ranges(num_validations: int) -> list[list[str]]:
@@ -112,13 +114,17 @@ def _annotated_inference_ranges(num_validations: int) -> list[list[str]]:
         ranges.append(name)
         yield
 
-    def write_output(*args):
+    def prepare_output(*args):
+        pass
+
+    def write_output_store(*args):
         pass
 
     profiling_cfg = ProfilingConfig(enabled=True, nvtx_annotate=True)
     with (
         patch.object(performance, "nvtx_range", fake_nvtx_range),
-        patch.object(trainer_module, "write_output", write_output),
+        patch.object(trainer_module, "prepare_output", prepare_output),
+        patch.object(output_writer, "write_output_store", write_output_store),
         patch.object(Trainer, "validate", _fake_validation_step),
     ):
         trainer = ProfilingTrainer(OmegaConf.create({"metrics": 1}), profiling_cfg)
@@ -132,14 +138,15 @@ def _annotated_inference_ranges(num_validations: int) -> list[list[str]]:
             per_validation.append(ranges.copy())
             ranges.clear()
             # patched only while validating
-            assert trainer_module.write_output is write_output
+            assert trainer_module.prepare_output is prepare_output
+            assert output_writer.write_output_store is write_output_store
     return per_validation
 
 
 def test_inference_validation_steps_are_nvtx_annotated():
     (ranges,) = _annotated_inference_ranges(1)
 
-    chunk = ["to_device_for_output_chunk", "forward", "write_output"]
+    chunk = ["to_device_for_output_chunk", "forward", "prepare_output", "write_output_store"]
     assert ranges == [
         "validation",
         "next_batch",
