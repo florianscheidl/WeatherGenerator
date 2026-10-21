@@ -291,34 +291,46 @@ def _get_model_config_file_read_name(run_id: str, mini_epoch: int | None):
     return f"model_{run_id}{mini_epoch_str}.json"
 
 
-def get_model_results(run_id: str, mini_epoch_list: list, rank_list: list) -> list[Path]:
+def get_model_results(
+    run_id: str, mini_epoch_list: list, rank_list: list, results_path: None | Path
+) -> list[Path]:
     """
     Find all model results zarr stores from a given run_id.
     """
-    run_results = Path(_load_private_conf(None)["path_shared_working_dir"]) / f"results/{run_id}"
-    if not run_results.exists():
-        raise FileNotFoundError(
-            f"Results directory for run_id {run_id} does not exist: {run_results}"
-        )
-
     found_paths = []
+    if results_path is None:
+        run_results = (
+            Path(_load_private_conf()["path_shared_working_dir"]) / f"results/{run_id}"
+        )
+        if not run_results.exists():
+            raise FileNotFoundError(
+                f"Results directory for run_id {run_id} does not exist: {run_results}"
+            )
 
-    for rank in rank_list:
-        if isinstance(rank, int):
-            rank = f"{rank:04d}"
-        else:
-            rank = "*"
-
-        for mini_epoch_int in mini_epoch_list:
-            if isinstance(mini_epoch_int, int):
-                mini_epoch = f"{mini_epoch_int:05d}"
+        for rank in rank_list:
+            if isinstance(rank, int):
+                rank = f"{rank:04d}"
             else:
-                mini_epoch = "*"
+                rank = "*"
 
-            glob_str = f"validation_chkpt{mini_epoch}_rank{rank}"
+            for mini_epoch_int in mini_epoch_list:
+                if isinstance(mini_epoch_int, int):
+                    mini_epoch = f"{mini_epoch_int:05d}"
+                else:
+                    mini_epoch = "*"
 
+                glob_str = f"validation_chkpt{mini_epoch}_rank{rank}"
+
+                for ext in StoreType.extensions():
+                    found_paths.extend(run_results.glob(f"{glob_str}.{ext}"))
+    else:
+        run_results = Path(results_path)
+        if run_results.is_file():
+            found_paths = [run_results]
+        elif run_results.is_dir():
             for ext in StoreType.extensions():
-                found_paths.extend(run_results.glob(f"{glob_str}.{ext}"))
+                # will search for all .zarr/.zip files
+                found_paths.extend(run_results.glob(f"*.{ext}"))
 
     if not found_paths:
         raise FileNotFoundError(f"No zarr files found for run_id {run_id} in {run_results}")
@@ -412,7 +424,6 @@ def merge_configs(base_config: Config, update_config: Config):
 
 
 def load_merge_configs(
-    private_home: Path | None = None,
     from_run_id: str | None = None,
     mini_epoch: int | None = None,
     base: Path | Config | None = None,
@@ -438,7 +449,7 @@ def load_merge_configs(
     Returns:
         Merged configuration object.
     """
-    private_config = _load_private_conf(private_home)
+    private_config = _load_private_conf()
     overwrite_configs: list[Config] = []
     for overwrite in overwrites:
         if isinstance(overwrite, (str | Path)):
@@ -565,20 +576,22 @@ def _load_overwrite_conf(overwrite: Path | dict | DictConfig) -> DictConfig:
     return overwrite_config
 
 
-def _load_private_conf(private_home: Path | None = None) -> DictConfig:
+def _load_private_conf() -> DictConfig:
     """
     Return the private configuration from file or environment variable WEATHERGEN_PRIVATE_CONF.
     """
-    env_script_path = get_wg_private_path() / "hpc" / "platform-env.py"
-
-    if private_home is not None and private_home.is_file():
-        _logger.info(f"Loading private config from {private_home}.")
-
-    elif "WEATHERGEN_PRIVATE_CONF" in os.environ:
+    if "WEATHERGEN_PRIVATE_CONF" in os.environ:
         private_home = Path(os.environ["WEATHERGEN_PRIVATE_CONF"])
         _logger.info(f"Loading private config from WEATHERGEN_PRIVATE_CONF:{private_home}.")
-
-    elif env_script_path.is_file():
+    else:
+        try:
+            env_script_path = get_wg_private_path() / "hpc" / "platform-env.py"
+        except Exception as e:
+            _logger.warning(f"Could not determine path to platform-env.py: {e}")
+            raise FileNotFoundError(
+                "Could not find private config. Please set the environment variable "
+                "WEATHERGEN_PRIVATE_CONF or run on a supported HPC."
+            ) from e
         _logger.info(f"Loading private config from platform-env.py: {env_script_path}.")
         # This code does many checks to ensure that any error message is surfaced.
         # Since it is a process call, it can be hard to diagnose the error.
@@ -605,12 +618,6 @@ def _load_private_conf(private_home: Path | None = None) -> DictConfig:
         )
         private_home = Path(result.stdout.strip())
         _logger.info(f"Loading private config from platform-env.py output: {private_home}.")
-    else:
-        _logger.info(f"Could not find platform script at {env_script_path}")
-        raise FileNotFoundError(
-            "Could not find private config. Please set the environment variable "
-            "WEATHERGEN_PRIVATE_CONF or provide a path."
-        )
     private_cf = OmegaConf.load(private_home)
 
     if "secrets" in private_cf:

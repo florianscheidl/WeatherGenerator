@@ -147,9 +147,7 @@ class TrainLogger:
         if model_path:
             cf = config.load_run_config(run_id=run_id, mini_epoch=mini_epoch, model_path=model_path)
         else:
-            cf = config.load_merge_configs(
-                private_home=None, from_run_id=run_id, mini_epoch=mini_epoch
-            )
+            cf = config.load_merge_configs(from_run_id=run_id, mini_epoch=mini_epoch)
         run_id = cf.general.run_id
 
         result_dir_base = config.get_path_results(cf)
@@ -234,39 +232,6 @@ def clean_df(df, columns: list[str] | None):
         df = df.filter(~pl.all_horizontal(pl.col(c).is_null() for c in columns))
 
     return df
-
-
-def clean_name(s: str) -> str:
-    """
-    Remove all characters from a string except letters, digits, and underscores.
-
-    Args:
-        s (str): The input string.
-
-    Returns:
-        str: A new string containing only alphanumeric characters and underscores,
-             in the same order and capitalization as they appeared in the input.
-    """
-    return "".join(c for c in s if c.isalnum() or c == "-" or c == "_")
-
-
-def _clean_stream_name(stream_name: str) -> str:
-    return stream_name.replace(",", "").replace("/", "_").replace(" ", "_") + ", "
-
-
-def _key_loss(st_name: str, lf_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"LossPhysical.{st_name}.{lf_name}.avg"
-
-
-def _key_loss_chn(st_name: str, lf_name: str, ch_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"stream.{st_name}.loss_{lf_name}.loss_{ch_name}"
-
-
-def _key_stddev(st_name: str) -> str:
-    st_name = clean_name(st_name)
-    return f"stream.{st_name}.stddev_avg"
 
 
 def prepare_losses_for_logging(
