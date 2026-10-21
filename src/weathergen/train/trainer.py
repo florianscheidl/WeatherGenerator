@@ -25,6 +25,7 @@ from torch.distributed.tensor import DTensor
 import weathergen.common.config as config
 from weathergen.common.config import Config
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
+from weathergen.model.attention import check_attention_precision
 from weathergen.model.ema import EMAModel
 from weathergen.model.model_interface import (
     init_model_and_shard,
@@ -145,6 +146,9 @@ class Trainer(TrainerBase):
             config.validate_forecast_policy_and_steps(mode_cfg.get("forecast", {}), mode)
 
         self.mixed_precision_dtype = get_dtype(cf.mixed_precision_dtype)
+        check_attention_precision(
+            cf.with_flash_attention, cf.with_mixed_precision, get_dtype(cf.attention_dtype)
+        )
 
         self.devices = devices
         # pinning is only useful for discrete accelerators and needs one to be present

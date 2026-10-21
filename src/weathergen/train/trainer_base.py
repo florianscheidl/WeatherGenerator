@@ -11,6 +11,7 @@
 
 import os
 import re
+import sys
 
 import torch
 import torch.distributed as dist
@@ -18,7 +19,7 @@ import torch.multiprocessing
 
 from weathergen.common.config import Config
 from weathergen.train.utils import str_to_tensor, tensor_to_str
-from weathergen.utils.device import get_device, get_device_type
+from weathergen.utils.device import get_device, get_device_type, set_device_type
 from weathergen.utils.distributed import is_root
 
 PORT = 1345
@@ -41,9 +42,12 @@ class TrainerBase:
         self.cf: Config | None = None
 
     @staticmethod
-    def init_torch(num_accs_per_task=1, multiprocessing_method="fork"):
+    def init_torch(device="auto", num_accs_per_task=1, multiprocessing_method="fork"):
         """
         Initialize torch, set device and multiprocessing method.
+
+        `device` is "auto" (the available accelerator, or the CPU) or a device type, see
+        weathergen.utils.device.set_device_type.
 
         NOTE: If using the Nvidia profiler,
         the multiprocessing method must be set to "spawn".
@@ -55,10 +59,16 @@ class TrainerBase:
         # This strategy is required by the nvidia profiles
         # to properly trace events in worker processes.
         # This may cause issues with logging. Alternative: "fork"
+        if multiprocessing_method == "fork" and sys.platform == "darwin":
+            # fork is unsafe on macOS (Python's default there is spawn): data loader workers
+            # forked from ranks started by torchrun deadlock
+            print("multiprocessing_method 'fork' is not supported on macOS, using 'spawn'.")
+            multiprocessing_method = "spawn"
         torch.multiprocessing.set_start_method(multiprocessing_method, force=True)
 
         torch.backends.cuda.matmul.allow_tf32 = True
 
+        set_device_type(device)
         device_type = get_device_type()
         if device_type == "cpu":
             return [torch.device("cpu")]
@@ -121,7 +131,8 @@ class TrainerBase:
             torch.distributed.init_process_group(
                 backend=backend,
                 world_size=world_size,
-                device_id=device,
+                # binding the process group to a device is only possible for accelerators
+                device_id=device if device.type != "cpu" else None,
                 rank=rank,
                 init_method=f"tcp://{master_addr}:{master_port}",
             )

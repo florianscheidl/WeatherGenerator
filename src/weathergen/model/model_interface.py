@@ -13,6 +13,7 @@ import itertools
 import logging
 
 import torch
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -79,14 +80,17 @@ def init_model_and_shard(
 
     elif with_ddp and with_fsdp:
         # with DDP *and() FSDP
+        # explicit mesh: the default one uses the available accelerator, not the selected device
+        mesh = init_device_mesh(torch.device(device).type, (cf.world_size,))
         fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
                     reduce_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
-                else None
+                else MixedPrecisionPolicy()  # no casting
             ),
         }
         modules_to_shard = (
@@ -122,13 +126,14 @@ def init_model_and_shard(
                 fully_shard(module, **fsdp_kwargs)
 
         full_precision_fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
                     reduce_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
-                else None
+                else MixedPrecisionPolicy()  # no casting
             ),
         }
 
@@ -136,8 +141,9 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
+        fully_shard(model, mesh=mesh)
+
     if with_ddp and with_fsdp:
-        fully_shard(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 

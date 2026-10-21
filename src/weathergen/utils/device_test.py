@@ -6,9 +6,16 @@ from weathergen.utils.device import (
     get_device,
     get_device_type,
     non_blocking_copy,
+    set_device_type,
     supports_memory_pinning,
     synchronize,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_device_type():
+    yield
+    set_device_type("auto")
 
 
 def test_get_device_without_accelerator(monkeypatch):
@@ -21,6 +28,23 @@ def test_get_device_with_accelerator(monkeypatch):
     monkeypatch.setattr(torch.accelerator, "is_available", lambda: True)
     monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: torch.device("mps"))
     assert get_device(0) == torch.device("mps", 0)
+
+
+def test_set_device_type_forces_cpu(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: True)
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
+    set_device_type("cpu")
+    assert get_device(1) == torch.device("cpu")
+    set_device_type("auto")
+    assert get_device(1) == torch.device("cuda", 1)
+
+
+def test_set_device_type_rejects_unavailable_or_unknown(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    with pytest.raises(ValueError):
+        set_device_type("cuda")
+    with pytest.raises(ValueError):
+        set_device_type("tpu")
 
 
 @pytest.mark.parametrize(

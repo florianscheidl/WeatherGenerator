@@ -31,17 +31,17 @@ Attention blocks used by WeatherGenerator.
 Some blocks optionally apply 2D RoPE. When enabled, the caller must provide per-token 2D
 coordinates aligned with the token order (lat, lon in radians).
 
-Attention runs with flash-attn when it is installed. Without it, the varlen and dense heads fall
-back to torch's scaled_dot_product_attention (attention_sdpa.py) on devices that have no
-flash-attn (MPS, XPU, CPU); on CUDA/ROCm a missing flash-attn is an error unless
-with_flash_attention is disabled.
+With with_flash_attention, attention runs with flash-attn on CUDA/ROCm, where a missing
+flash-attn is an error. On other devices (MPS, XPU, CPU), and without with_flash_attention, the
+varlen and dense heads use torch's scaled_dot_product_attention (attention_sdpa.py).
 """
 
 
 @cache
 def _warn_flash_fallback(device_type: str) -> None:
     logger.warning(
-        f"flash_attn is not installed, using scaled_dot_product_attention on {device_type}."
+        f"flash_attn is only available for CUDA/ROCm, using scaled_dot_product_attention on "
+        f"{device_type}."
     )
 
 
@@ -49,15 +49,28 @@ def use_flash_attention(with_flash: bool) -> bool:
     """Whether to run flash-attn, given the with_flash_attention request and the platform."""
     if not with_flash:
         return False
-    if flash_attn_varlen_func is not None:
-        return True
     device_type = get_device_type()
     if device_type == "cuda":
-        raise ImportError(
-            "flash_attn is not installed. Install it or set with_flash_attention: False."
-        )
+        if flash_attn_varlen_func is None:
+            raise ImportError(
+                "flash_attn is not installed. Install it or set with_flash_attention: False."
+            )
+        return True
     _warn_flash_fallback(device_type)
     return False
+
+
+def check_attention_precision(
+    with_flash: bool, with_mixed_precision: bool, attention_dtype: torch.dtype
+) -> None:
+    """Check that the precision settings suit the attention implementation that will run."""
+    if use_flash_attention(with_flash):
+        if not with_mixed_precision or attention_dtype not in (torch.bfloat16, torch.float16):
+            raise ValueError(
+                "flash attention requires with_mixed_precision and attention_dtype bf16 or fp16"
+            )
+    elif not with_mixed_precision and attention_dtype != torch.float32:
+        raise ValueError("without with_mixed_precision, attention_dtype must be fp32")
 
 
 def get_attention_fcts(with_flash: bool):

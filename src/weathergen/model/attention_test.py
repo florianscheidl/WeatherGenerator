@@ -69,6 +69,11 @@ def test_fallback_without_flash_attn(monkeypatch):
     monkeypatch.setattr(attention, "get_device_type", lambda: "cpu")
     assert attention.get_attention_fcts(True) == (sdpa_func, sdpa_varlen_func)
 
+    # an installed flash_attn is only used on CUDA/ROCm
+    monkeypatch.setattr(attention, "flash_attn_varlen_func", lambda *args, **kwargs: None)
+    assert attention.get_attention_fcts(True) == (sdpa_func, sdpa_varlen_func)
+    monkeypatch.setattr(attention, "flash_attn_varlen_func", None)
+
     monkeypatch.setattr(attention, "get_device_type", lambda: "cuda")
     with pytest.raises(ImportError):
         attention.get_attention_fcts(True)
@@ -109,3 +114,27 @@ def test_sdpa_varlen_matches_flash_attn():
     out_flash = attention.flash_attn_varlen_func(*args)
     out_sdpa = sdpa_varlen_func(*args)
     torch.testing.assert_close(out_sdpa, out_flash, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize(
+    "device_type, with_mixed_precision, attention_dtype, valid",
+    [
+        ("cuda", True, torch.bfloat16, True),
+        ("cuda", True, torch.float32, False),
+        ("cuda", False, torch.bfloat16, False),
+        ("cpu", True, torch.bfloat16, True),
+        ("cpu", True, torch.float32, True),
+        ("cpu", False, torch.float32, True),
+        ("cpu", False, torch.bfloat16, False),
+    ],
+)
+def test_check_attention_precision(
+    monkeypatch, device_type, with_mixed_precision, attention_dtype, valid
+):
+    monkeypatch.setattr(attention, "flash_attn_varlen_func", lambda *args, **kwargs: None)
+    monkeypatch.setattr(attention, "get_device_type", lambda: device_type)
+    if valid:
+        attention.check_attention_precision(True, with_mixed_precision, attention_dtype)
+    else:
+        with pytest.raises(ValueError):
+            attention.check_attention_precision(True, with_mixed_precision, attention_dtype)

@@ -96,7 +96,7 @@ def run_inference(args):
     )
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
-    devices = Trainer.init_torch()
+    devices = Trainer.init_torch(device=cf.get("device", "auto"))
     cf = Trainer.init_ddp(cf)
 
     init_loggers(log_path=config.get_path_logs(cf))
@@ -134,7 +134,7 @@ def run_continue(args):
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
     mp_method = cf.general.get("multiprocessing_method", "fork")
-    devices = Trainer.init_torch(multiprocessing_method=mp_method)
+    devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
 
     init_loggers(log_path=config.get_path_logs(cf))
@@ -167,7 +167,7 @@ def run_train(args):
 
     cf.data_loading.rng_seed = int(time.time())
     mp_method = cf.general.get("multiprocessing_method", "fork")
-    devices = Trainer.init_torch(multiprocessing_method=mp_method)
+    devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
 
     # this line should probably come after the processes have been sorted out else we get lots
@@ -177,9 +177,6 @@ def run_train(args):
     logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
     cf.streams = config.load_streams(Path(cf.streams_directory))
-
-    if cf.with_flash_attention:
-        assert cf.with_mixed_precision
 
     trainer = Trainer(cf.train_logging)
 

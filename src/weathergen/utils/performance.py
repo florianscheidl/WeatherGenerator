@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import torch
 
 from weathergen.utils.device import synchronize
-from weathergen.utils.distributed import is_root
+from weathergen.utils.distributed import all_reduce_avg, is_root
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +112,7 @@ class ThroughputTracker:
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             elapsed_tensor = torch.tensor(elapsed, dtype=torch.float32, device=self._device)
-            torch.distributed.all_reduce(elapsed_tensor, op=torch.distributed.ReduceOp.AVG)
+            all_reduce_avg(elapsed_tensor)
             elapsed = elapsed_tensor.item()
 
             torch.distributed.all_reduce(global_batches)
