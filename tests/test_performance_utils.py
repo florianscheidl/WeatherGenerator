@@ -29,13 +29,6 @@ from weathergen.utils.performance import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(autouse=True)
-def _no_cuda_sync():
-    """Disable cuda.synchronize globally — tests run on CPU."""
-    with patch("weathergen.utils.performance.torch.cuda.synchronize"):
-        yield
-
-
 def _make_mock_source_samples(tensor_shapes: list[list[tuple]]):
     """Build a minimal mock of the source_samples object.
 

@@ -47,6 +47,7 @@ from weathergen.train.utils import (
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
 )
+from weathergen.utils.device import get_device, supports_memory_pinning
 from weathergen.utils.distributed import is_root
 from weathergen.utils.performance import NullThroughputTracker, ThroughputTracker, nvtx_range
 from weathergen.utils.train_logger import TrainLogger, prepare_losses_for_logging
@@ -146,6 +147,10 @@ class Trainer(TrainerBase):
         self.mixed_precision_dtype = get_dtype(cf.mixed_precision_dtype)
 
         self.devices = devices
+        # pinning is only useful for discrete accelerators and needs one to be present
+        self.with_memory_pinning = cf.data_loading.get(
+            "memory_pinning", False
+        ) and supports_memory_pinning(devices[0])
 
         # Get world_size of previous, to be continued run before
         # world_size gets overwritten by current setting during init_ddp()
@@ -195,8 +200,7 @@ class Trainer(TrainerBase):
         self.init(cf, devices)
 
         cf = self.cf
-        device_type = torch.accelerator.current_accelerator()
-        self.device = torch.device(f"{device_type}:{cf.local_rank}")
+        self.device = get_device(cf.local_rank)
         self.ema_model = None
 
         # create data loader
@@ -215,7 +219,7 @@ class Trainer(TrainerBase):
             "batch_sampler": None,
             "shuffle": False,
             "num_workers": loader_num_workers,
-            "pin_memory": cf.data_loading.get("memory_pinning", False),
+            "pin_memory": self.with_memory_pinning,
             "persistent_workers": cf.data_loading.get("persistent_workers", False),
         }
         self.data_loader_validation = torch.utils.data.DataLoader(
@@ -257,8 +261,7 @@ class Trainer(TrainerBase):
         self.init(cf, devices)
         cf = self.cf
 
-        device_type = torch.accelerator.current_accelerator()
-        self.device = torch.device(f"{device_type}:{cf.local_rank}")
+        self.device = get_device(cf.local_rank)
 
         # Update collapse monitor device
         self.collapse_monitor.device = self.device
@@ -344,7 +347,7 @@ class Trainer(TrainerBase):
             fused=True,
         )
         if cf.get("training_config").get("optimizer").get("grad_scaling", True):
-            self.grad_scaler = torch.amp.GradScaler("cuda")
+            self.grad_scaler = torch.amp.GradScaler(self.device.type)
         assert len(self.dataset) > 0, f"No data found in {self.dataset}"
 
         # lr is updated after each batch so account for this
@@ -459,14 +462,14 @@ class Trainer(TrainerBase):
         self.t_start = time.time()
         for bidx, batch in enumerate(dataset_iter):
             with self.training_loop_annotation_context(f"batch_{bidx}"):
-                if cf.data_loading.get("memory_pinning", False):
+                if self.with_memory_pinning:
                     # pin memory for faster CPU-GPU transfer
                     batch = batch.pin_memory()
 
                 batch.to_device(self.device)
 
                 with torch.autocast(
-                    device_type=f"cuda:{cf.local_rank}",
+                    device_type=self.device.type,
                     dtype=self.mixed_precision_dtype,
                     enabled=cf.with_mixed_precision,
                 ):
@@ -602,7 +605,7 @@ class Trainer(TrainerBase):
 
                     # evaluate model
                     with torch.autocast(
-                        device_type=f"cuda:{cf.local_rank}",
+                        device_type=self.device.type,
                         dtype=self.mixed_precision_dtype,
                         enabled=cf.with_mixed_precision,
                     ):
@@ -756,6 +759,7 @@ class Trainer(TrainerBase):
             loss_calculator.loss_hist,
             loss_calculator.losses_unweighted_hist,
             loss_calculator.stddev_unweighted_hist,
+            self.device,
         )
 
         samples = self.cf.general.istep * self.get_batch_size_total(self.batch_size_per_gpu)
@@ -812,6 +816,7 @@ class Trainer(TrainerBase):
                 loss_calculator.loss_hist,
                 loss_calculator.losses_unweighted_hist,
                 loss_calculator.stddev_unweighted_hist,
+                self.device,
             )
 
             if is_root():

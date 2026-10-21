@@ -16,6 +16,7 @@ from contextlib import contextmanager
 
 import torch
 
+from weathergen.utils.device import synchronize
 from weathergen.utils.distributed import is_root
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ class ThroughputTracker:
                 self._t0 = time.time()
                 self._warmup_done = True
         else:
-            torch.cuda.synchronize()
+            synchronize(self._device)
             self._total_batches += 1
             self._total_samples += self.batch_size_per_gpu
             self._total_mb += source_mb
@@ -189,19 +190,22 @@ def compute_source_bytes(source_samples) -> int:
 
 @contextmanager
 def nvtx_range(name):
-    torch.cuda.nvtx.range_push(name)
+    _nvtx_push(name)
     try:
         yield
     finally:
-        torch.cuda.nvtx.range_pop()
+        _nvtx_pop()
 
 
+# NVTX ranges exist on CUDA and ROCm (as roctx); elsewhere the annotations are dropped.
 def _nvtx_push(name: str):
-    torch.cuda.nvtx.range_push(name)
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(name)
 
 
 def _nvtx_pop():
-    torch.cuda.nvtx.range_pop()
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
 
 
 def register_nvtx_hooks(model, scope: str = "global"):

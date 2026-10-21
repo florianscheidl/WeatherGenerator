@@ -13,6 +13,7 @@ import torch
 
 from weathergen.common.io import IOReaderData
 from weathergen.train.utils import TRAIN, Stage
+from weathergen.utils.device import non_blocking_copy
 
 
 def _pin_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -145,18 +146,17 @@ class StreamData:
         """
 
         dv = device
-        self.target_coords = [t.to(dv, non_blocking=True) for t in self.target_coords]
-        self.target_coords_lens = [t.to(dv, non_blocking=True) for t in self.target_coords_lens]
-        self.target_tokens = [t.to(dv, non_blocking=True) for t in self.target_tokens]
+        nb = non_blocking_copy(dv)
+        self.target_coords = [t.to(dv, non_blocking=nb) for t in self.target_coords]
+        self.target_coords_lens = [t.to(dv, non_blocking=nb) for t in self.target_coords_lens]
+        self.target_tokens = [t.to(dv, non_blocking=nb) for t in self.target_tokens]
 
         # move to device if source data is present
         if not np.array([s is None for s in self.source_tokens_cells]).all():
-            self.source_tokens_cells = [
-                s.to(dv, non_blocking=True) for s in self.source_tokens_cells
-            ]
-            self.source_tokens_lens = [s.to(dv, non_blocking=True) for s in self.source_tokens_lens]
+            self.source_tokens_cells = [s.to(dv, non_blocking=nb) for s in self.source_tokens_cells]
+            self.source_tokens_lens = [s.to(dv, non_blocking=nb) for s in self.source_tokens_lens]
 
-            self.source_idxs_embed = [s.to(dv, non_blocking=True) for s in self.source_idxs_embed]
+            self.source_idxs_embed = [s.to(dv, non_blocking=nb) for s in self.source_idxs_embed]
 
         return self
 

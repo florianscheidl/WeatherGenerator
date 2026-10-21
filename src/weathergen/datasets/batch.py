@@ -14,6 +14,7 @@ import torch
 
 from weathergen.common.config import Config
 from weathergen.datasets.stream_data import StreamData
+from weathergen.utils.device import non_blocking_copy
 
 
 @dataclass
@@ -63,7 +64,7 @@ class Sample:
     def to_device(self, device) -> None:
         for key in self.meta_info.keys():
             self.meta_info[key].mask = (
-                self.meta_info[key].mask.to(device, non_blocking=True)
+                self.meta_info[key].mask.to(device, non_blocking=non_blocking_copy(device))
                 if self.meta_info[key].mask is not None
                 else None
             )
@@ -185,7 +186,9 @@ class BatchSamples:
             sample.to_device(device)
 
         self.tokens_lens = (
-            self.tokens_lens.to(device, non_blocking=True) if self.tokens_lens is not None else None
+            self.tokens_lens.to(device, non_blocking=non_blocking_copy(device))
+            if self.tokens_lens is not None
+            else None
         )
 
         self.device = device
