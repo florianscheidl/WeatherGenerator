@@ -111,6 +111,42 @@ def _expand_targets_to_match_preds(preds, targets_and_auxs: dict) -> None:
             t_aux.output_idxs = [t_aux.output_idxs[i // repeat] for i in range(n_pred)]
 
 
+class RolloutProgress:
+    """
+    Progress bar of one batch's rollout, over its forecast steps: from the end of the global
+    assimilation through the forecast engine to the end of writing the output.
+
+    The bar starts when the encoder's forward returns, i.e. on the first chunk of the
+    rollout; the device is synchronized there so that it starts when the assimilation has
+    run, not when it was queued.
+    """
+
+    def __init__(self, encoder: torch.nn.Module, num_steps: int, device: torch.device):
+        self.num_steps = num_steps
+        self.device = device
+        self.pbar: tqdm.tqdm | None = None
+        self._hook = encoder.register_forward_hook(self._start)
+
+    def _start(self, *_) -> None:
+        self._hook.remove()
+        torch.accelerator.synchronize(self.device)
+        self.pbar = tqdm.tqdm(total=self.num_steps, desc="rollout", unit="step", leave=True)
+
+    def update(self, num_steps: int) -> None:
+        """Count forecast steps whose output is computed (and written or submitted)."""
+        if self.pbar is not None:
+            self.pbar.update(num_steps)
+
+    def close(self, output_writer: AsyncOutputWriter | None) -> None:
+        """Close the bar once all output is written."""
+        self._hook.remove()
+        if output_writer is not None:
+            output_writer.wait()
+        if self.pbar is not None:
+            self.pbar.update(self.num_steps - self.pbar.n)
+            self.pbar.close()
+
+
 class Trainer(TrainerBase):
     def __init__(self, train_logging: Config):
         TrainerBase.__init__(self)
@@ -265,6 +301,14 @@ class Trainer(TrainerBase):
             for start in range(0, len(output_idxs), chunk_size)
         ]
 
+    def _rollout_progress(self, batch) -> RolloutProgress | None:
+        """Progress bar of the rollout of the batch, in inference on the root rank."""
+        if self.cf.rank > 0 or self.cf.stage != "inference":
+            return None
+        model = self.model if self.ema_model is None else self.ema_model.ema_model
+        model = getattr(model, "module", model)
+        return RolloutProgress(model.encoder, len(batch.get_output_idxs()), self.device)
+
     def _write_output(self, *args) -> None:
         """
         Write output with the arguments of write_output.
@@ -298,6 +342,7 @@ class Trainer(TrainerBase):
         bidx,
         targets_and_auxs,
         is_diffusion: bool = False,
+        rollout_progress: RolloutProgress | None = None,
     ) -> ModelOutput:
         """Run the rollout in chunks and assemble the predictions for the whole batch."""
         forecast_cfg = mode_cfg.get("forecast", {})
@@ -378,6 +423,8 @@ class Trainer(TrainerBase):
                     forecast_chunk,
                     target_output,
                 )
+            if rollout_progress is not None and not is_diffusion:
+                rollout_progress.update(len(chunk))
 
             if compute_full_loss:
                 physical += forecast_chunk.physical
@@ -962,6 +1009,7 @@ class Trainer(TrainerBase):
                                     self.model,
                                 )
 
+                            rollout_progress = self._rollout_progress(batch)
                             preds, targets_and_auxs = self._process_validation_chunks(
                                 batch,
                                 mode_cfg,
@@ -970,6 +1018,7 @@ class Trainer(TrainerBase):
                                 bidx,
                                 targets_and_auxs,
                                 is_diffusion,
+                                rollout_progress,
                             )
                             # Diffusion inference inflates the model output's fstep
                             # dimension to one entry per ODE step (the denoising
@@ -1003,6 +1052,8 @@ class Trainer(TrainerBase):
                                     preds,
                                     targets_and_auxs,
                                 )
+                            if rollout_progress is not None:
+                                rollout_progress.close(self.output_writer)
 
                         if with_targets:
                             _ = self.loss_calculator_val.compute_loss(
