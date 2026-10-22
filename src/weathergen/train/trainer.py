@@ -145,6 +145,8 @@ class Trainer(TrainerBase):
         self.loss_spike_history = deque()
         # writes validation output in the background while validate() runs
         self.output_writer: AsyncOutputWriter | None = None
+        # decodes each forecast step while validate() computes the next one (overlap_decoding)
+        self.decode_stream: torch.cuda.Stream | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -344,17 +346,25 @@ class Trainer(TrainerBase):
             if not compute_full_loss:
                 batch.to_device_for_output_chunk(self.device, chunk)
 
+            rollout_kwargs = {}
+            if self.decode_stream is not None:
+                # the next chunk's first step is computed while this chunk's last is decoded
+                next_step = chunks[chunk_idx + 1][0] if chunk_idx + 1 < len(chunks) else None
+                rollout_kwargs = dict(decode_stream=self.decode_stream, next_step=next_step)
+
             if self.ema_model is None:
                 forecast_chunk = self.model(
                     self.model_params,
                     forecast_chunk,
                     chunk,
+                    **rollout_kwargs,
                 )
             else:
                 forecast_chunk = self.ema_model.forward_eval(
                     self.model_params,
                     forecast_chunk,
                     chunk,
+                    **rollout_kwargs,
                 )
 
             if should_write_output:
@@ -863,13 +873,23 @@ class Trainer(TrainerBase):
         Perform validation / test computation as specified by mode_cfg.
 
         With output.async_write, the output is written in the background; all of it is
-        written when validate() returns.
+        written when validate() returns. With overlap_decoding, each forecast step is decoded
+        on a separate stream while the forecast engine computes the next one.
         """
         if mode_cfg.get("output", {}).get("async_write", False):
             self.output_writer = AsyncOutputWriter(self.device)
+        if mode_cfg.get("overlap_decoding", False):
+            if self.device.type == "cuda" and not self.cf.get("fe_diffusion_model", False):
+                self.decode_stream = torch.cuda.Stream(self.device)
+            else:
+                logger.warning(
+                    "overlap_decoding needs a CUDA device and a non-diffusion model; "
+                    "decoding sequentially."
+                )
         try:
             self._validate(mini_epoch, mode_cfg, batch_size)
         finally:
+            self.decode_stream = None
             if self.output_writer is not None:
                 output_writer, self.output_writer = self.output_writer, None
                 output_writer.close()

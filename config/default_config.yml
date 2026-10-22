@@ -244,6 +244,10 @@ validation_config:
   # written chunk by chunk (forecast.chunk_size) and no loss is computed
   with_targets: True
 
+  # decode each forecast step on a separate CUDA stream, while the forecast engine computes
+  # the next step (also across forecast.chunk_size chunks); non-diffusion models only
+  overlap_decoding: False
+
 
 # test config; full test config is merge of validation and test config
 # test config is used by default when running inference

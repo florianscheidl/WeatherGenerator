@@ -74,6 +74,9 @@ class ModelOutput:
         self.latent: list[dict[str, torch.Tensor | LatentState]] = [{} for _ in self.forecast_steps]
         self.batch_samples = source_samples
         self.latent_deep = None
+        # (step, tokens): forecast engine output for the first step of the next chunk,
+        # computed ahead while this chunk's last step was decoded (Model.forward, next_step)
+        self.next_tokens: tuple[int, torch.Tensor] | None = None
 
     def chunk_idx(self, fstep: int) -> int:
         """Index of forecast step fstep into chunk-local data, e.g. predictions."""
@@ -796,6 +799,8 @@ class Model(torch.nn.Module):
         model_params: ModelParams,
         samples_or_output: BatchSamples | ModelOutput,
         forecast_steps: list[int],
+        decode_stream: torch.cuda.Stream | None = None,
+        next_step: int | None = None,
     ) -> ModelOutput:
         """Forward pass of the model
 
@@ -804,6 +809,10 @@ class Model(torch.nn.Module):
             model_params : Query and embedding parameters
             input : the batch's source samples, or the previous chunk's output
             forecast_steps : global forecast steps of the chunk to roll out
+            decode_stream : decode each step on this stream, overlapping with the forecast
+                engine computing the next step (_rollout_overlapped); evaluation only
+            next_step : with decode_stream, the first step of the next chunk, which the
+                forecast engine computes while the last step of this chunk is decoded
         Returns:
             A list containing all prediction results
         """
@@ -874,6 +883,28 @@ class Model(torch.nn.Module):
         # posteriors come from encoding the source window, so they exist only on the first chunk
         if posteriors is not None:
             output.add_latent_prediction(0, "posteriors", posteriors)
+
+        if decode_stream is not None:
+            assert not self.training and not self.cf.get("fe_diffusion_model", False), (
+                "Overlapped decoding supports only evaluation of non-diffusion models."
+            )
+            next_tokens = (
+                samples_or_output.next_tokens
+                if isinstance(samples_or_output, ModelOutput)
+                else None
+            )
+            return self._rollout_overlapped(
+                model_params,
+                tokens,
+                next_tokens,
+                forecast_steps,
+                next_step,
+                source_samples,
+                output,
+                intermediates,
+                decode_stream,
+            )
+        assert next_step is None, "next_step requires a decode_stream."
 
         # Allow for pushforward trick
         p_fwd = self.cf.training_config.get("forecast", {}).get("pushforward", False)
@@ -982,21 +1013,100 @@ class Model(torch.nn.Module):
                     tokens = None
                     continue
 
-            if "masking" in self.cf.training_config.training_mode:
-                # decoder predictions
-                output.add_latent_prediction(
-                    output.chunk_idx(step),
-                    "latent_state",
-                    self.tokens_to_latent_state(None, tokens),
-                )
-                output = self.predict_decoders(model_params, step, tokens, source_samples, output)
+            output = self._decode_step(
+                model_params, step, tokens, source_samples, output, intermediates
+            )
 
-            if "student_teacher" in self.cf.training_config.training_mode:
-                # latent predictions (raw and with SSL heads)
-                output = self.predict_latent(
-                    model_params, step, tokens, source_samples, output, intermediates
-                )
+        return output
 
+    def _decode_step(
+        self,
+        model_params: ModelParams,
+        step: int,
+        tokens: torch.Tensor,
+        source_samples: BatchSamples,
+        output: ModelOutput,
+        intermediates,
+    ) -> ModelOutput:
+        """Decoder and latent predictions of one forecast step, as the training mode asks."""
+        if "masking" in self.cf.training_config.training_mode:
+            # decoder predictions
+            output.add_latent_prediction(
+                output.chunk_idx(step),
+                "latent_state",
+                self.tokens_to_latent_state(None, tokens),
+            )
+            output = self.predict_decoders(model_params, step, tokens, source_samples, output)
+
+        if "student_teacher" in self.cf.training_config.training_mode:
+            # latent predictions (raw and with SSL heads)
+            output = self.predict_latent(
+                model_params, step, tokens, source_samples, output, intermediates
+            )
+
+        return output
+
+    def _rollout_overlapped(
+        self,
+        model_params: ModelParams,
+        tokens: torch.Tensor,
+        next_tokens: tuple[int, torch.Tensor] | None,
+        forecast_steps: list[int],
+        next_step: int | None,
+        source_samples: BatchSamples,
+        output: ModelOutput,
+        intermediates,
+        decode_stream: torch.cuda.Stream,
+    ) -> ModelOutput:
+        """
+        Roll out with each step decoded on decode_stream, while the forecast engine computes
+        the next step on the current stream.
+
+        The engine for step t + 1 is queued before step t is decoded, so the host syncs in the
+        decoders hold back neither the engine nor the queueing of its kernels. With next_step,
+        the engine also computes the first step of the next chunk, which is returned in
+        output.next_tokens and used by the next call in place of computing it again
+        (next_tokens). When this returns, the current stream waits for all decoding, so the
+        output can be used on it as without overlap.
+        """
+        compute_stream = torch.cuda.current_stream()
+
+        def advance(tokens, step):
+            if not self.forecast_engine:
+                return tokens
+            return self.forecast_engine(
+                tokens,
+                step,
+                meta_info=source_samples.samples[0].meta_info,
+                coords=model_params.rope_coords,
+            )
+
+        def decode(step, tokens, ready):
+            # wait for the tokens and for the target coordinates of the step, which are copied
+            # to the device on the compute stream
+            decode_stream.wait_event(ready)
+            # the compute stream may reuse the tokens' memory once they are freed
+            tokens.record_stream(decode_stream)
+            with torch.cuda.stream(decode_stream):
+                self._decode_step(model_params, step, tokens, source_samples, output, intermediates)
+
+        # the step whose decoding is queued after the next engine step
+        pending = None
+        for step in forecast_steps:
+            if next_tokens is not None and next_tokens[0] == step:
+                tokens = next_tokens[1]
+            else:
+                tokens = advance(tokens, step)
+            ready = compute_stream.record_event()
+            if pending is not None:
+                decode(*pending)
+            pending = (step, tokens, ready)
+
+        if next_step is not None:
+            output.next_tokens = (next_step, advance(tokens, next_step))
+        decode(*pending)
+
+        compute_stream.wait_stream(decode_stream)
         return output
 
     @staticmethod
