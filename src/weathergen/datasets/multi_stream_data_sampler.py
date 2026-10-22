@@ -49,6 +49,25 @@ FORECAST_DEFAULTS = {
 }
 
 
+def check_requested_channels(
+    stream_name: str, stream_info: dict, reader: DataReaderBase, filename: pathlib.Path
+) -> None:
+    """
+    Raise if the stream config requests source or target channels but the dataset has none of
+    them, since every sample of the stream would then be empty.
+    """
+    # an empty reader is a stream skipped on purpose, e.g. outside the time window
+    if reader.length() == 0:
+        return
+    for ch_type, found in (("source", reader.source_channels), ("target", reader.target_channels)):
+        requested = stream_info.get(ch_type)
+        if requested and len(found) == 0:
+            raise ValueError(
+                f"Stream '{stream_name}': none of the requested {ch_type} channels "
+                f"{list(requested)} were found in {filename}."
+            )
+
+
 def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IOReaderData:
     """
     Utility function to collect all sources / targets from streams list
@@ -266,6 +285,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         + f" from stream config {stream_name}.",
                     )
                 ds = dataset(filename=filename, **kwargs)
+                check_requested_channels(stream_name, stream_info, ds, filename)
 
                 streams_datasets[stream_name].readers += [ds]
 
@@ -782,6 +802,7 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
 
             # use while loop due to the scattered nature of the data in time and to
             # ensure batches are not empty
+            num_skipped = 0
             while True:
                 idx: TIndex = perms[idx_raw % perms.shape[0]]
                 idx_raw += 1
@@ -797,6 +818,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                 # skip completely empty batch item or when all targets are empty -> no grad
                 if not_valid:
                     logger.warning(f"Skipping empty batch with idx={idx}.")
+                    num_skipped += 1
+                    # a full pass over the data without a valid batch would loop forever
+                    if num_skipped >= perms.shape[0]:
+                        raise RuntimeError(
+                            f"No valid batch in {num_skipped} consecutive samples, a full pass "
+                            "over the data: all are empty or contain NaNs. Check the stream "
+                            "configs (channels, time ranges) and the data."
+                        )
                 else:
                     break
 
