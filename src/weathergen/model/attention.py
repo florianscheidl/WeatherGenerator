@@ -7,21 +7,77 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-from functools import partial
+import logging
+from functools import cache, partial
 
 import torch
-from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
+from weathergen.model.attention_sdpa import sdpa_func, sdpa_varlen_func
 from weathergen.model.norms import AdaLayerNorm, RMSNorm
 from weathergen.model.positional_encoding import rotary_pos_emb_2d
+from weathergen.utils.device import get_device_type
+
+try:
+    from flash_attn import flash_attn_func, flash_attn_varlen_func
+except ImportError:
+    flash_attn_func = flash_attn_varlen_func = None
+
+logger = logging.getLogger(__name__)
 
 """
 Attention blocks used by WeatherGenerator.
 
 Some blocks optionally apply 2D RoPE. When enabled, the caller must provide per-token 2D
 coordinates aligned with the token order (lat, lon in radians).
+
+With with_flash_attention, attention runs with flash-attn on CUDA/ROCm, where a missing
+flash-attn is an error. On other devices (MPS, XPU, CPU), and without with_flash_attention, the
+varlen and dense heads use torch's scaled_dot_product_attention (attention_sdpa.py).
 """
+
+
+@cache
+def _warn_flash_fallback(device_type: str) -> None:
+    logger.warning(
+        f"flash_attn is only available for CUDA/ROCm, using scaled_dot_product_attention on "
+        f"{device_type}."
+    )
+
+
+def use_flash_attention(with_flash: bool) -> bool:
+    """Whether to run flash-attn, given the with_flash_attention request and the platform."""
+    if not with_flash:
+        return False
+    device_type = get_device_type()
+    if device_type == "cuda":
+        if flash_attn_varlen_func is None:
+            raise ImportError(
+                "flash_attn is not installed. Install it or set with_flash_attention: False."
+            )
+        return True
+    _warn_flash_fallback(device_type)
+    return False
+
+
+def check_attention_precision(
+    with_flash: bool, with_mixed_precision: bool, attention_dtype: torch.dtype
+) -> None:
+    """Check that the precision settings suit the attention implementation that will run."""
+    if use_flash_attention(with_flash):
+        if not with_mixed_precision or attention_dtype not in (torch.bfloat16, torch.float16):
+            raise ValueError(
+                "flash attention requires with_mixed_precision and attention_dtype bf16 or fp16"
+            )
+    elif not with_mixed_precision and attention_dtype != torch.float32:
+        raise ValueError("without with_mixed_precision, attention_dtype must be fp32")
+
+
+def get_attention_fcts(with_flash: bool):
+    """Dense and varlen attention functions with the flash_attn signatures."""
+    if use_flash_attention(with_flash):
+        return flash_attn_func, flash_attn_varlen_func
+    return sdpa_func, sdpa_varlen_func
 
 
 class MultiSelfAttentionHeadVarlen(torch.nn.Module):
@@ -82,7 +138,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
 
         self.dtype = attention_dtype
 
-        assert with_flash, "Only flash attention supported at the moment"
+        _, self.varlen_attention = get_attention_fcts(with_flash)
 
     def forward(self, x, x_lens, ada_ln_aux=None, coords=None):
         if self.with_residual:
@@ -106,7 +162,7 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
 
         cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs = flash_attn_varlen_func(
+        outs = self.varlen_attention(
             qs,
             ks,
             vs,
@@ -364,7 +420,7 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
 
         self.dtype = attention_dtype
-        assert with_flash, "Only flash attention supported at the moment"
+        _, self.varlen_attention = get_attention_fcts(with_flash)
 
     def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
         if self.with_residual:
@@ -386,7 +442,7 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         if x_kv_lens is not None:
             cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
-            outs = flash_attn_varlen_func(
+            outs = self.varlen_attention(
                 qs,
                 ks,
                 vs,
@@ -477,7 +533,7 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
 
         self.dtype = attention_dtype
-        assert with_flash, "Only flash attention supported at the moment"
+        _, self.varlen_attention = get_attention_fcts(with_flash)
 
     def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
         if self.with_residual:
@@ -504,7 +560,7 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         outs = []
         for _i, qs_i in enumerate(qs):
             outs += [
-                flash_attn_varlen_func(
+                self.varlen_attention(
                     qs_i,
                     ks,
                     vs,
@@ -581,11 +637,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         self.lnorm_k = lnorm(self.dim_head_proj, eps=norm_eps)
 
         self.dtype = attention_dtype
-        if with_flash:
-            self.att = torch.nn.functional.scaled_dot_product_attention
-        else:
-            self.att = self.attention
-            self.softmax = torch.nn.Softmax(dim=-1)
+        self.attention, _ = get_attention_fcts(with_flash)
 
     def forward(self, x, coords=None, ada_ln_aux=None):
         if self.with_residual:
@@ -608,7 +660,7 @@ class MultiSelfAttentionHead(torch.nn.Module):
         dropout_rate = self.dropout_rate if self.training else 0.0
 
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
-        outs = flash_attn_func(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
+        outs = self.attention(qs, ks, vs, softcap=self.softcap, dropout_p=dropout_rate)
 
         out = self.proj_out(outs.flatten(-2, -1))
         if self.with_residual:
@@ -690,8 +742,12 @@ class MultiCrossAttentionHead(torch.nn.Module):
         ks = self.lnorm_k(self.proj_heads_k(x_kv).reshape(s)).to(self.dtype).transpose(-3, -2)
         vs = self.proj_heads_v(x_kv).reshape(s).transpose(-3, -2)
 
-        # correct ordering of tensors with seq dimension second but last is critical
-        with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+        # correct ordering of tensors with seq dimension second but last is critical; the
+        # flash kernel of sdpa only exists for CUDA/ROCm
+        if qs.is_cuda:
+            with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.FLASH_ATTENTION):
+                outs = self.att(qs, ks, vs).transpose(2, 1)
+        else:
             outs = self.att(qs, ks, vs).transpose(2, 1)
 
         outs = self.dropout(self.proj_out(outs.flatten(-2, -1)))

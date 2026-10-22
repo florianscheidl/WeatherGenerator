@@ -299,9 +299,7 @@ def get_model_results(
     """
     found_paths = []
     if results_path is None:
-        run_results = (
-            Path(_load_private_conf()["path_shared_working_dir"]) / f"results/{run_id}"
-        )
+        run_results = Path(_load_private_conf()["path_shared_working_dir"]) / f"results/{run_id}"
         if not run_results.exists():
             raise FileNotFoundError(
                 f"Results directory for run_id {run_id} does not exist: {run_results}"

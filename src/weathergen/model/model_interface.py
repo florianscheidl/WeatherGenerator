@@ -13,6 +13,7 @@ import itertools
 import logging
 
 import torch
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -52,7 +53,7 @@ def init_model_and_shard(
     with_fsdp,
     overrides={},
 ):
-    model_creation_device = "meta" if with_ddp and with_fsdp else "cuda"
+    model_creation_device = "meta" if with_ddp and with_fsdp else device
     with torch.device(model_creation_device):
         model = get_model(cf, training_mode, dataset, overrides)
 
@@ -79,14 +80,17 @@ def init_model_and_shard(
 
     elif with_ddp and with_fsdp:
         # with DDP *and() FSDP
+        # explicit mesh: the default one uses the available accelerator, not the selected device
+        mesh = init_device_mesh(torch.device(device).type, (cf.world_size,))
         fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
                     reduce_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
-                else None
+                else MixedPrecisionPolicy()  # no casting
             ),
         }
         modules_to_shard = (
@@ -122,13 +126,14 @@ def init_model_and_shard(
                 fully_shard(module, **fsdp_kwargs)
 
         full_precision_fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
                     reduce_dtype=torch.float32,
                 )
                 if cf.with_mixed_precision
-                else None
+                else MixedPrecisionPolicy()  # no casting
             ),
         }
 
@@ -136,8 +141,9 @@ def init_model_and_shard(
             if isinstance(module, modules_to_shard):
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
+        fully_shard(model, mesh=mesh)
+
     if with_ddp and with_fsdp:
-        fully_shard(model)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 
@@ -162,14 +168,14 @@ def init_model_and_shard(
         model = load_model(cf, model, device, run_id, mini_epoch)
     else:
         if with_ddp and with_fsdp:
-            model.to_empty(device="cuda")
+            model.to_empty(device=device)
             if with_fsdp:
                 model.reset_parameters()
 
     # model params
     model_params = ModelParams(cf).create(cf)
     model_params.reset_parameters(cf)
-    model_params = model_params.to(f"cuda:{cf.local_rank}")
+    model_params = model_params.to(device)
 
     return model, model_params
 
@@ -227,7 +233,7 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
                 if is_root():
                     logger.info(f"Initializing new module not found in checkpoint: {path}")
                 module_to_init = all_modules[path]
-                module_to_init.to_empty(device="cuda")
+                module_to_init.to_empty(device=device)
                 module_to_init.reset_parameters()
 
     else:

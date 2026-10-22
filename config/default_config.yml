@@ -71,6 +71,9 @@ healpix_level: 5
 # When False: uses traditional pe_global positional encoding
 rope_2D: False
 
+# "auto" (the available accelerator, else cpu) or one of cpu, cuda (also ROCm), mps, xpu
+device: "auto"
+# fp32 instead: with_mixed_precision: False and attention_dtype: fp32
 with_mixed_precision: True
 with_flash_attention: True
 compile_model: False

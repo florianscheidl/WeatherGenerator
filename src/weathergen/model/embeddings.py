@@ -32,6 +32,8 @@ class StreamEmbedTransformer(torch.nn.Module):
         norm_type="LayerNorm",
         unembed_mode="full",
         stream_name="stream_embed",
+        with_flash=True,
+        attention_dtype=torch.bfloat16,
     ):
         """Constructor
 
@@ -65,7 +67,8 @@ class StreamEmbedTransformer(torch.nn.Module):
                     self.num_heads,
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
-                    with_flash=True,
+                    with_flash=with_flash,
+                    attention_dtype=attention_dtype,
                 )
             )
             self.layers.append(

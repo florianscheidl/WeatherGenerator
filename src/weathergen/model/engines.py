@@ -45,7 +45,11 @@ class EmbeddingEngine(torch.nn.Module):
         """
         super(EmbeddingEngine, self).__init__()
         self.cf = cf
-        self.dtype = get_dtype(self.cf.mixed_precision_dtype)
+        self.dtype = (
+            get_dtype(self.cf.mixed_precision_dtype)
+            if self.cf.with_mixed_precision
+            else torch.float32
+        )
         self.sources_size = sources_size  # KCT:iss130, what is this?
         self.embeds = torch.nn.ModuleDict()
         self.streams = cf.streams
@@ -68,6 +72,8 @@ class EmbeddingEngine(torch.nn.Module):
                     norm_type=self.cf.norm_type,
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
+                    with_flash=self.cf.with_flash_attention,
+                    attention_dtype=get_dtype(self.cf.attention_dtype),
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(

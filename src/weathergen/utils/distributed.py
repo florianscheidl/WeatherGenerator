@@ -69,6 +69,20 @@ def ddp_average(data: torch.Tensor) -> torch.Tensor:
     Return :
         tensor with same shape as data, but entries averaged across all DDP ranks
     """
-    if _is_distributed_initialized():
-        dist.all_reduce(data, op=dist.ReduceOp.AVG)
+    all_reduce_avg(data)
     return data.cpu()
+
+
+def all_reduce_avg(data: torch.Tensor) -> None:
+    """
+    In-place average of a tensor across DDP ranks; no-op without distributed training.
+
+    Gloo, the backend for CPU tensors, has no ReduceOp.AVG, so it sums and divides instead.
+    """
+    if not _is_distributed_initialized():
+        return
+    if data.device.type == "cpu":
+        dist.all_reduce(data, op=dist.ReduceOp.SUM)
+        data /= dist.get_world_size()
+    else:
+        dist.all_reduce(data, op=dist.ReduceOp.AVG)

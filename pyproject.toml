@@ -78,18 +78,37 @@ dev = [
 # uv and python can only filter dependencies by platform, not by capability.
 # Following the recommendations from https://docs.astral.sh/uv/guides/integration/pytorch
 # We need to support:
-# x86_64: cpu (unit tests) + gpu
+# x86_64: cpu (unit tests) + gpu (NVIDIA) + rocm (AMD) + xpu (Intel)
 # aarch64: gpu
+# macOS: cpu (the macOS wheels include the MPS backend for Apple Silicon)
 [project.optional-dependencies]
 
 cpu = [
   'torch==2.9.1',
 ]
 
+# NVIDIA GPUs (CUDA)
 gpu = [
   "torch==2.9.1; sys_platform == 'linux'",
   # flash-attn also has a torch dependency.
   "flash-attn",
+]
+
+# AMD GPUs (ROCm). There is no prebuilt flash-attn for ROCm: build it (see README) or set
+# with_flash_attention: False to use torch's scaled_dot_product_attention.
+rocm = [
+  "torch==2.9.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  # dependency of torch+rocm that is only on the pytorch rocm index; listed here so that
+  # tool.uv.sources (which only applies to direct dependencies) can point to that index
+  "pytorch-triton-rocm==3.5.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+# Intel GPUs (XPU). Implemented but untested.
+xpu = [
+  "torch==2.9.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+  # dependency of torch+xpu that is only on the pytorch xpu index; listed here so that
+  # tool.uv.sources (which only applies to direct dependencies) can point to that index
+  "pytorch-triton-xpu==3.5.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 
@@ -201,6 +220,8 @@ conflicts = [
   [
     { extra = "cpu" },
     { extra = "gpu" },
+    { extra = "rocm" },
+    { extra = "xpu" },
   ],
 ]
 
@@ -237,6 +258,17 @@ name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+# only for pytorch-triton-rocm and pytorch-triton-xpu, which are not on PyPI
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
 [tool.uv.sources]
 weathergen-common = { workspace = true }
 weathergen-evaluate = { workspace = true }
@@ -258,10 +290,15 @@ torch = [
   { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.9.1+cpu-cp312-cp312-manylinux_2_28_aarch64.whl",marker = "sys_platform == 'linux' and platform_machine == 'aarch64'",extra = "cpu" },
   { url = "https://download-r2.pytorch.org/whl/cpu/torch-2.9.1+cpu-cp312-cp312-manylinux_2_28_x86_64.whl",marker = "sys_platform == 'linux' and platform_machine == 'x86_64'",extra = "cpu" },
 
-  # No acceleration for now.
-  # TODO: explore pytorch + metal backend
+# AMD GPUs (ROCm) and Intel GPUs (XPU), x86_64 only.
+  { url = "https://download-r2.pytorch.org/whl/rocm6.4/torch-2.9.1+rocm6.4-cp312-cp312-manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'", extra = "rocm" },
+  { url = "https://download-r2.pytorch.org/whl/xpu/torch-2.9.1+xpu-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'", extra = "xpu" },
+
+  # The macOS wheels include the MPS backend (Apple Silicon GPUs).
   { index = "pytorch-cpu", marker = "sys_platform == 'darwin'", extra="gpu"},
 ]
+pytorch-triton-rocm = { index = "pytorch-rocm", extra = "rocm" }
+pytorch-triton-xpu = { index = "pytorch-xpu", extra = "xpu" }
 # TODO: switch back to this branch, but this is a larger update and the tag name is incorrect
 # anemoi-datasets = { git = "https://github.com/ecmwf/anemoi-datasets", tag = "v0.0.2-special-zarr3"}
 anemoi-datasets = { git = "https://github.com/tjhunter/anemoi-datasets", tag = "0.0.1"}
