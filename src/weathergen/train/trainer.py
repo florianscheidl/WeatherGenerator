@@ -598,7 +598,9 @@ class Trainer(TrainerBase):
                 total=len(self.data_loader_validation), disable=self.cf.with_ddp
             ) as pbar:
                 for bidx, batch in enumerate(dataset_val_iter):
-                    batch.to_device(self.device)
+                    # moving the source tokens stream by stream reduces the memory footprint
+                    with_source_tokens = not cf.get("model_offload_inputs", False)
+                    batch.to_device(self.device, with_source_tokens)
 
                     # evaluate model
                     with torch.autocast(

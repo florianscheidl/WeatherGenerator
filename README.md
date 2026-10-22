@@ -65,3 +65,27 @@ This setup is WIP. This manual only works for machines compatible with torch 2.9
 ```bash
 WEATHERGEN_PRIVATE_CONF=./local_config.yml uv run train --base-config ./config/era5_local.yml
 ```
+
+### Inference on a small GPU
+
+To run inference on a GPU with less memory than the model needs in full precision, add these
+options to the inference command, e.g. for run `mz7oyrr5`:
+```bash
+WEATHERGEN_PRIVATE_CONF=$(pwd)/private_config.yaml uv run inference --from-run-id mz7oyrr5 \
+  --options model_param_dtype=bf16 model_offload_blocks=true model_offload_inputs=true \
+    streams.ERA5.max_num_targets=20000
+```
+- `model_param_dtype=bf16` loads the model on the CPU and casts its parameters to bf16 before
+  moving it to the GPU.
+- `model_offload_blocks=true` keeps the parameters of the large blocks (transformer blocks,
+  per-stream embeddings) in CPU memory and copies each block to the GPU only for its forward
+  pass. This is slower, since all parameters are copied to the GPU in each forward pass.
+- `model_offload_inputs=true` moves the input data to the GPU stream by stream, when it is
+  embedded, instead of all at once.
+- `streams.ERA5.max_num_targets=20000` predicts the `ERA5` stream at a random subset of 20000
+  grid points instead of all of them, since the decoder memory grows with the number of points.
+  Use the name of a stream of your run with many target points.
+
+With these options, inference of one sample with one forecast step of `mz7oyrr5` (about 1B
+parameters) used 3.5 GB of GPU memory. The first three options are not supported with DDP,
+i.e. on more than one GPU.

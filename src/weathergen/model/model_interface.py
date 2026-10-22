@@ -52,7 +52,20 @@ def init_model_and_shard(
     with_fsdp,
     overrides={},
 ):
-    model_creation_device = "meta" if with_ddp and with_fsdp else "cuda"
+    # Casting the parameters, e.g. to bf16, reduces the memory footprint of the model, for
+    # instance to run inference on a small GPU. The model is then created (and loaded) on the
+    # CPU and moved to the GPU once cast, so that it never is on the GPU in full precision.
+    param_dtype = cf.get("model_param_dtype", None)
+    assert param_dtype is None or not with_ddp, "model_param_dtype is only supported without DDP."
+    offload_blocks = cf.get("model_offload_blocks", False)
+    assert not offload_blocks or not with_ddp, "model_offload_blocks is only supported without DDP."
+
+    if with_ddp and with_fsdp:
+        model_creation_device = "meta"
+    elif param_dtype is not None:
+        model_creation_device = "cpu"
+    else:
+        model_creation_device = "cuda"
     with torch.device(model_creation_device):
         model = get_model(cf, training_mode, dataset, overrides)
 
@@ -165,6 +178,11 @@ def init_model_and_shard(
             model.to_empty(device="cuda")
             if with_fsdp:
                 model.reset_parameters()
+        elif param_dtype is not None:
+            model = model.to(device=device, dtype=get_dtype(param_dtype))
+
+    if offload_blocks:
+        offload_blocks_to_cpu(model, device)
 
     # model params
     model_params = ModelParams(cf).create(cf)
@@ -172,6 +190,55 @@ def init_model_and_shard(
     model_params = model_params.to(f"cuda:{cf.local_rank}")
 
     return model, model_params
+
+
+def offload_blocks_to_cpu(model: torch.nn.Module, device, min_num_params: int = 1_000_000) -> None:
+    """
+    Keep the parameters of the model's blocks in (pinned) CPU memory and copy them to the device
+    only for the forward pass of the block, to run a model that does not fit in GPU memory.
+
+    Blocks are the outermost elements of ModuleLists and ModuleDicts with at least
+    min_num_params parameters, e.g. the transformer blocks and the per-stream embeddings. The
+    remaining parameters stay on the device.
+    """
+    blocks = []
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.ModuleList | torch.nn.ModuleDict):
+            continue
+        for child_name, child in module.named_children():
+            child_name = f"{name}.{child_name}"
+            if any(child_name.startswith(block_name + ".") for block_name, _ in blocks):
+                continue
+            if sum(p.numel() for p in child.parameters()) >= min_num_params:
+                blocks.append((child_name, child))
+
+    def offload(block: torch.nn.Module) -> None:
+        tensors = list(block.parameters()) + list(block.buffers())
+        tensors_cpu = [t.data.cpu().pin_memory() for t in tensors]
+        for t, t_cpu in zip(tensors, tensors_cpu, strict=True):
+            t.data = t_cpu
+
+        def to_device(module, args):
+            for t, t_cpu in zip(tensors, tensors_cpu, strict=True):
+                t.data = t_cpu.to(device, non_blocking=True)
+
+        def to_cpu(module, args, output):
+            for t, t_cpu in zip(tensors, tensors_cpu, strict=True):
+                t.data = t_cpu
+
+        block.register_forward_pre_hook(to_device)
+        block.register_forward_hook(to_cpu)
+
+    for _, block in blocks:
+        offload(block)
+    torch.cuda.empty_cache()
+
+    num_offloaded = sum(p.numel() for _, block in blocks for p in block.parameters())
+    num_total = sum(p.numel() for p in model.parameters())
+    logger.info(
+        f"Offloaded {len(blocks)} blocks with {num_offloaded / 1e6:.1f}M of "
+        f"{num_total / 1e6:.1f}M parameters to the CPU."
+    )
 
 
 def load_model(cf, model, device, run_id: str, mini_epoch=-1):
@@ -248,6 +315,9 @@ def load_model(cf, model, device, run_id: str, mini_epoch=-1):
             params = params_temp
         # load checkpoint
         mkeys, ukeys = model.load_state_dict(params, strict=False)
+        param_dtype = cf.get("model_param_dtype", None)
+        if param_dtype is not None:
+            model = model.to(get_dtype(param_dtype))
         model = model.to(device)
 
     # warn about difference in checkpoint and model

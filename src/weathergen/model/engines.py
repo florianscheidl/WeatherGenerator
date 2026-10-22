@@ -98,7 +98,8 @@ class EmbeddingEngine(torch.nn.Module):
             if all(s is None for s in sdata):
                 continue
 
-            sdata = torch.cat(sdata).to(tokens_all.dtype)
+            # the source tokens are still on the CPU if they are moved stream by stream
+            sdata = torch.cat(sdata).to(device=tokens_all.device, dtype=tokens_all.dtype)
             # skip empty stream
             if sdata.numel() == 0:
                 continue

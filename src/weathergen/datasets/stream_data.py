@@ -130,7 +130,7 @@ class StreamData:
 
         return self
 
-    def to_device(self, device: str) -> None:
+    def to_device(self, device: str, with_source_tokens: bool = True) -> None:
         """
         Move data to GPU
 
@@ -138,6 +138,8 @@ class StreamData:
         ----------
         device : str
             Device the data is moved/mapped to.
+        with_source_tokens : bool
+            Whether to move the source tokens, else they are moved when they are embedded.
 
         Returns
         -------
@@ -151,9 +153,10 @@ class StreamData:
 
         # move to device if source data is present
         if not np.array([s is None for s in self.source_tokens_cells]).all():
-            self.source_tokens_cells = [
-                s.to(dv, non_blocking=True) for s in self.source_tokens_cells
-            ]
+            if with_source_tokens:
+                self.source_tokens_cells = [
+                    s.to(dv, non_blocking=True) for s in self.source_tokens_cells
+                ]
             self.source_tokens_lens = [s.to(dv, non_blocking=True) for s in self.source_tokens_lens]
 
             self.source_idxs_embed = [s.to(dv, non_blocking=True) for s in self.source_idxs_embed]
