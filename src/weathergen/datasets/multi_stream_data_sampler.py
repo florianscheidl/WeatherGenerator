@@ -24,6 +24,7 @@ from weathergen.datasets.data_reader_base import (
     DataReaderBase,
     TimeWindowHandler,
     TIndex,
+    is_remote_path,
 )
 from weathergen.datasets.data_reader_obs import DataReaderObs
 from weathergen.datasets.masking import Masker
@@ -83,6 +84,32 @@ def collect_datasources(stream_datasets: list, idx: int, type: str, rng) -> IORe
         rdatas += [rdata]
 
     return IOReaderData.combine(rdatas)
+
+
+def _join_data_path(data_path, fname) -> str | pathlib.Path:
+    """Join a data path, which can be a URL, with a filename."""
+    if is_remote_path(data_path):
+        return f"{str(data_path).rstrip('/')}/{fname}"
+    return pathlib.Path(data_path) / fname
+
+
+def _resolve_data_path(fname, data_paths) -> str | pathlib.Path | None:
+    """
+    Location of the dataset fname: fname itself if it is a URL or an existing path, else the
+    first entry of data_paths that has it. The existence of remote datasets is not checked
+    here, so a URL in data_paths is used if no earlier local path has the dataset.
+    """
+    if is_remote_path(fname):
+        return str(fname)
+    fname = pathlib.Path(fname)
+    # check if fname is a valid path to allow for simple overwriting
+    if fname.exists():
+        return fname
+    for data_path in data_paths:
+        filename = _join_data_path(data_path, fname)
+        if is_remote_path(filename) or filename.exists():
+            return filename
+    return None
 
 
 @dataclasses.dataclass
@@ -243,21 +270,14 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
                         raise ValueError(msg)
 
             for fname in stream_info.get("filenames", [pathlib.Path()]):
-                fname = pathlib.Path(fname)
-                # dont check if file exists since zarr stores might be directories
-                if fname.exists():
-                    # check if fname is a valid path to allow for simple overwriting
-                    filename = fname
-                else:
-                    filenames = [pathlib.Path(path) / fname for path in cf.data_paths]
-
-                    filename = next((f for f in filenames if f.exists()), None)
-                    if filename is None:
-                        msg = (
-                            f"Did not find input data for {stream_info['type']} "
-                            f"stream '{stream_name}': {filenames}."
-                        )
-                        raise FileNotFoundError(msg)
+                filename = _resolve_data_path(fname, cf.data_paths)
+                if filename is None:
+                    filenames = [_join_data_path(path, fname) for path in cf.data_paths]
+                    msg = (
+                        f"Did not find input data for {stream_info['type']} "
+                        f"stream '{stream_name}': {filenames}."
+                    )
+                    raise FileNotFoundError(msg)
 
                 ds_type = stream_info["type"]
                 if is_root():

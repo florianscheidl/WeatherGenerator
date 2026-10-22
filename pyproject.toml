@@ -33,6 +33,7 @@ dependencies = [
  # This seems necessary for build isolation?
  'wheel',
  'setuptools',
+ "aiohttp>=3.13.5",
 ]
 
 

@@ -1,0 +1,25 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Inference of one sample with one forecast step (+6h), e.g. to check that a trained run
+# works. The period is covered by all datasets of the JSC data catalog: Metop-C IASI ends on
+# 2023-05-31 and Metop-A IASI in 2021.
+
+data_loading:
+  # each worker reads the data for its samples
+  num_workers_validation: 1
+
+test_config:
+  samples_per_mini_epoch: 1
+  start_date: "2023-03-01T00:00"
+  end_date: "2023-03-02T00:00"
+  forecast:
+    num_steps: 1
+  output:
+    num_samples: 1

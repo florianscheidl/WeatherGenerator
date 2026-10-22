@@ -96,7 +96,8 @@ def run_inference(args):
     )
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
 
-    devices = Trainer.init_torch()
+    mp_method = cf.general.get("multiprocessing_method", "fork")
+    devices = Trainer.init_torch(multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
 
     init_loggers(log_path=config.get_path_logs(cf))

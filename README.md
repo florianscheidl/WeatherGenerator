@@ -65,3 +65,34 @@ This setup is WIP. This manual only works for machines compatible with torch 2.9
 ```bash
 WEATHERGEN_PRIVATE_CONF=./local_config.yml uv run train --base-config ./config/era5_local.yml
 ```
+
+### Inference with data from the JSC data catalog
+
+The datasets listed in the [JSC data catalog](https://esm-data.fz-juelich.de/catalog/gui/v1/stac-browser/)
+can be read directly over HTTPS, without downloading them first. Dataset filenames are
+looked up in `data_paths`, which can contain URLs as well as local directories.
+
+1. Put the checkpoint and the model config of the trained run in
+   `<path_shared_working_dir>/models/<run_id>/`, where `path_shared_working_dir` is set in
+   `private_config.yaml`. For run `mz7oyrr5` with the default `private_config.yaml`:
+    ```
+    shared_working_dir/models/mz7oyrr5/mz7oyrr5_latest.chkpt
+    shared_working_dir/models/mz7oyrr5/model_mz7oyrr5_latest.json
+    ```
+2. Run inference from the root of the repository, with
+   [config/jsc_catalog_data.yml](config/jsc_catalog_data.yml) to read the data from the
+   catalog and [config/inference_one_sample.yml](config/inference_one_sample.yml) to forecast
+   a single sample:
+    ```bash
+    WEATHERGEN_PRIVATE_CONF=$(pwd)/private_config.yaml uv run inference \
+      --from-run-id mz7oyrr5 \
+      --config config/jsc_catalog_data.yml config/inference_one_sample.yml
+    ```
+   The forecast is written to `shared_working_dir/results/<new run_id>/`.
+
+`config/inference_one_sample.yml` runs one sample with a single forecast step (+6h) from
+2023-03-01. Change `test_config` for other dates or more forecast steps. Note that:
+- Downloading the data of one sample takes about 2 minutes.
+- The Metop-B IASI dataset of run `mz7oyrr5` is not in the catalog, so it is left out.
+  Choose dates covered by the other IASI datasets (Metop-A until 2021, Metop-C from
+  2019-12 to 2023-05), else the IASI input is missing.

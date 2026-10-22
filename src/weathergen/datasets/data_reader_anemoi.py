@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import logging
+import os
 from pathlib import Path
 from typing import override
 
@@ -25,6 +26,7 @@ from weathergen.datasets.data_reader_base import (
     TimeWindowHandler,
     TIndex,
     check_reader_data,
+    is_remote_path,
 )
 from weathergen.train.utils import Stage
 from weathergen.utils.distributed import is_root
@@ -38,7 +40,7 @@ class DataReaderAnemoi(DataReaderTimestep):
     def __init__(
         self,
         tw_handler: TimeWindowHandler,
-        filename: Path,
+        filename: Path | str,
         stream_info: dict,
         stage: Stage,
     ) -> None:
@@ -93,6 +95,8 @@ class DataReaderAnemoi(DataReaderTimestep):
         ds: Dataset = anemoi_datasets.open_dataset(
             ds0, **kwargs, start=tw_handler.t_start, end=tw_handler.t_end
         )
+        # arguments to reopen a remote dataset in forked data loader workers
+        self._open_args = (filename, kwargs, tw_handler.t_start, tw_handler.t_end)
 
         period = np.timedelta64(ds.frequency)
         data_start_time = ds.dates[0]
@@ -179,6 +183,25 @@ class DataReaderAnemoi(DataReaderTimestep):
         super().init_empty()
         self.ds = None
         self.len = 0
+
+    @property
+    def ds(self) -> Dataset | None:
+        """
+        The dataset, reopened if remote and accessed in a forked data loader worker: the HTTP
+        session inherited from the parent process cannot be used in the child.
+        """
+        if self._ds is not None and self._ds_pid != os.getpid():
+            filename, kwargs, t_start, t_end = self._open_args
+            if is_remote_path(filename):
+                ds0 = anemoi_datasets.open_dataset(filename)
+                self._ds = anemoi_datasets.open_dataset(ds0, **kwargs, start=t_start, end=t_end)
+            self._ds_pid = os.getpid()
+        return self._ds
+
+    @ds.setter
+    def ds(self, ds: Dataset | None) -> None:
+        self._ds = ds
+        self._ds_pid = os.getpid()
 
     @override
     def length(self) -> int:

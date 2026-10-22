@@ -1,0 +1,20 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Read the datasets over HTTPS from the JSC data catalog,
+# https://esm-data.fz-juelich.de/catalog/gui/v1/stac-browser/, see the README.
+
+data_paths: ["https://esm-data.fz-juelich.de/datasets/v1"]
+
+streams:
+  METOP_ABC_IASI:
+    # the Metop-B IASI dataset is not available from the catalog
+    filenames:
+      - observations-ea-ofb-0001-2007-2021-metop-a-iasi-radiances-v1.zarr
+      - observations-ea-ofb-0001-2019-2023-metop-c-iasi-radiances-v1.zarr

@@ -36,6 +36,11 @@ type TIndex = np.int64
 _DT_ZERO = np.datetime64("1850-01-01T00:00")
 
 
+def is_remote_path(path) -> bool:
+    """Whether path is a URL (e.g. https://) rather than a local file system path."""
+    return "://" in str(path)
+
+
 @dataclass
 class TimeIndexRange:
     """
