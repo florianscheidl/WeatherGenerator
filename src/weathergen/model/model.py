@@ -1189,8 +1189,10 @@ class Model(torch.nn.Module):
             tc_embed = self.embed_target_coords[stream_name]
             tc_tokens = checkpoint(tc_embed, t_coords, use_reentrant=False)
 
-            # skip when coordinate embeddings yields nan (i.e. the coord embedding network diverged)
-            if torch.isnan(tc_tokens).any():
+            # skip when coordinate embeddings yields nan (i.e. the coord embedding network
+            # diverged); branching on the device reduction forces a host-device sync per
+            # stream and forecast step, so it can be turned off with pred_nan_check
+            if self.cf.get("pred_nan_check", True) and torch.isnan(tc_tokens).any():
                 logger.warning(
                     (
                         f"Skipping prediction for {stream_name} because",
