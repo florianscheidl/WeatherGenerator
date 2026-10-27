@@ -156,7 +156,10 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
 
         _, self.varlen_attention = get_attention_fcts(with_flash)
 
-    def forward(self, x, x_lens, ada_ln_aux=None, coords=None):
+    def forward(self, x, x_lens, ada_ln_aux=None, coords=None, max_x_len=None):
+        # max_x_len: optional host-side int upper bound for the per-sequence lengths in x_lens.
+        # varlen attention takes max_seqlen as a Python int; passing a device tensor
+        # (x_lens.max()) forces an implicit .item() and thus a host-device sync per call.
         if self.with_residual:
             x_in = x
         x = self.lnorm(x) if ada_ln_aux is None else self.lnorm(x, ada_ln_aux)
@@ -177,6 +180,8 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
         dropout_rate = self.dropout_rate if self.training else 0.0
 
         cum_x_lens = torch.cumsum(x_lens, 0, dtype=torch.int32)
+        if max_x_len is None:
+            max_x_len = x_lens.max()
         # ordering of tensors (seq, heads, embed) (which differs from torch's flash attention implt)
         outs = self.varlen_attention(
             qs,
@@ -184,8 +189,8 @@ class MultiSelfAttentionHeadVarlen(torch.nn.Module):
             vs,
             cum_x_lens,
             cum_x_lens,
-            x_lens.max(),
-            x_lens.max(),
+            max_x_len,
+            max_x_len,
             softcap=self.softcap,
             dropout_p=dropout_rate,
         )
@@ -483,7 +488,19 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         self.dtype = attention_dtype
         _, self.varlen_attention = get_attention_fcts(with_flash)
 
-    def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
+    def forward(
+        self,
+        x_q,
+        x_kv,
+        x_q_lens=None,
+        x_kv_lens=None,
+        ada_ln_aux=None,
+        max_q_len=None,
+        max_kv_len=None,
+    ):
+        # max_q_len / max_kv_len: optional host-side int upper bounds for the per-sequence
+        # lengths; passing them avoids the host-device sync of x_*_lens.max() (implicit
+        # .item() at the varlen attention int argument boundary).
         if self.with_residual:
             x_q_in = x_q
         x_q = self.lnorm_in_q(x_q) if ada_ln_aux is None else self.lnorm_in_q(x_q, ada_ln_aux)
@@ -503,14 +520,18 @@ class MultiCrossAttentionHeadVarlen(torch.nn.Module):
         if x_kv_lens is not None:
             cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
             cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+            if max_q_len is None:
+                max_q_len = x_q_lens.max()
+            if max_kv_len is None:
+                max_kv_len = x_kv_lens.max()
             outs = self.varlen_attention(
                 qs,
                 ks,
                 vs,
                 cum_x_q_lens,
                 cum_x_kv_lens,
-                x_q_lens.max(),
-                x_kv_lens.max(),
+                max_q_len,
+                max_kv_len,
                 softcap=self.softcap,
                 dropout_p=dropout_rate,
             )
@@ -596,7 +617,19 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
         self.dtype = attention_dtype
         _, self.varlen_attention = get_attention_fcts(with_flash)
 
-    def forward(self, x_q, x_kv, x_q_lens=None, x_kv_lens=None, ada_ln_aux=None):
+    def forward(
+        self,
+        x_q,
+        x_kv,
+        x_q_lens=None,
+        x_kv_lens=None,
+        ada_ln_aux=None,
+        max_q_len=None,
+        max_kv_len=None,
+    ):
+        # max_q_len / max_kv_len: optional host-side int upper bounds for the per-sequence
+        # lengths; passing them avoids the host-device sync of x_*_lens.max() (implicit
+        # .item() at the varlen attention int argument boundary).
         if self.with_residual:
             x_q_in = x_q
         x_q = self.lnorm_in_q(x_q) if ada_ln_aux is None else self.lnorm_in_q(x_q, ada_ln_aux)
@@ -618,6 +651,10 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
 
         cum_x_q_lens = torch.cumsum(x_q_lens, 0, dtype=torch.int32)
         cum_x_kv_lens = torch.cumsum(x_kv_lens, 0, dtype=torch.int32)
+        if max_q_len is None:
+            max_q_len = x_q_lens.max()
+        if max_kv_len is None:
+            max_kv_len = x_kv_lens.max()
         outs = []
         for _i, qs_i in enumerate(qs):
             outs += [
@@ -627,8 +664,8 @@ class MultiCrossAttentionHeadVarlenSlicedQ(torch.nn.Module):
                     vs,
                     cum_x_q_lens,
                     cum_x_kv_lens,
-                    x_q_lens.max(),
-                    x_kv_lens.max(),
+                    max_q_len,
+                    max_kv_len,
                     softcap=self.softcap,
                     dropout_p=dropout_rate,
                 )

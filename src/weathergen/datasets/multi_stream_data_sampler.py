@@ -690,11 +690,11 @@ Set repeat_data_in_mini_epoch to True if this is undesired."
         Perform necessary pre-processing of model batch
         """
         stream_names = list(self.streams_datasets.keys())
-        batch.source_samples.tokens_lens = get_tokens_lens(
-            stream_names, batch.source_samples, source_input_steps
+        batch.source_samples.set_tokens_lens(
+            get_tokens_lens(stream_names, batch.source_samples, source_input_steps)
         )
-        batch.target_samples.tokens_lens = get_tokens_lens(
-            stream_names, batch.target_samples, target_input_steps
+        batch.target_samples.set_tokens_lens(
+            get_tokens_lens(stream_names, batch.target_samples, target_input_steps)
         )
 
         return batch

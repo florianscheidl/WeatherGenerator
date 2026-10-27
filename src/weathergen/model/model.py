@@ -40,7 +40,7 @@ from weathergen.model.engines import (
     TargetPredictionEngineClassic,
 )
 from weathergen.model.layers import MLP, NamedLinear
-from weathergen.model.utils import get_num_parameters
+from weathergen.model.utils import get_ae_local_max_tokens_per_cell, get_num_parameters
 from weathergen.utils.distributed import is_root
 from weathergen.utils.utils import get_dtype, is_stream_reconstructed
 
@@ -126,7 +126,7 @@ class ModelParams(torch.nn.Module):
         self.dtype = get_dtype(cf.attention_dtype)
 
         # Positional embeddings
-        self.max_tokens_local_per_cell = cf.get("ae_local_max_tokens_per_cell", 64)
+        self.max_tokens_local_per_cell = get_ae_local_max_tokens_per_cell(cf)
         self.pe_embed = torch.nn.Parameter(
             torch.zeros(self.max_tokens_local_per_cell, cf.ae_local_dim_embed, dtype=self.dtype),
             requires_grad=False,
@@ -1159,8 +1159,11 @@ class Model(torch.nn.Module):
         ).flatten(0, 1)
         tokens_nbors = tokens.reshape(s).flatten(0, 1)[idxs.flatten()].flatten(0, 1)
         # TODO: precompute in model_params?
+        # 1-ring neighborhood incl. the cell itself; also the (constant) max seqlen for the
+        # varlen cross-attention over the latent, passed as host int to avoid a device sync
+        num_nbors = model_params.hp_nbours.shape[1]
         tokens_nbors_lens = torch.full(
-            (s[0] * s[1] + 1,), fill_value=9, dtype=torch.int32, device=tokens_nbors.device
+            (s[0] * s[1] + 1,), fill_value=num_nbors, dtype=torch.int32, device=tokens_nbors.device
         )
         tokens_nbors_lens[0] = 0
 
@@ -1230,6 +1233,7 @@ class Model(torch.nn.Module):
                         latent_lens=tokens_nbors_lens,
                         output_lens=tcs_lens,
                         coordinates=t_coords,
+                        max_latent_len=num_nbors,
                     )
 
                     # final prediction head to map back to physical space

@@ -86,10 +86,10 @@ class SelfAttentionBlock(nn.Module):
 
         self.apply(_basic_init)
 
-    def forward(self, x, x_lens, aux=None):
+    def forward(self, x, x_lens, aux=None, max_x_len=None):
         # we have aux_lens as arg to be consistent with the CrossAttentionBlock
         assert self.with_adanorm ^ (aux is None), "Conditioning is not being used"
-        x = self.mhsa_block(x, aux, x_lens=x_lens)
+        x = self.mhsa_block(x, aux, x_lens=x_lens, max_x_len=max_x_len)
         x = self.mlp_block(x, aux)
         return x
 
@@ -142,11 +142,13 @@ class CrossAttentionBlock(nn.Module):
             **kwargs["attention_kwargs"],
         )
         if self.with_adanorm:
-            self.cross_attn_block = AdaLayerNormLayer(dim_q, dim_aux, self.cross_attn, dropout_rate)
+            self.cross_attn_block = AdaLayerNormLayer(
+                dim_q, dim_aux, self._cross_attn_fn, dropout_rate
+            )
         else:
             self.ln_ca = nn.LayerNorm(dim_q, eps=kwargs["attention_kwargs"]["norm_eps"])
             self.cross_attn_block = (
-                lambda x, _, **kwargs: self.cross_attn(self.ln_ca(x), **kwargs) + x
+                lambda x, _, **kwargs: self._cross_attn_fn(self.ln_ca(x), **kwargs) + x
             )
 
         if self.with_mlp:
@@ -185,10 +187,33 @@ class CrossAttentionBlock(nn.Module):
 
         self.apply(_basic_init)
 
-    def forward(self, x, x_kv, aux, x_kv_lens=None, x_lens=None):
-        x = self.cross_attn_block(x, aux, x_kv=x_kv, x_lens=x_lens, x_kv_lens=x_kv_lens)
+    def _cross_attn_fn(
+        self, x, x_kv=None, x_lens=None, x_kv_lens=None, max_q_len=None, max_kv_len=None
+    ):
+        # translates the block-level kwarg name for the query lens (x_lens, which
+        # AdaLayerNormLayer also re-injects under that name) to the x_q_lens parameter of
+        # MultiCrossAttentionHeadVarlen
+        return self.cross_attn(
+            x,
+            x_kv,
+            x_q_lens=x_lens,
+            x_kv_lens=x_kv_lens,
+            max_q_len=max_q_len,
+            max_kv_len=max_kv_len,
+        )
+
+    def forward(self, x, x_kv, aux, x_kv_lens=None, x_lens=None, max_x_len=None, max_kv_len=None):
+        x = self.cross_attn_block(
+            x,
+            aux,
+            x_kv=x_kv,
+            x_lens=x_lens,
+            x_kv_lens=x_kv_lens,
+            max_q_len=max_x_len,
+            max_kv_len=max_kv_len,
+        )
         if self.with_self_attn:
-            x = self.mhsa_block(x, aux, x_lens=x_lens)
+            x = self.mhsa_block(x, aux, x_lens=x_lens, max_x_len=max_x_len)
         x = self.mlp_block(x, aux, x_lens=x_lens)
         return x
 
@@ -274,10 +299,29 @@ class OriginalPredictionBlock(nn.Module):
             )
         )
 
-    def forward(self, latent, output, coords, latent_lens, output_lens):
+    def forward(
+        self,
+        latent,
+        output,
+        coords,
+        latent_lens,
+        output_lens,
+        max_latent_len=None,
+        max_output_len=None,
+    ):
         for layer in self.block:
             if isinstance(layer, MultiCrossAttentionHeadVarlen):
-                output = layer(output, latent, output_lens, latent_lens, coords)
+                output = layer(
+                    output,
+                    latent,
+                    output_lens,
+                    latent_lens,
+                    coords,
+                    max_q_len=max_output_len,
+                    max_kv_len=max_latent_len,
+                )
+            elif isinstance(layer, MultiSelfAttentionHeadVarlen):
+                output = layer(output, output_lens, coords, max_x_len=max_output_len)
             else:
                 output = layer(output, output_lens, coords)
         return output

@@ -30,7 +30,7 @@ from weathergen.model.embeddings import (
     StreamEmbedTransformer,
 )
 from weathergen.model.layers import MLP
-from weathergen.model.utils import ActivationFactory
+from weathergen.model.utils import ActivationFactory, get_ae_local_max_tokens_per_cell
 from weathergen.utils.utils import get_dtype
 
 
@@ -246,6 +246,9 @@ class LocalAssimilationEngine(torch.nn.Module):
         super(LocalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_local_blocks = torch.nn.ModuleList()
+        # static upper bound on tokens per cell, enforced upstream in EmbeddingEngine;
+        # fallback for the varlen attention max_seqlen when no per-batch value is passed
+        self.max_seqlen = get_ae_local_max_tokens_per_cell(cf)
 
         for _ in range(self.cf.ae_local_num_blocks):
             self.ae_local_blocks.append(
@@ -274,9 +277,22 @@ class LocalAssimilationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens_c, cell_lens_c, use_reentrant):
+    def forward(self, tokens_c, cell_lens_c, use_reentrant, max_seqlen: int | None = None):
+        # max_seqlen: host-side upper bound for the per-cell lens in cell_lens_c (e.g. the
+        # exact per-batch max computed on CPU at data prep); defaults to the config bound
+        if max_seqlen is None:
+            max_seqlen = self.max_seqlen
         for block in self.ae_local_blocks:
-            tokens_c = checkpoint(block, tokens_c, cell_lens_c, use_reentrant=use_reentrant)
+            if isinstance(block, MultiSelfAttentionHeadVarlen):
+                tokens_c = checkpoint(
+                    block,
+                    tokens_c,
+                    cell_lens_c,
+                    max_x_len=max_seqlen,
+                    use_reentrant=use_reentrant,
+                )
+            else:
+                tokens_c = checkpoint(block, tokens_c, cell_lens_c, use_reentrant=use_reentrant)
         return tokens_c
 
 
@@ -292,6 +308,9 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         super(Local2GlobalAssimilationEngine, self).__init__()
         self.cf = cf
         self.ae_adapter = torch.nn.ModuleList()
+        # static upper bound on tokens per cell (kv side), enforced upstream in
+        # EmbeddingEngine; fallback for max_seqlen when no per-batch value is passed
+        self.max_kv_seqlen = get_ae_local_max_tokens_per_cell(cf)
 
         self.ae_adapter.append(
             MultiCrossAttentionHeadVarlenSlicedQ(
@@ -342,11 +361,41 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c):
+    def forward(
+        self,
+        tokens_c,
+        tokens_global_c,
+        q_cells_lens_c,
+        cell_lens_c,
+        max_kv_seqlen: int | None = None,
+    ):
+        # max_kv_seqlen: host-side upper bound for the per-cell lens in cell_lens_c (e.g. the
+        # exact per-batch max computed on CPU at data prep); defaults to the config bound
+        if max_kv_seqlen is None:
+            max_kv_seqlen = self.max_kv_seqlen
         for block in self.ae_adapter:
-            tokens_global_c = checkpoint(
-                block, tokens_global_c, tokens_c, q_cells_lens_c, cell_lens_c, use_reentrant=False
-            )
+            if isinstance(block, MultiCrossAttentionHeadVarlenSlicedQ):
+                # q_cells_lens is all-ones (one query token per cell sequence, see
+                # ModelParams.q_cells_lens), so the max query seqlen is exactly 1
+                tokens_global_c = checkpoint(
+                    block,
+                    tokens_global_c,
+                    tokens_c,
+                    q_cells_lens_c,
+                    cell_lens_c,
+                    max_q_len=1,
+                    max_kv_len=max_kv_seqlen,
+                    use_reentrant=False,
+                )
+            else:
+                tokens_global_c = checkpoint(
+                    block,
+                    tokens_global_c,
+                    tokens_c,
+                    q_cells_lens_c,
+                    cell_lens_c,
+                    use_reentrant=False,
+                )
         return tokens_global_c
 
 
@@ -381,10 +430,19 @@ class Local2GlobalSumEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens_c, tokens_global_c, q_cells_lens_c, cell_lens_c):
+    def forward(
+        self,
+        tokens_c,
+        tokens_global_c,
+        q_cells_lens_c,
+        cell_lens_c,
+        max_kv_seqlen: int | None = None,
+    ):
         # tokens_c:        (total_local_tokens, local_dim)
         # tokens_global_c: (num_unmasked_cells, num_queries, global_dim) — unused
         # cell_lens_c:     (num_unmasked_cells + 1,) with 0 at index 0
+        # max_kv_seqlen:   unused, accepted for signature parity with the cross-attention
+        #                  adapter (no varlen attention here)
         num_cells = cell_lens_c.shape[0] - 1
         cell_counts = cell_lens_c[1:]
 
@@ -423,6 +481,10 @@ class QueryAggregationEngine(torch.nn.Module):
         super(QueryAggregationEngine, self).__init__()
         self.cf = cf
         self.num_healpix_cells = num_healpix_cells
+        # per-sample sequence = unmasked cells + class/register tokens; the cell count is
+        # statically bounded, so this is a valid fallback for the varlen attention
+        # max_seqlen when no (tighter) per-batch value is passed
+        self.max_seqlen = num_healpix_cells + cf.num_class_tokens + cf.num_register_tokens
 
         self.ae_aggregation_blocks = torch.nn.ModuleList()
 
@@ -479,12 +541,23 @@ class QueryAggregationEngine(torch.nn.Module):
                 )
             )
 
-    def forward(self, tokens, batch_lens, use_reentrant, coords=None):
+    def forward(
+        self, tokens, batch_lens, use_reentrant, coords=None, max_seqlen: int | None = None
+    ):
+        # max_seqlen: host-side upper bound for the per-sample lens in batch_lens (e.g. the
+        # exact per-batch max computed on CPU at data prep); defaults to the static bound
+        if max_seqlen is None:
+            max_seqlen = self.max_seqlen
         for block in self.ae_aggregation_blocks:
             aux_info = None
             if isinstance(block, MultiSelfAttentionHeadVarlen):
                 tokens = checkpoint(
-                    block, tokens, x_lens=batch_lens, coords=coords, use_reentrant=False
+                    block,
+                    tokens,
+                    x_lens=batch_lens,
+                    coords=coords,
+                    max_x_len=max_seqlen,
+                    use_reentrant=False,
                 )
             else:
                 # MLP.forward accepts positional args only (def forward(self, *args)),
@@ -965,7 +1038,16 @@ class TargetPredictionEngineClassic(nn.Module):
                 )
             )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        max_latent_len=None,
+        max_output_len=None,
+    ):
         tc_tokens = output
         tcs_lens = output_lens
         tokens_stream = latent
@@ -974,7 +1056,26 @@ class TargetPredictionEngineClassic(nn.Module):
 
         for ib, block in enumerate(self.tte):
             if self.cf.pred_self_attention and ib % 3 == 1:
-                tc_tokens = checkpoint(block, tc_tokens, tcs_lens, tcs_aux, use_reentrant=False)
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tcs_lens,
+                    tcs_aux,
+                    max_x_len=max_output_len,
+                    use_reentrant=False,
+                )
+            elif isinstance(block, MultiCrossAttentionHeadVarlen):
+                tc_tokens = checkpoint(
+                    block,
+                    tc_tokens,
+                    tokens_stream,
+                    tcs_lens,
+                    tokens_lens,
+                    tcs_aux,
+                    max_q_len=max_output_len,
+                    max_kv_len=max_latent_len,
+                    use_reentrant=False,
+                )
             else:
                 tc_tokens = checkpoint(
                     block,
@@ -1139,7 +1240,16 @@ class TargetPredictionEngine(nn.Module):
                     f"{self.cf.decoder_type} is not implemented for prediction heads"
                 )
 
-    def forward(self, latent, output, latent_lens, output_lens, coordinates):
+    def forward(
+        self,
+        latent,
+        output,
+        latent_lens,
+        output_lens,
+        coordinates,
+        max_latent_len=None,
+        max_output_len=None,
+    ):
         latent = (
             self.dropout(self.latent_in_norm(latent + self.pos_embed))
             if self.cf.decoder_type != "PerceiverIOCoordConditioning"
@@ -1154,6 +1264,8 @@ class TargetPredictionEngine(nn.Module):
                     coords=coordinates,
                     latent_lens=latent_lens,
                     output_lens=output_lens,
+                    max_latent_len=max_latent_len,
+                    max_output_len=max_output_len,
                     use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
@@ -1164,6 +1276,8 @@ class TargetPredictionEngine(nn.Module):
                     x_lens=output_lens,
                     aux=latent[:, 0],
                     x_kv_lens=latent_lens,
+                    max_x_len=max_output_len,
+                    max_kv_len=max_latent_len,
                     use_reentrant=False,
                 )
             else:
@@ -1172,6 +1286,7 @@ class TargetPredictionEngine(nn.Module):
                     x=output,
                     x_lens=output_lens,
                     aux=latent[:, 0],
+                    max_x_len=max_output_len,
                     use_reentrant=False,
                 )
         output = (
