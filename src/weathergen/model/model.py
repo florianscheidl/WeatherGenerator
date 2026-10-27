@@ -784,9 +784,14 @@ class Model(torch.nn.Module):
         Extract separate parts from global latent space representation and store in LatentState
         """
         toks_pn = tokens_post_norm
+        # slice instead of indexing with the (contiguous) python idx lists: a list index is
+        # wrapped as a CPU tensor and incurs a synchronizing pageable host-to-device copy
+        num_reg = self.num_register_tokens
         return LatentState(
-            register_tokens=toks_pn[:, self.register_token_idxs] if toks_pn is not None else None,
-            class_token=toks_pn[:, self.class_token_idxs] if tokens_post_norm is not None else None,
+            register_tokens=toks_pn[:, :num_reg] if toks_pn is not None else None,
+            class_token=(
+                toks_pn[:, num_reg : self.num_aux_tokens] if toks_pn is not None else None
+            ),
             patch_tokens=toks_pn[:, self.num_aux_tokens :] if toks_pn is not None else None,
             z_pre_norm=tokens,
         )
@@ -1165,7 +1170,9 @@ class Model(torch.nn.Module):
         tokens_nbors_lens = torch.full(
             (s[0] * s[1] + 1,), fill_value=num_nbors, dtype=torch.int32, device=tokens_nbors.device
         )
-        tokens_nbors_lens[0] = 0
+        # in-place kernel; `lens[0] = 0` would wrap the scalar as a CPU tensor and incur a
+        # synchronizing pageable host-to-device copy on CUDA
+        tokens_nbors_lens[:1].zero_()
 
         # pair with tokens from assimilation engine to obtain target tokens
         for stream_name in self.streams.keys():
