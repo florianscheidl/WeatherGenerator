@@ -177,6 +177,8 @@ class BatchSamples:
     # consumed as varlen attention max_seqlen values in the model without host-device syncs
     max_tokens_per_cell: int | None
     max_unmasked_cells: int | None
+    # total number of tokens in tokens_lens, also derived on the host (see set_tokens_lens)
+    num_tokens: int | None
     output_steps: int
     output_idxs: list[int]
     device: str | None
@@ -188,6 +190,7 @@ class BatchSamples:
         self.tokens_lens = None
         self.max_tokens_per_cell = None
         self.max_unmasked_cells = None
+        self.num_tokens = None
         self.output_steps = output_steps
         self.output_idxs = output_idxs
         self.device = None
@@ -205,16 +208,19 @@ class BatchSamples:
         over streams; max_unmasked_cells is the max over (step, sample) of the number of
         cells with at least one token. Both match the cell_lens / cell_mask computations in
         the encoder and are used as varlen attention max_seqlen values, avoiding the
-        host-device sync a .max() on the device tensor would incur.
+        host-device sync a .max() on the device tensor would incur. num_tokens sizes the token
+        buffer in EmbeddingEngine, avoiding the sync of a .sum().item().
         """
         self.tokens_lens = tokens_lens
         if tokens_lens is not None and tokens_lens.numel() > 0:
             tokens_per_cell = tokens_lens.sum(dim=2)
             self.max_tokens_per_cell = int(tokens_per_cell.max())
             self.max_unmasked_cells = int((tokens_per_cell > 0).sum(dim=-1).max())
+            self.num_tokens = int(tokens_per_cell.sum())
         else:
             self.max_tokens_per_cell = 0
             self.max_unmasked_cells = 0
+            self.num_tokens = 0
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -266,7 +272,9 @@ class BatchSamples:
             bs.tokens_lens = torch.index_select(bs.tokens_lens, 1, torch_idxs)
             # max_tokens_per_cell / max_unmasked_cells are kept from the full batch: they
             # remain valid upper bounds for the subset (tokens_lens may already be on the
-            # device here, so recomputing them exactly would require a host-device sync)
+            # device here, so recomputing them exactly would require a host-device sync);
+            # num_tokens must be exact, so it is recomputed where needed
+            bs.num_tokens = None
             return bs
 
     def get_num_steps(self) -> int:

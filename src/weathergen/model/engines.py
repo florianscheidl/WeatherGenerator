@@ -93,7 +93,11 @@ class EmbeddingEngine(torch.nn.Module):
 
         # zeros, not empty: if a stream's tokens are ever skipped below, the unwritten rows must
         # not be uninitialized memory (sporadic NaNs); the assert further down catches the skip.
-        num_tokens = torch.sum(batch.tokens_lens, 2).flatten().sum().item()
+        # The total is known on the host from data prep; reading it from the device lens
+        # (.item()) would force a host-device sync.
+        num_tokens = batch.num_tokens
+        if num_tokens is None:
+            num_tokens = int(batch.tokens_lens.sum())
         tokens_all = torch.zeros(
             (num_tokens, self.cf.ae_local_dim_embed), dtype=self.dtype, device=batch.get_device()
         )
@@ -135,13 +139,20 @@ class EmbeddingEngine(torch.nn.Module):
 
         # switch from stream to cell-based ordering and apply per cell positional encoding
 
-        # if the assert is hit, max_number_tokens_local_per_cell in config needs to be increased
-        # check each input step and sample separately
-        max_tokens = self.cf.get("ae_local_max_tokens_per_cell", 64)
-        assert batch.tokens_lens.sum(2).max() <= max_tokens, (
-            "max number of tokens per cell for positional encoding exceeded."
-            " Increase ae_local_max_tokens_per_cell in config."
-        )
+        # pe_idxs indexes pe_embed with per (step, sample, cell) token counts, so those must
+        # not exceed the pe_embed table size (an out-of-range index would only be an async
+        # device-side assert on CUDA). Checked on the host-side max from data prep, which
+        # avoids the device sync of reading tokens_lens; a hard check, so it holds under -O.
+        max_tokens = get_ae_local_max_tokens_per_cell(self.cf)
+        max_tokens_per_cell = batch.max_tokens_per_cell
+        if max_tokens_per_cell is None:
+            max_tokens_per_cell = int(batch.tokens_lens.sum(2).max())
+        if max_tokens_per_cell > max_tokens:
+            raise ValueError(
+                f"Max number of tokens per cell ({max_tokens_per_cell}) exceeds the positional"
+                f" encoding table size ({max_tokens})."
+                " Increase ae_local_max_tokens_per_cell in config."
+            )
 
         if batch.tokens_lens.shape[2] == 1:
             # trivial with one stream
