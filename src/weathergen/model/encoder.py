@@ -186,11 +186,17 @@ class EncoderModule(torch.nn.Module):
 
         return tokens, posteriors
 
-    def assimilate_local_project_chunked(self, tokens, tokens_global, cell_lens, q_cells_lens):
+    def assimilate_local_project_chunked(
+        self, tokens, tokens_global, cell_lens, q_cells_lens, max_tokens_per_cell=None
+    ):
         """
         Apply the local assimilation engine and then the
         local-to-global adapter using a chunking in the number of tokens
         to work around to bug in flash attention, the computations is performed in chunks
+
+        max_tokens_per_cell is a host-side upper bound for the per-cell lens (valid for every
+        chunk since chunks subset the cells); it is forwarded as varlen attention max_seqlen
+        to avoid host-device syncs
         """
 
         # combined cell lens for all tokens in batch across all input steps
@@ -221,7 +227,9 @@ class EncoderModule(torch.nn.Module):
             q_cells_lens_cur = q_cells_lens[: cell_lens_cur.shape[0]]
 
             # local assimilation model
-            toks = self.ae_local_engine(toks, cell_lens_cur, use_reentrant=False)
+            toks = self.ae_local_engine(
+                toks, cell_lens_cur, use_reentrant=False, max_seqlen=max_tokens_per_cell
+            )
 
             toks, posteriors_c = self.interpolate_latents(toks)
             posteriors += [posteriors_c]
@@ -238,6 +246,7 @@ class EncoderModule(torch.nn.Module):
                 toks_global_unmasked,
                 q_cells_lens_unmasked,
                 cell_lens_unmasked,
+                max_kv_seqlen=max_tokens_per_cell,
             )
 
             tokens_global_unmasked += [toks_global_unmasked]
@@ -254,9 +263,14 @@ class EncoderModule(torch.nn.Module):
         tokens_global_register_class,
         tokens_lens,
         rope_cell_coords=None,
+        max_unmasked_cells=None,
     ):
         """
         Aggregation engine on the global latents of unmasked cells
+
+        max_unmasked_cells is a host-side upper bound for the per-sample number of unmasked
+        cells; together with the class/register tokens it is forwarded as varlen attention
+        max_seqlen to avoid host-device syncs
         """
 
         zero_pad = torch.zeros(1, device=tokens_global_unmasked.device, dtype=torch.int32)
@@ -299,8 +313,17 @@ class EncoderModule(torch.nn.Module):
 
         batch_lens = batch_lens + (self.num_class_tokens + self.num_register_tokens)
         batch_lens_patched = torch.cat([zero_pad, batch_lens], dim=0)
+        max_seqlen = (
+            max_unmasked_cells + self.num_class_tokens + self.num_register_tokens
+            if max_unmasked_cells is not None
+            else None
+        )
         tokens_global_unmasked = self.ae_aggregation_engine(
-            tokens_global_unmasked, batch_lens_patched, use_reentrant=False, coords=packed_coords
+            tokens_global_unmasked,
+            batch_lens_patched,
+            use_reentrant=False,
+            coords=packed_coords,
+            max_seqlen=max_seqlen,
         )
 
         return tokens_global_unmasked
@@ -344,7 +367,11 @@ class EncoderModule(torch.nn.Module):
 
         # apply local assimilation engine and project onto global latent vectors
         tokens_global_unmasked, posteriors = self.assimilate_local_project_chunked(
-            tokens, tokens_global, cell_lens, model_params.q_cells_lens
+            tokens,
+            tokens_global,
+            cell_lens,
+            model_params.q_cells_lens,
+            max_tokens_per_cell=batch.max_tokens_per_cell,
         )
 
         # apply aggregation engine on unmasked tokens
@@ -353,6 +380,7 @@ class EncoderModule(torch.nn.Module):
             tokens_global_register_class,
             batch.tokens_lens,
             rope_cell_coords=model_params.rope_cell_coords,
+            max_unmasked_cells=batch.max_unmasked_cells,
         )
 
         # final processing

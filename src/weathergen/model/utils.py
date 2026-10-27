@@ -16,6 +16,20 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
+AE_LOCAL_MAX_TOKENS_PER_CELL_DEFAULT = 64
+
+
+def get_ae_local_max_tokens_per_cell(cf) -> int:
+    """
+    Single source of truth for the per-cell token bound (config key
+    ae_local_max_tokens_per_cell).
+
+    The value sizes the per-cell positional encoding table (pe_embed in ModelParams) and is
+    the static fallback for the varlen attention max_seqlen in the local assimilation engines.
+    EmbeddingEngine.forward enforces that the data respects the bound.
+    """
+    return int(cf.get("ae_local_max_tokens_per_cell", AE_LOCAL_MAX_TOKENS_PER_CELL_DEFAULT))
+
 
 def get_num_parameters(block):
     nps = filter(lambda p: p.requires_grad, block.parameters())
