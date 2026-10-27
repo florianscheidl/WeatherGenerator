@@ -61,5 +61,3 @@ data_loading:
 
 training_config:
   start_date: 2017-06-01T00:00
-
-norm_type: "RMSNorm" # "LayerNorm" or "RMSNorm"
