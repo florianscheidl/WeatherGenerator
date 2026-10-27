@@ -173,6 +173,9 @@ class BatchSamples:
 
     samples: list[Sample]
     tokens_lens: torch.Tensor | None
+    # host copy of tokens_lens, kept when tokens_lens is moved to the device, so that length
+    # bookkeeping in the encoder runs on the host without host-device syncs
+    tokens_lens_cpu: torch.Tensor | None
     # host-side maxima derived from tokens_lens while it is still on CPU (see set_tokens_lens);
     # consumed as varlen attention max_seqlen values in the model without host-device syncs
     max_tokens_per_cell: int | None
@@ -188,6 +191,7 @@ class BatchSamples:
     ) -> None:
         self.samples = [Sample(stream_names) for _ in range(num_samples)]
         self.tokens_lens = None
+        self.tokens_lens_cpu = None
         self.max_tokens_per_cell = None
         self.max_unmasked_cells = None
         self.num_tokens = None
@@ -212,6 +216,7 @@ class BatchSamples:
         buffer in EmbeddingEngine, avoiding the sync of a .sum().item().
         """
         self.tokens_lens = tokens_lens
+        self.tokens_lens_cpu = tokens_lens
         if tokens_lens is not None and tokens_lens.numel() > 0:
             tokens_per_cell = tokens_lens.sum(dim=2)
             self.max_tokens_per_cell = int(tokens_per_cell.max())
@@ -270,6 +275,9 @@ class BatchSamples:
             bs.samples = [bs.samples[i] for i in subset]
             torch_idxs = torch.tensor(subset, dtype=torch.long, device=bs.tokens_lens.device)
             bs.tokens_lens = torch.index_select(bs.tokens_lens, 1, torch_idxs)
+            if bs.tokens_lens_cpu is not None:
+                cpu_idxs = torch.tensor(subset, dtype=torch.long)
+                bs.tokens_lens_cpu = torch.index_select(bs.tokens_lens_cpu, 1, cpu_idxs)
             # max_tokens_per_cell / max_unmasked_cells are kept from the full batch: they
             # remain valid upper bounds for the subset (tokens_lens may already be on the
             # device here, so recomputing them exactly would require a host-device sync);
