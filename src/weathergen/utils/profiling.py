@@ -30,6 +30,9 @@ from torch.profiler import ProfilerActivity, profile, record_function
 import weathergen.common.config as config
 from weathergen.common.config import Config
 from weathergen.utils.distributed import get_rank, is_root
+from weathergen.utils.sync_counter import SyncCounter
+from weathergen.utils.sync_counter import format_report as format_sync_report
+from weathergen.utils.sync_counter import write_report as write_sync_report
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -98,6 +101,9 @@ class ProfilingConfig:
         nvtx_module_ranges: nvtx ranges around the forward and backward of every module, via
             global module hooks. These cost tens of microseconds of CPU time per module call
             and stay registered for the whole run, so they slow down the steps they show.
+        sync_count: count the host-device syncs of the active steps per call site
+            (`weathergen.utils.sync_counter`), on every rank; also works on MPS and the CPU.
+            Counting costs tens of microseconds per op, so it slows down the steps it counts.
     """
 
     enabled: bool = False
@@ -107,12 +113,14 @@ class ProfilingConfig:
     memory_snapshot: bool = False
     nvtx_annotate: bool = False
     nvtx_module_ranges: bool = False
+    sync_count: bool = False
 
     @classmethod
     def from_config(cls, cf: Config) -> "ProfilingConfig":
         cfg = cf.get("profiling") or {}
         pytorch_profiler_cfg = cfg.get("pytorch_profiler") or {}
         memory_snapshot_cfg = cfg.get("memory_snapshot") or {}
+        sync_count_cfg = cfg.get("sync_count") or {}
         defaults = cls()
 
         return cls(
@@ -123,12 +131,13 @@ class ProfilingConfig:
             memory_snapshot=memory_snapshot_cfg.get("enabled", defaults.memory_snapshot),
             nvtx_annotate=cfg.get("nvtx_annotate", defaults.nvtx_annotate),
             nvtx_module_ranges=cfg.get("nvtx_module_ranges", defaults.nvtx_module_ranges),
+            sync_count=sync_count_cfg.get("enabled", defaults.sync_count),
         )
 
     @property
     def collects_traces(self) -> bool:
         """Whether the profiled stretch writes anything to the traces directory."""
-        return self.enabled and (self.pytorch_profiler or self.memory_snapshot)
+        return self.enabled and (self.pytorch_profiler or self.memory_snapshot or self.sync_count)
 
     @property
     def annotates_nvtx(self) -> bool:
@@ -234,6 +243,24 @@ def _export_memory_snapshot(cf: Config) -> None:
         logger.error(f"Failed to capture memory snapshot: {e}")
     else:
         logger.info(f"Memory snapshot written to {snapshot_path}")
+
+
+@contextlib.contextmanager
+def sync_count_session(cf: Config) -> Generator[SyncCounter, None, None]:
+    """
+    Count the host-device syncs of the enclosed steps (call `next_step()` after each one).
+
+    Writes `<timestamp>_rank_<rank>_sync_count.json` to the traces directory on every rank, as
+    ranks can sync at different sites; the root rank also logs the summary.
+    """
+    _prepare_traces_path(cf)
+    with SyncCounter() as counter:
+        yield counter
+    report = counter.report()
+    path = Path(f"{_trace_file_prefix(cf)}_sync_count.json")
+    write_sync_report(report, path)
+    if is_root():
+        logger.info(f"Sync count written to {path}\n{format_sync_report(report)}")
 
 
 def _prepare_traces_path(cf: Config) -> Path:
