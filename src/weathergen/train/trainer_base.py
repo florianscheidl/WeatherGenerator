@@ -72,12 +72,32 @@ class TrainerBase:
 
         The same seed is used on all ranks so that model weight initialization is
         identical across ranks even without a parameter broadcast (e.g. FSDP2).
-        Data loading randomness is diversified per rank/worker/mini-epoch in
-        MultiStreamDataSampler.
+        Once the model is initialized, call reseed_per_rank so that ranks draw
+        independent dropout masks etc. Data loading randomness is diversified per
+        rank/worker/mini-epoch in MultiStreamDataSampler.
         """
         torch.manual_seed(seed)  # also seeds the RNGs of all CUDA devices
         random.seed(seed)
         np.random.seed(seed % 2**32)
+
+    @staticmethod
+    def reseed_per_rank(seed: int, data_parallel_rank: int) -> None:
+        """
+        Reseed the torch, Python, and global NumPy RNGs with a rank-specific seed.
+
+        Must be called *after* model initialization (init_seeds keeps the ranks in
+        lockstep for that). Without it, every rank draws identical random tensors of a
+        given shape, e.g. the same dropout masks for the whole global batch.
+
+        The seed is derived from the data-parallel rank, not the global rank: the ranks of
+        one spatial-parallel group run the replicated global and forecast engines on the
+        same sample, so they keep sharing one RNG stream (cf. the sampler seed in
+        MultiStreamDataSampler.worker_workset).
+        """
+        seed = int(np.random.SeedSequence([seed, data_parallel_rank]).generate_state(1)[0])
+        torch.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
 
     @staticmethod
     def init_ddp(cf):

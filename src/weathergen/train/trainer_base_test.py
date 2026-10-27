@@ -98,3 +98,33 @@ def test_init_ddp_seeds_rngs_from_config():
     via_seeds = _draw_all()
 
     assert via_ddp == via_seeds
+
+
+def test_reseed_per_rank_diverges_across_ranks():
+    """Ranks share the init seed but draw independent streams after reseeding."""
+    TrainerBase.reseed_per_rank(42, data_parallel_rank=0)
+    rank0 = _draw_all()
+    TrainerBase.reseed_per_rank(42, data_parallel_rank=1)
+    rank1 = _draw_all()
+
+    assert all(a != b for a, b in zip(rank0, rank1, strict=True))
+
+
+def test_reseed_per_rank_is_reproducible():
+    """The same (seed, rank) pair yields identical draws from every global RNG."""
+    TrainerBase.reseed_per_rank(42, data_parallel_rank=3)
+    first = _draw_all()
+    TrainerBase.reseed_per_rank(42, data_parallel_rank=3)
+    second = _draw_all()
+
+    assert first == second
+
+
+def test_reseed_per_rank_differs_from_init_seeds():
+    """Rank 0 does not keep the shared init stream after reseeding."""
+    TrainerBase.init_seeds(42)
+    shared = _draw_all()
+    TrainerBase.reseed_per_rank(42, data_parallel_rank=0)
+    reseeded = _draw_all()
+
+    assert shared != reseeded

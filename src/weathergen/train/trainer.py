@@ -176,6 +176,7 @@ class Trainer(TrainerBase):
         data_parallel_cfg = cf.distributed.data_parallel
         spatial_parallel_size = get_spatial_parallel_size(spatial_cfg)
         data_parallel_cfg.world_size = cf.world_size // spatial_parallel_size
+        self.data_parallel_rank = cf.rank // spatial_parallel_size
         spatial_parallel_size_original = spatial_cfg.get("size_original", spatial_parallel_size)
         if self.world_size_original % spatial_parallel_size_original:
             raise ValueError(
@@ -267,6 +268,7 @@ class Trainer(TrainerBase):
             devices[0],
             cf.distributed.data_parallel,
         )
+        self.reseed_per_rank(cf.data_loading.rng_seed, self.data_parallel_rank)
 
         # get target_aux calculators for different loss terms
         self.target_and_aux_calculators_val = self.get_target_aux_calculators(self.test_cfg)
@@ -345,6 +347,10 @@ class Trainer(TrainerBase):
                     and cf.distributed.data_parallel.with_fsdp
                 ),
             )
+
+        # model (and EMA model) are initialized: let the data-parallel replicas' RNGs diverge
+        # from here
+        self.reseed_per_rank(cf.data_loading.rng_seed, self.data_parallel_rank)
 
         # get target_aux calculators for different loss terms
         self.target_and_aux_calculators = self.get_target_aux_calculators(self.training_cfg)
