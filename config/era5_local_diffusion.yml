@@ -1,0 +1,94 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Latent diffusion forecasting at local scale, on top of era5_local.yml:
+#   uv run train --base-config ./config/era5_local.yml --config ./config/era5_local_diffusion.yml
+#
+# The diffusion setup follows config/diffusion/config_diffusion_forecast.yml (removed in
+# 28db9474a): the forecast engine denoises the next latent state, conditioned on the current
+# one, with EDM noise levels and the latent-diffusion loss. Unlike that config, everything
+# trains from scratch (no load_chkpt, nothing frozen), so the model only exercises the code
+# path; it is meant for local runs and performance work, not for forecast skill.
+
+fe_diffusion_model: True
+fe_diffusion_latent_dim: 512 # = ae_global_dim_embed in era5_local.yml
+fe_diffusion_predict_residual: False
+fe_diffusion_classifier_free_guidance_prob: 0.0
+fe_diffusion_soft_clamp_channels: []
+fe_diffusion_model_conditioning: "forecast" # options: "date_time", "time", "forecast"
+fe_diffusion_model_conditioning_type: "concatenate"
+fe_layer_norm_after_blocks: [1] # after the last of the fe_num_blocks: 2 blocks
+fe_impute_latent_diffusion_noise_std: 1e-3
+with_step_conditioning: True
+
+# diffusion parameters
+frequency_embedding_dim: 256
+embedding_dim: 512
+noise_distribution: &noise_distribution "log_uniform" # "log_uniform" or "log_normal"
+sigma_min: &sigma_min 0.1
+sigma_max: &sigma_max 50
+sigma_data: 1.0
+rho: 7
+p_mean: 3.5 # only required if noise_distribution is log_normal
+p_std: 1.2 # only required if noise_distribution is log_normal
+diffusion_loss_weighting: "edm"
+diffusion_min_snr_gamma: 5.0
+fe_diffusion_edm_preconditioning: False
+sigma_min_quantile: 0.05
+fe_diffusion_num_inference_steps: 4 # few ODE steps keep local inference short
+
+training_config:
+  # student_teacher: the target samples carry network input, which the target encoder encodes
+  training_mode: ["masking", "student_teacher"]
+
+  losses:
+    physical: { enabled: False } # era5_local.yml's physical loss
+    latent_diff:
+      type: LossLatentDiffusion
+      weight: 1.0
+      target_and_aux_calc: DiffusionLatentTargetEncoder
+      loss_fcts: { "mse": {} }
+
+  model_input:
+    forecasting:
+      masking_strategy: "forecast"
+      masking_strategy_config:
+        diffusion_rn: True
+        noise_distribution: *noise_distribution
+        sigma_min: *sigma_min
+        sigma_max: *sigma_max
+      num_steps_input: 2
+      num_samples: 1
+
+  # the target draw sets the diffusion noise level, so it carries the same distribution spec
+  target_input:
+    forecasting:
+      masking_strategy: "forecast"
+      masking_strategy_config:
+        diffusion_rn: True
+        noise_distribution: *noise_distribution
+        sigma_min: *sigma_min
+        sigma_max: *sigma_max
+      num_steps_input: 1
+      num_samples: 1
+
+  forecast:
+    time_step: 06:00:00
+    num_steps: 1
+    offset: 0
+    policy: "fixed"
+
+validation_config:
+  # noise levels (log sigma) at which validation evaluates the denoiser, one pass each
+  validation_noise_levels: [1.0, 3.0]
+
+# inference decodes the denoised latents; output writing takes the physical loss's target setup
+test_config:
+  losses:
+    physical: { enabled: True, type: LossPhysical, loss_fcts: { "mse": {} } }

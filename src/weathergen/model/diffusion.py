@@ -630,7 +630,9 @@ class DiffusionForecastEngine(torch.nn.Module):
             )
 
         # --- Time step discretization (EDM Eq. 5) with training-aligned bounds ---
-        step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
+        # MPS has no float64
+        schedule_dtype = torch.float32 if device.type == "mps" else torch.float64
+        step_indices = torch.arange(num_steps, dtype=schedule_dtype, device=device)
         t_steps = (
             sigma_max_eff ** (1 / self.rho)
             + step_indices
