@@ -221,11 +221,11 @@ def compute_source_bytes(source_samples) -> int:
 
 @contextmanager
 def nvtx_range(name):
-    torch.cuda.nvtx.range_push(name)
+    _nvtx_push(name)
     try:
         yield
     finally:
-        torch.cuda.nvtx.range_pop()
+        _nvtx_pop()
 
 
 def nvtx_batches[T](batches: Iterable[tuple[int, T]]) -> Iterator[tuple[int, T]]:
@@ -283,12 +283,15 @@ def nvtx_patched(obj: object, method: str, name: str) -> Generator[None]:
         setattr(obj, method, original)
 
 
+# NVTX ranges exist on CUDA and ROCm (as roctx); elsewhere the annotations are dropped.
 def _nvtx_push(name: str):
-    torch.cuda.nvtx.range_push(name)
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_push(name)
 
 
 def _nvtx_pop():
-    torch.cuda.nvtx.range_pop()
+    if torch.cuda.is_available():
+        torch.cuda.nvtx.range_pop()
 
 
 def register_nvtx_hooks(model, scope: str = "global"):

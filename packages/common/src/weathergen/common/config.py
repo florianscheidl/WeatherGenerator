@@ -541,11 +541,20 @@ def _load_overwrite_conf(overwrite: Path | dict | DictConfig) -> DictConfig:
     return overwrite_config
 
 
+def _platform_env_script() -> Path | None:
+    """platform-env.py of the private repository, or None where that repository is absent."""
+    try:
+        return get_wg_private_path() / "hpc" / "platform-env.py"
+    except AssertionError:
+        return None
+
+
 def _load_private_conf(private_home: Path | None = None) -> DictConfig:
     """
     Return the private configuration from file or environment variable WEATHERGEN_PRIVATE_CONF.
     """
-    env_script_path = get_wg_private_path() / "hpc" / "platform-env.py"
+    # resolved only when needed, so that local runs work without the private repository
+    env_script_path = None
 
     if private_home is not None and private_home.is_file():
         _logger.info(f"Loading private config from {private_home}.")
@@ -554,7 +563,7 @@ def _load_private_conf(private_home: Path | None = None) -> DictConfig:
         private_home = Path(os.environ["WEATHERGEN_PRIVATE_CONF"])
         _logger.info(f"Loading private config from WEATHERGEN_PRIVATE_CONF:{private_home}.")
 
-    elif env_script_path.is_file():
+    elif (env_script_path := _platform_env_script()) is not None and env_script_path.is_file():
         _logger.info(f"Loading private config from platform-env.py: {env_script_path}.")
         # This code does many checks to ensure that any error message is surfaced.
         # Since it is a process call, it can be hard to diagnose the error.

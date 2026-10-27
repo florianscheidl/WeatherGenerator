@@ -139,9 +139,7 @@ class TrainLogger:
         if model_path:
             cf = config.load_run_config(run_id=run_id, mini_epoch=mini_epoch, model_path=model_path)
         else:
-            cf = config.load_merge_configs(
-                private_home=None, from_run_id=run_id, mini_epoch=mini_epoch
-            )
+            cf = config.load_merge_configs(from_run_id=run_id, mini_epoch=mini_epoch)
         run_id = cf.general.run_id
 
         result_dir_base = config.get_path_run(cf)
@@ -265,6 +263,7 @@ def prepare_losses_for_logging(
     loss_hist: list,
     losses_unweighted_hist: list[dict],
     stddev_unweighted_hist: list[dict],
+    device: torch.device,
 ) -> tuple[list, dict, dict]:
     """
     Aggregates across ranks loss and standard deviation data for logging.
@@ -284,7 +283,7 @@ def prepare_losses_for_logging(
 
     for d in losses_unweighted_hist:
         for key, value in flatten_dict(d).items():
-            value = torch.tensor(value, device="cuda") if type(value) is float else value
+            value = torch.tensor(value, device=device) if type(value) is float else value
             losses_all[key].append(ddp_average(value).item())
 
     for d in stddev_unweighted_hist:

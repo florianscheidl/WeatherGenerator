@@ -36,6 +36,8 @@ class StreamEmbedTransformer(torch.nn.Module):
         use_xsa=False,
         unembed_mode="full",
         stream_name="stream_embed",
+        with_flash=True,
+        attention_dtype=torch.bfloat16,
     ):
         """Constructor
 
@@ -72,7 +74,8 @@ class StreamEmbedTransformer(torch.nn.Module):
                     self.num_heads,
                     dropout_rate=dropout_rate,
                     with_qk_lnorm=True,
-                    with_flash=True,
+                    with_flash=with_flash,
+                    attention_dtype=attention_dtype,
                     use_xsa=self.use_xsa,
                 )
             )

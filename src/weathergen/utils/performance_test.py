@@ -47,6 +47,7 @@ def test_throughput_tracker_without_the_section():
 def test_nvtx_range_encloses_the_work_on_each_batch():
     calls = []
     with (
+        patch("torch.cuda.is_available", return_value=True),
         patch("torch.cuda.nvtx.range_push", side_effect=lambda n: calls.append(f"push {n}")),
         patch("torch.cuda.nvtx.range_pop", side_effect=lambda: calls.append("pop")),
     ):
@@ -75,6 +76,7 @@ def test_memory_tracker_from_config():
 def test_nvtx_annotator_is_a_noop_unless_enabled():
     calls = []
     with (
+        patch("torch.cuda.is_available", return_value=True),
         patch("torch.cuda.nvtx.range_push", side_effect=lambda n: calls.append(n)),
         patch("torch.cuda.nvtx.range_pop", side_effect=lambda: calls.append("pop")),
     ):
@@ -89,6 +91,7 @@ def test_nvtx_annotator_is_a_noop_unless_enabled():
 def test_nvtx_next_wraps_each_fetch_but_not_the_loop_body():
     calls = []
     with (
+        patch("torch.cuda.is_available", return_value=True),
         patch("torch.cuda.nvtx.range_push", side_effect=lambda n: calls.append(f"push {n}")),
         patch("torch.cuda.nvtx.range_pop", side_effect=lambda: calls.append("pop")),
     ):
@@ -108,6 +111,7 @@ def test_nvtx_wrap_patches_only_the_instance():
     calls = []
     wrapped, untouched = Optimizer(), Optimizer()
     with (
+        patch("torch.cuda.is_available", return_value=True),
         patch("torch.cuda.nvtx.range_push", side_effect=lambda n: calls.append(f"push {n}")),
         patch("torch.cuda.nvtx.range_pop", side_effect=lambda: calls.append("pop")),
     ):

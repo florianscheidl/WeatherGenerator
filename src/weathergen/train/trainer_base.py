@@ -11,6 +11,8 @@
 
 import os
 import random
+import re
+import sys
 import time
 
 import numpy as np
@@ -20,9 +22,22 @@ import torch.multiprocessing
 
 from weathergen.common.config import Config
 from weathergen.train.utils import str_to_tensor, tensor_to_str
+from weathergen.utils.device import get_device, get_device_type, set_device_type
 from weathergen.utils.distributed import is_root
 
 PORT = 1345
+
+
+def parse_slurm_tasks_per_node(tasks_per_node: str) -> int:
+    """
+    Number of tasks on the first node from SLURM_TASKS_PER_NODE, e.g. "8(x4),2" -> 8.
+
+    The rank computation assumes the same number of tasks on every node.
+    """
+    match = re.match(r"\d+", tasks_per_node)
+    if match is None:
+        raise ValueError(f"Cannot parse SLURM_TASKS_PER_NODE={tasks_per_node!r}")
+    return int(match.group())
 
 
 class TrainerBase:
@@ -30,9 +45,12 @@ class TrainerBase:
         self.cf: Config | None = None
 
     @staticmethod
-    def init_torch(use_cuda=True, num_accs_per_task=1, multiprocessing_method="fork"):
+    def init_torch(device="auto", num_accs_per_task=1, multiprocessing_method="fork"):
         """
         Initialize torch, set device and multiprocessing method.
+
+        `device` is "auto" (the available accelerator, or the CPU) or a device type, see
+        weathergen.utils.device.set_device_type.
 
         NOTE: If using the Nvidia profiler,
         the multiprocessing method must be set to "spawn".
@@ -44,24 +62,32 @@ class TrainerBase:
         # This strategy is required by the nvidia profiles
         # to properly trace events in worker processes.
         # This may cause issues with logging. Alternative: "fork"
+        if multiprocessing_method == "fork" and sys.platform == "darwin":
+            # fork is unsafe on macOS (Python's default there is spawn): data loader workers
+            # forked from ranks started by torchrun deadlock
+            print("multiprocessing_method 'fork' is not supported on macOS, using 'spawn'.")
+            multiprocessing_method = "spawn"
         torch.multiprocessing.set_start_method(multiprocessing_method, force=True)
 
         torch.backends.cuda.matmul.allow_tf32 = True
 
-        use_cuda = torch.cuda.is_available()
-        if not use_cuda:
-            return torch.device("cpu")
+        set_device_type(device)
+        device_type = get_device_type()
+        if device_type == "cpu":
+            return [torch.device("cpu")]
 
-        # if local_id_node == "-1":
         local_id_node = dist.get_node_local_rank(fallback_rank=-1)
         if local_id_node == -1:
-            devices = ["cuda"]
+            # without a launcher-provided local rank, use the current device; init_ddp sets
+            # it from SLURM_LOCALID
+            devices = [torch.device(device_type)]
         else:
             local_id_node = int(local_id_node)
             devices = [
-                f"cuda:{local_id_node * num_accs_per_task + i}" for i in range(num_accs_per_task)
+                torch.device(device_type, local_id_node * num_accs_per_task + i)
+                for i in range(num_accs_per_task)
             ]
-        torch.cuda.set_device(local_id_node * num_accs_per_task)
+            torch.accelerator.set_device_index(local_id_node * num_accs_per_task)
 
         return devices
 
@@ -131,25 +157,26 @@ class TrainerBase:
                 local_rank = int(os.environ.get("SLURM_LOCALID"))
             rank = int(os.environ.get("RANK", "-1"))
             if rank == -1:
-                ranks_per_node = int(os.environ.get("SLURM_TASKS_PER_NODE", "1")[0])
+                ranks_per_node = parse_slurm_tasks_per_node(
+                    os.environ.get("SLURM_TASKS_PER_NODE", "1")
+                )
                 rank = int(os.environ.get("SLURM_NODEID")) * ranks_per_node + local_rank
             master_addr = os.environ.get("MASTER_ADDR", "localhost")
             master_port = os.environ.get("MASTER_PORT", f"{PORT}")  # Default port
 
-            if torch.accelerator.is_available():
-                device_type = torch.accelerator.current_accelerator()
-                device = torch.device(f"{device_type}:{local_rank}")
+            device = get_device(local_rank)
+            if device.type != "cpu":
                 torch.accelerator.set_device_index(local_rank)
                 print(f"DDP initialization: device={device}, rank={rank}, world_size={world_size}")
             else:
-                device = torch.device("cpu")
                 print(f"Running on device {device}")
 
             backend = torch.distributed.get_default_backend_for_device(device)
             torch.distributed.init_process_group(
                 backend=backend,
                 world_size=world_size,
-                device_id=device,
+                # binding the process group to a device is only possible for accelerators
+                device_id=device if device.type != "cpu" else None,
                 rank=rank,
                 init_method=f"tcp://{master_addr}:{master_port}",
             )

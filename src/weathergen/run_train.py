@@ -119,7 +119,7 @@ def run_inference(args):
     cf.data_loading.rng_seed = 42
     cf.stage = args.stage
 
-    devices = Trainer.init_torch()
+    devices = Trainer.init_torch(device=cf.get("device", "auto"))
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
 
@@ -160,7 +160,7 @@ def run_continue(args):
     cf.stage = args.stage
 
     mp_method = cf.general.get("multiprocessing_method", "fork")
-    devices = Trainer.init_torch(multiprocessing_method=mp_method)
+    devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
 
@@ -194,7 +194,7 @@ def run_train(args):
     cf = config.set_run_id(cf, args.run_id, False)
     cf.stage = args.stage
     mp_method = cf.general.get("multiprocessing_method", "fork")
-    devices = Trainer.init_torch(multiprocessing_method=mp_method)
+    devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
 
@@ -205,9 +205,6 @@ def run_train(args):
     logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
     cf.streams = config.load_streams(Path(cf.streams_directory))
-
-    if cf.with_flash_attention:
-        assert cf.with_mixed_precision
 
     trainer = get_trainer(cf)
 

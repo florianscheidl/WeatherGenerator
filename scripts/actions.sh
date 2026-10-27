@@ -4,17 +4,32 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 PRIVATE_REPO_PATH="${WEATHERGEN_PRIVATE_REPO_PATH:-$SCRIPT_DIR/../WeatherGenerator-private}"
 
+# The torch extra (see pyproject.toml) for this machine; WEATHERGEN_TORCH_EXTRA overrides it.
+# macOS: cpu (includes MPS). Linux: rocm or xpu if an AMD or Intel GPU is detected, otherwise
+# gpu (CUDA), also on login nodes without GPUs; use WEATHERGEN_TORCH_EXTRA=cpu for CPU-only.
+torch_extra() {
+  if [[ -n "${WEATHERGEN_TORCH_EXTRA:-}" ]]; then
+    echo "$WEATHERGEN_TORCH_EXTRA"
+  elif [[ "$(uname)" == "Darwin" ]]; then
+    echo cpu
+  elif command -v nvidia-smi >/dev/null 2>&1; then
+    echo gpu
+  elif [[ -e /dev/kfd ]] || command -v rocm-smi >/dev/null 2>&1 || command -v amd-smi >/dev/null 2>&1; then
+    echo rocm
+  elif command -v xpu-smi >/dev/null 2>&1; then
+    echo xpu
+  else
+    echo gpu
+  fi
+}
+
 case "$1" in
   sync)
     (
       cd "$SCRIPT_DIR" || exit 1
-      # If we are running on a mac, use the cpu extra
-      if [[ "$(uname)" == "Darwin" ]]; then
-        uv sync --all-packages --extra cpu
-        exit 0
-      fi
-      # Otherwise, use the gpu extra
-      uv sync --all-packages --extra gpu
+      extra="$(torch_extra)"
+      echo "Installing with the torch extra: $extra"
+      uv sync --all-packages --extra "$extra"
     )
     ;;
   lint)

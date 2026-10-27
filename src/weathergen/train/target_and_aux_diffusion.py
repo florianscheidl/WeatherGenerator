@@ -9,6 +9,7 @@ from weathergen.train.target_and_aux_module_base import (
     TargetAndAuxModuleBase,
     TargetAuxOutput,
 )
+from weathergen.utils.device import get_device_type
 
 
 class DiffusionLatentTargetEncoder(TargetAndAuxModuleBase):
@@ -37,7 +38,7 @@ class DiffusionLatentTargetEncoder(TargetAndAuxModuleBase):
         """
         # TODO: This needs fixing, might need to use apply_fct_to_blocks as in init()
 
-        self.encoder.to_empty(device="cuda")
+        self.encoder.to_empty(device=get_device_type())
         for p in self.encoder.parameters():
             p.requires_grad = False
         maybe_sharded_sd = self.encoder.state_dict()

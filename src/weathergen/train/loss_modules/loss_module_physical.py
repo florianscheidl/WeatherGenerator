@@ -20,6 +20,7 @@ from omegaconf import DictConfig
 import weathergen.train.loss_modules.loss_functions as loss_fns
 from weathergen.train.loss_modules.loss_module_base import LossModuleBase, LossValues
 from weathergen.train.utils import TRAIN, VAL, Stage
+from weathergen.utils.device import non_blocking_copy
 
 _logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class LossPhysical(LossModuleBase):
             stream_info_loss_weight = stream_info.get("loss_weight", 1.0)
             weights_channels = (
                 torch.tensor(stream_info["target_channel_weights"]).to(
-                    device=device, non_blocking=True
+                    device=device, non_blocking=non_blocking_copy(device)
                 )
                 if "target_channel_weights" in stream_info
                 else None
@@ -105,7 +106,7 @@ class LossPhysical(LossModuleBase):
         if location_weight_type is None:
             return [None for _ in substep_masks]
 
-        target_coords = target_coords.to(self.device, non_blocking=True)
+        target_coords = target_coords.to(self.device, non_blocking=non_blocking_copy(self.device))
         weights_locations_fct = getattr(loss_fns, location_weight_type)
         weights_locations = [weights_locations_fct(target_coords[mask]) for mask in substep_masks]
 
@@ -121,7 +122,9 @@ class LossPhysical(LossModuleBase):
         substep_masks = []
         for t in target_times_unique:
             # find substep
-            mask_t = torch.tensor(t == target_times).to(self.device, non_blocking=True)
+            mask_t = torch.tensor(t == target_times).to(
+                self.device, non_blocking=non_blocking_copy(self.device)
+            )
             substep_masks.append(mask_t)
 
         return substep_masks

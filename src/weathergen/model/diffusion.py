@@ -578,7 +578,8 @@ class DiffusionForecastEngine(torch.nn.Module):
         # The encoder prepends register/class tokens to the healpix-cell latents,
         # so the sampled latent must include them to match the target latent shape.
         num_tokens = self.cf.num_register_tokens + self.cf.num_class_tokens + self.num_healpix_cells
-        x = torch.randn(batch_size, num_tokens, self.cf.ae_global_dim_embed).to(device="cuda")
+        device = next(self.parameters()).device
+        x = torch.randn(batch_size, num_tokens, self.cf.ae_global_dim_embed).to(device=device)
 
         # --- Training-aligned sigma bounds ---
         # The network only learns to denoise reliably within the sigma range seen during
@@ -629,7 +630,7 @@ class DiffusionForecastEngine(torch.nn.Module):
             )
 
         # --- Time step discretization (EDM Eq. 5) with training-aligned bounds ---
-        step_indices = torch.arange(num_steps, dtype=torch.float64, device="cuda")
+        step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
         t_steps = (
             sigma_max_eff ** (1 / self.rho)
             + step_indices
@@ -662,8 +663,8 @@ class DiffusionForecastEngine(torch.nn.Module):
         for i, (t_cur, t_next) in enumerate(
             zip(t_steps[:-1], t_steps[1:], strict=False)
         ):  # 0, ..., N-1
-            t_cur = torch.tensor([t_cur], device="cuda").float()
-            t_next = torch.tensor([t_next], device="cuda").float()
+            t_cur = torch.tensor([t_cur], device=device).float()
+            t_next = torch.tensor([t_next], device=device).float()
 
             x_cur = x_next
 
