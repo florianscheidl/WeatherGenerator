@@ -41,6 +41,7 @@ from weathergen.utils.profiling import (
     ProfilingConfig,
     memory_snapshot_session,
     pytorch_profiler_session,
+    sync_count_session,
     wrap_module_forward_with_profiling,
 )
 
@@ -368,15 +369,21 @@ class ProfilingTrainer(Trainer):
             prof = None
             if self.profiling_cfg.pytorch_profiler:
                 prof = stack.enter_context(pytorch_profiler_session(self.cf, schedule))
+            sync_counter = None
 
             for bidx, batch in enumerate(islice(dataset_iter, schedule.num_steps)):
-                if bidx == schedule.steps_before_active and self.profiling_cfg.memory_snapshot:
-                    # skip the wait and warmup steps, as the profiler does
-                    stack.enter_context(memory_snapshot_session(self.cf))
+                # skip the wait and warmup steps, as the profiler does
+                if bidx == schedule.steps_before_active:
+                    if self.profiling_cfg.memory_snapshot:
+                        stack.enter_context(memory_snapshot_session(self.cf))
+                    if self.profiling_cfg.sync_count:
+                        sync_counter = stack.enter_context(sync_count_session(self.cf))
 
                 yield bidx, batch
                 if prof is not None:
                     prof.step()
+                if sync_counter is not None:
+                    sync_counter.next_step()
 
         # keep the other ranks in step with the root rank writing its traces
         if torch.distributed.is_initialized():

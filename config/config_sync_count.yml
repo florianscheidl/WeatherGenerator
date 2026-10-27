@@ -1,0 +1,22 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Count the host-device syncs of a few training steps per call site, then end the run
+# (weathergen.utils.sync_counter). Counting slows the steps down; do not time this run.
+# The report is <run dir>/profiling_traces/<timestamp>_rank_<rank>_sync_count.json.
+
+profiling:
+  enabled: True
+  stop_after_profiling: True
+  wait_iteration: 1
+  warmup_iteration: 1
+  active_iteration: 3
+  repeat: 1
+  sync_count:
+    enabled: True

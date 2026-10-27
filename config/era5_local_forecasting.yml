@@ -1,0 +1,33 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Local stand-in for the forecasting setup used in performance runs (weathergen-configs
+# performance/base_operan_georing_avhrr_forecasting_highres.yml), on top of era5_local.yml:
+#   uv run train --base-config ./config/era5_local.yml --config ./config/era5_local_forecasting.yml
+#
+# Same model structure and training step (masking with the physical loss, two forecast steps,
+# 2D RoPE, no class/register tokens, no aggregation blocks), at local size, with two gridded
+# streams from the local dataset so the multi-stream paths run. Not covered: observation
+# streams (sparse and empty cells) and FSDP across ranks.
+
+ae_aggregation_num_blocks: 0
+num_class_tokens: 0
+num_register_tokens: 0
+fe_layer_norm_after_blocks: [1]
+fe_impute_latent_noise_std: 1e-4
+rope_2D: True
+
+streams_directory: "./config/streams/era5_local_two_streams"
+
+training_config:
+  forecast:
+    time_step: 06:00:00
+    offset: 1
+    num_steps: 2
+    policy: "fixed"
