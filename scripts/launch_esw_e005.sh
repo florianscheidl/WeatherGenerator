@@ -18,6 +18,11 @@
 #   bash scripts/launch_esw_e005.sh            # submit
 #   DRY_RUN=1 bash scripts/launch_esw_e005.sh  # check the paths, print the commands
 #
+# Run IDs are <RUN_TAG>tc<i> (control), <RUN_TAG>tt<i> (treatment) and <RUN_TAG>st (pinning
+# check), RUN_TAG=e5 by default. The launcher refuses a run ID whose slurm directory exists, so
+# a retry after a partial launch needs a new tag (e.g. RUN_TAG=e5b), or the old directories
+# removed once their jobs are known not to exist. The script prints each run ID it submitted.
+#
 # Each launch checks out the commit it measures (the launcher copies the tracked files at
 # submission); the checkout returns to where it was at the end. Neither commit contains this
 # script, so everything runs from main(), which bash has read completely before the first
@@ -58,8 +63,10 @@ main() {
   echo "WeatherGenerator-private: $(git -C ../WeatherGenerator-private rev-parse HEAD)"
   echo "weathergen-configs:       $(git -C ../weathergen-configs rev-parse HEAD)"
 
-  local orig
+  local tag=${RUN_TAG:-e5}
   orig=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
+  # back to where the checkout was, also when a launch fails
+  trap 'git checkout -q "$orig"' EXIT
 
   local data=(data_loading.rng_seed=1 training_config.start_date=2017-06-01T00:00)
   local timing=("${data[@]}" training_config.num_mini_epochs=1
@@ -78,6 +85,7 @@ main() {
       echo "[$(git rev-parse --short HEAD)] ${cmd[*]}"
     else
       "${cmd[@]}"
+      echo ">>> submitted $run_id at $(git rev-parse --short HEAD)"
     fi
   }
 
@@ -86,14 +94,12 @@ main() {
   # that is not zero) give 8 validation batches per rank. Three repeats per arm, interleaved.
   local i
   for i in 1 2 3; do
-    launch "$control" "e5tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
-    launch "$treatment" "e5tt$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
+    launch "$control" "${tag}tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
+    launch "$treatment" "${tag}tt$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
   done
 
   # pinning check, treatment only (not timed)
-  launch "$treatment" e5st 30:00 ./config/config_sync_count.yml "${data[@]}"
-
-  git checkout -q "$orig"
+  launch "$treatment" "${tag}st" 30:00 ./config/config_sync_count.yml "${data[@]}"
 }
 
 main "$@"
