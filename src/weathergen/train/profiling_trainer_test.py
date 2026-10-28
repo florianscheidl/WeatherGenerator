@@ -21,6 +21,7 @@ from weathergen.train import profiling_trainer  # noqa: E402
 from weathergen.train.profiling_trainer import ProfilingTrainer  # noqa: E402
 from weathergen.train.trainer import Trainer  # noqa: E402
 from weathergen.utils import performance  # noqa: E402
+from weathergen.utils.phase_timer import PhaseTimer  # noqa: E402
 from weathergen.utils.profiling import ProfilingConfig  # noqa: E402
 
 
@@ -156,3 +157,101 @@ def test_repeated_validation_is_annotated_once():
     first, second = _annotated_inference_ranges(2)
 
     assert second == first
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _phase_timed_trainer(stage: str, clock: _Clock) -> tuple[ProfilingTrainer, PhaseTimer]:
+    timer = PhaseTimer("setup/other", clock=clock, sync_fn=lambda: None)
+    trainer = ProfilingTrainer(OmegaConf.create({"metrics": 1}), ProfilingConfig())
+    trainer.cf = OmegaConf.create({"stage": stage})
+    trainer.training_cfg = OmegaConf.create({"num_mini_epochs": 1})
+    return trainer, timer
+
+
+def _seconds(timer: PhaseTimer) -> dict[str, float]:
+    return {key: entry["self_s"] for key, entry in timer.report()["phases"].items()}
+
+
+def test_phase_timer_splits_the_training_loop():
+    clock = _Clock()
+    trainer, timer = _phase_timed_trainer("train", clock)
+
+    def batches():
+        for i in range(2):
+            clock.now += 1.0  # loading
+            yield i
+
+    def fake_validate(trainer, *args):
+        for _bidx, _batch in trainer.validation_batches(iter([0])):
+            clock.now += 4.0
+
+    with (
+        patch.object(profiling_trainer, "timer", timer),
+        patch.object(Trainer, "validate_before_training", lambda self: None),
+        patch.object(Trainer, "validate", fake_validate),
+        patch.object(Trainer, "save_model", lambda *args: setattr(clock, "now", clock.now + 8.0)),
+    ):
+        trainer.validate_before_training()
+        for _bidx, _batch in trainer.train_batches(batches()):
+            clock.now += 2.0  # step
+        trainer.validate(0, None, 1)
+        trainer.save_model(1)
+
+    assert _seconds(timer) == {
+        "setup/other": 0.0,
+        "train": 4.0,
+        "train/data_wait_first": 1.0,
+        "train/data_wait": 1.0,
+        "train/validate": 4.0,
+        "train/validate/data_wait_first": 0.0,
+        "train/validate/data_wait": 0.0,
+        "train/checkpoint": 8.0,
+        "teardown": 0.0,
+    }
+
+
+def test_phase_timer_bills_model_construction_to_its_own_phase():
+    clock = _Clock()
+    trainer, timer = _phase_timed_trainer("train", clock)
+    original = trainer_module.init_model_and_shard
+
+    def fake_init_model_and_shard(*args):
+        clock.now += 3.0
+        return "model", "params"
+
+    def fake_run(trainer, *args):
+        clock.now += 1.0
+        assert trainer_module.init_model_and_shard(None) == ("model", "params")
+        clock.now += 0.5
+
+    with (
+        patch.object(profiling_trainer, "timer", timer),
+        patch.object(trainer_module, "init_model_and_shard", fake_init_model_and_shard),
+        patch.object(Trainer, "run", fake_run),
+    ):
+        trainer.run(None, None)
+        # patched only while running
+        assert trainer_module.init_model_and_shard is fake_init_model_and_shard
+    assert trainer_module.init_model_and_shard is original
+
+    assert _seconds(timer) == {"setup/other": 1.5, "setup/model": 3.0}
+
+
+def test_phase_timer_makes_inference_a_root_phase():
+    clock = _Clock()
+    trainer, timer = _phase_timed_trainer("inference", clock)
+
+    with (
+        patch.object(profiling_trainer, "timer", timer),
+        patch.object(Trainer, "validate", lambda *args: setattr(clock, "now", clock.now + 5.0)),
+    ):
+        trainer.validate(0, None, 1)
+
+    assert _seconds(timer) == {"setup/other": 0.0, "inference": 5.0, "teardown": 0.0}

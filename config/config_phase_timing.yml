@@ -1,0 +1,18 @@
+# (C) Copyright 2025 WeatherGenerator contributors.
+#
+# This software is licensed under the terms of the Apache Licence Version 2.0
+# which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# In applying this licence, ECMWF does not waive the privileges and immunities
+# granted to it by virtue of its status as an intergovernmental organisation
+# nor does it submit to any jurisdiction.
+
+# Wall-clock time per phase of the run (weathergen.utils.phase_timer): setup, the waits for
+# the data loader, the training loop, validation, checkpoints, logging. Synchronizes the
+# device only at logging, validation and checkpoints, never per training step. Do not combine
+# with the profiling collectors when timing.
+# The report is <run dir>/phase_timing_rank<rank>.json, written at process exit.
+
+performance_logging:
+  phase_timing:
+    enabled: True
