@@ -71,7 +71,7 @@ main() {
     shift 4
     git checkout -q --detach "$commit"
     [ -e "$extra_config" ] || { echo "missing at $commit: $extra_config" >&2; exit 1; }
-    local cmd=("$launcher" --nodes=1 --reservation=develbooster --time="$time"
+    local cmd=("$launcher" --nodes=1 --time="$time"
       --wgen-dir "$PWD" --run-id "$run_id" --base-config "$base"
       --config "$hp5" "$extra_config" --options "$@")
     if [ -n "${DRY_RUN:-}" ]; then
