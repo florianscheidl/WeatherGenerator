@@ -81,8 +81,9 @@ main() {
     fi
   }
 
-  # timing: 1024 samples / (4 ranks x batch 1) = 256 steps per rank; validation needs
-  # 4 ranks x 8 workers = 32 samples for one batch per rank. Three repeats per arm, interleaved.
+  # timing: 1024 samples / (4 ranks x batch 1) = 256 steps per rank. Each rank's share is
+  # rounded down to a multiple of its 8 workers, so 32 validation samples (the smallest count
+  # that is not zero) give 8 validation batches per rank. Three repeats per arm, interleaved.
   local i
   for i in 1 2 3; do
     launch "$control" "e5tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
