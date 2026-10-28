@@ -10,6 +10,7 @@
 
 # ESW-E005: the sync-barrier stack (SYNC-I5) against its control, timed with the phase timer
 # (3 runs per arm, interleaved), plus one sync count of the treatment as a pinning check.
+# One node each (4 GPUs, FSDP over 4 ranks), so at most 4 nodes are in use at once.
 #
 # Run with bash from the root of a clean WeatherGenerator checkout that has
 # ../WeatherGenerator-private and ../weathergen-configs next to it:
@@ -62,7 +63,7 @@ main() {
 
   local data=(data_loading.rng_seed=1 training_config.start_date=2017-06-01T00:00)
   local timing=("${data[@]}" training_config.num_mini_epochs=1
-    training_config.samples_per_mini_epoch=2048 validation_config.samples_per_mini_epoch=64)
+    training_config.samples_per_mini_epoch=1024 validation_config.samples_per_mini_epoch=32)
 
   # launch <commit> <run-id> <time> <extra config> <option>...
   launch() {
@@ -70,7 +71,7 @@ main() {
     shift 4
     git checkout -q --detach "$commit"
     [ -e "$extra_config" ] || { echo "missing at $commit: $extra_config" >&2; exit 1; }
-    local cmd=("$launcher" --nodes=2 --reservation=develbooster --time="$time"
+    local cmd=("$launcher" --nodes=1 --reservation=develbooster --time="$time"
       --wgen-dir "$PWD" --run-id "$run_id" --base-config "$base"
       --config "$hp5" "$extra_config" --options "$@")
     if [ -n "${DRY_RUN:-}" ]; then
@@ -80,7 +81,8 @@ main() {
     fi
   }
 
-  # timing: 256 steps per rank, three repeats per arm, interleaved
+  # timing: 1024 samples / (4 ranks x batch 1) = 256 steps per rank; validation needs
+  # 4 ranks x 8 workers = 32 samples for one batch per rank. Three repeats per arm, interleaved.
   local i
   for i in 1 2 3; do
     launch "$control" "e5tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
