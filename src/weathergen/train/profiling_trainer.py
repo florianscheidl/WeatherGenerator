@@ -15,8 +15,9 @@ Selected by the `profiling` and `performance_logging` config sections, see
 """
 
 import contextlib
+import functools
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import islice
 
 import torch
@@ -37,6 +38,7 @@ from weathergen.utils.performance import (
     nvtx_patched,
     nvtx_wrap,
 )
+from weathergen.utils.phase_timer import timer
 from weathergen.utils.profiling import (
     ProfilingConfig,
     memory_snapshot_session,
@@ -51,7 +53,7 @@ logger = logging.getLogger(__name__)
 class ProfilingTrainer(Trainer):
     """
     Trainer that measures the training loop (see `ProfilingConfig`, `NsysWindows`,
-    `ThroughputTracker`, `MemoryTracker`).
+    `ThroughputTracker`, `MemoryTracker`, `weathergen.utils.phase_timer`).
 
     Only the iteration seams (`mini_epochs`, `train_batches`) are overridden, so the
     training step is the same as in a normal run. Measurement happens in `train_batches`,
@@ -64,6 +66,11 @@ class ProfilingTrainer(Trainer):
 
     Traces are collected on the root rank only; the other ranks run the same steps untraced
     so collectives stay matched.
+
+    The phase timer (enabled in `weathergen.run_train`) gets its phases from the same seams:
+    `setup/data`, `setup/model` and `setup/other` from `init` and `init_model_and_shard`
+    (patched during `run`/`inference`), then `train` with the nested `data_wait`, `log`,
+    `validate` and `checkpoint`, or `inference`, then `teardown`.
     """
 
     def __init__(self, train_logging: Config, profiling_cfg: ProfilingConfig):
@@ -82,6 +89,10 @@ class ProfilingTrainer(Trainer):
 
     def init(self, cf: Config, devices: list) -> None:
         super().init(cf, devices)
+        if timer.enabled:
+            # run() and inference() create the data loaders right after init()
+            timer.switch("setup/data")
+            self._log = self._timed(self._log, "log", sync=True)
 
         self.throughput_tracker = ThroughputTracker.from_config(
             self.cf,
@@ -118,6 +129,51 @@ class ProfilingTrainer(Trainer):
                 f"{profiling_cfg.schedule.num_steps} steps < {self.nsys_windows.last_step + 1}."
             )
 
+    def run(self, cf, devices, run_id_contd=None, mini_epoch_contd=None) -> None:
+        """Time the model construction as its own setup phase."""
+        with self._timed_model_init():
+            super().run(cf, devices, run_id_contd, mini_epoch_contd)
+
+    def inference(self, cf, devices, run_id_contd, mini_epoch_contd) -> None:
+        """Time the model construction as its own setup phase."""
+        with self._timed_model_init():
+            super().inference(cf, devices, run_id_contd, mini_epoch_contd)
+
+    @contextlib.contextmanager
+    def _timed_model_init(self) -> Iterator[None]:
+        """Bill `init_model_and_shard` (model and EMA model) to `setup/model`."""
+        if not timer.enabled:
+            yield
+            return
+
+        init_model_and_shard = trainer_module.init_model_and_shard
+
+        @functools.wraps(init_model_and_shard)
+        def timed(*args, **kwargs):
+            timer.switch("setup/model")
+            result = init_model_and_shard(*args, **kwargs)
+            # what follows the model in run(): optimizer, schedulers, loss calculators
+            timer.switch("setup/other", sync=True)
+            return result
+
+        # a module function, so patched only while running
+        trainer_module.init_model_and_shard = timed
+        try:
+            yield
+        finally:
+            trainer_module.init_model_and_shard = init_model_and_shard
+
+    @staticmethod
+    def _timed(fn: Callable, name: str, sync: bool = False) -> Callable:
+        """`fn` timed as the phase `name`, nested in the current one."""
+
+        @functools.wraps(fn)
+        def timed(*args, **kwargs):
+            with timer.phase(name, sync=sync):
+                return fn(*args, **kwargs)
+
+        return timed
+
     @property
     def profiling_only(self) -> bool:
         """Whether the run ends after the measured steps, without validation or checkpoints."""
@@ -149,8 +205,15 @@ class ProfilingTrainer(Trainer):
                 )
             super().train(mini_epoch)
 
+    def validate_before_training(self) -> None:
+        """Start the `train` phase; run() calls this right before the training loop."""
+        timer.switch("train", sync=True)
+        super().validate_before_training()
+
     def train_batches(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """Measure every training step, and trace the profiled stretch of them."""
+        # innermost, so that the phase timer times only the wait for the data loader
+        dataset_iter = timer.iterate(dataset_iter, "data_wait")
         if self.profiling_cfg.annotates_nvtx:
             # the time the training loop waits for the data loader
             dataset_iter = nvtx_next(dataset_iter, "next_batch")
@@ -260,6 +323,7 @@ class ProfilingTrainer(Trainer):
 
     def validation_batches(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """Put each validation step, and the wait for its batch, into an nvtx range."""
+        dataset_iter = timer.iterate(dataset_iter, "data_wait")
         if not self.profiling_cfg.annotates_nvtx:
             yield from super().validation_batches(dataset_iter)
             return
@@ -409,6 +473,11 @@ class ProfilingTrainer(Trainer):
         # the training steps since the last metrics interval belong to the training window
         self._close_memory_window("train")
         with contextlib.ExitStack() as stack:
+            if inference:
+                # inference is a single validate, so it is a root phase
+                timer.switch("inference", sync=True)
+            else:
+                stack.enter_context(timer.phase("validate"))
             if inference and self.profiling_cfg.enabled and self.profiling_cfg.memory_snapshot:
                 stack.enter_context(memory_snapshot_session(self.cf))
             if self.profiling_cfg.annotates_nvtx:
@@ -417,6 +486,8 @@ class ProfilingTrainer(Trainer):
                 stack.enter_context(nvtx_patched(trainer_module, "write_output", "write_output"))
                 stack.enter_context(self.annotate("validation"))
             super().validate(mini_epoch, mode_cfg, batch_size)
+        if inference:
+            timer.switch("teardown", sync=True)
         self._log_peak_memory(VAL, "validation")
 
     def save_model(self, mini_epoch: int, name=None) -> None:
@@ -429,6 +500,9 @@ class ProfilingTrainer(Trainer):
             return
 
         self._close_memory_window("train")
-        with self.annotate("checkpoint"):
+        with timer.phase("checkpoint", sync=True), self.annotate("checkpoint"):
             super().save_model(mini_epoch, name)
         self._log_peak_memory(TRAIN, "save_model")
+        if mini_epoch == self.training_cfg.num_mini_epochs:
+            # run() saves the final model last
+            timer.switch("teardown")

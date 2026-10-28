@@ -11,6 +11,9 @@
 The entry point for training and inference weathergen-atmo
 """
 
+# first, so that the phase timer covers the imports below
+from weathergen.utils import phase_timer  # isort: skip
+
 import logging
 import os
 import pdb
@@ -39,12 +42,21 @@ def get_trainer(cf: Config) -> Trainer:
         or NsysWindows.from_config(cf) is not None
         or ThroughputTracker.is_enabled(cf)
         or MemoryTracker.is_enabled(cf)
+        or phase_timer.is_enabled(cf)
     )
     if measured:
         logger.info("Profiling or performance logging enabled: running with ProfilingTrainer.")
         return ProfilingTrainer(cf.train_logging, profiling_cfg)
 
     return Trainer(cf.train_logging)
+
+
+def _configure_phase_timer(cf: Config) -> None:
+    """Enable the phase timer on this rank, or make it a no-op, once the rank is known."""
+    phase_timer.timer.configure(
+        phase_timer.is_enabled(cf), config.get_path_run(cf), cf.get("rank", 0)
+    )
+    phase_timer.timer.switch("setup/init")
 
 
 def train() -> None:
@@ -63,6 +75,7 @@ def inference():
 
 
 def main(argl: list[str]):
+    phase_timer.timer.switch("setup/config")
     try:
         argl = _fix_argl(argl)
     except ValueError as e:
@@ -119,9 +132,11 @@ def run_inference(args):
     cf.data_loading.rng_seed = 42
     cf.stage = args.stage
 
+    phase_timer.timer.switch("setup/dist_init")
     devices = Trainer.init_torch(device=cf.get("device", "auto"))
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
+    _configure_phase_timer(cf)
 
     init_loggers(cf.general.run_id)
 
@@ -160,9 +175,11 @@ def run_continue(args):
     cf.stage = args.stage
 
     mp_method = cf.general.get("multiprocessing_method", "fork")
+    phase_timer.timer.switch("setup/dist_init")
     devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
+    _configure_phase_timer(cf)
 
     init_loggers(cf.general.run_id)
 
@@ -194,9 +211,11 @@ def run_train(args):
     cf = config.set_run_id(cf, args.run_id, False)
     cf.stage = args.stage
     mp_method = cf.general.get("multiprocessing_method", "fork")
+    phase_timer.timer.switch("setup/dist_init")
     devices = Trainer.init_torch(device=cf.get("device", "auto"), multiprocessing_method=mp_method)
     cf = Trainer.init_ddp(cf)
     cf = Trainer.init_seeds(cf)
+    _configure_phase_timer(cf)
 
     # this line should probably come after the processes have been sorted out else we get lots
     # of duplication due to multiple process in the multiGPU case
