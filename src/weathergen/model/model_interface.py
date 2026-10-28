@@ -13,6 +13,7 @@ import itertools
 import logging
 
 import torch
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
@@ -39,6 +40,45 @@ logger = logging.getLogger(__name__)
 
 # same as in config: student_teacher, forecasting, masking
 type TrainingMode = str
+
+# one mesh per (replicate, shard) layout: init_device_mesh creates new process groups, and
+# with them NCCL communicators and their device buffers, on every call, and the model and
+# the EMA model are sharded separately
+_FSDP_MESHES: dict[tuple[int, int], DeviceMesh] = {}
+
+
+def get_fsdp_shard_size(data_parallel_cfg, world_size: int) -> int | None:
+    """
+    Number of ranks each FSDP parameter is sharded across, or None for all of them.
+
+    `data_parallel.fsdp_shard_size` splits the ranks into world_size // fsdp_shard_size
+    replicas of a shard group (HSDP): parameters are sharded within a group and replicated
+    across groups. 1 shards nothing, so every rank holds the full parameters and gradients
+    are all-reduced as with DDP. Unset or world_size is plain FSDP over all ranks.
+    """
+    shard_size = data_parallel_cfg.get("fsdp_shard_size", None)
+    if shard_size is None or int(shard_size) == world_size:
+        return None
+    shard_size = int(shard_size)
+    if shard_size < 1 or world_size % shard_size:
+        raise ValueError(
+            f"distributed.data_parallel.fsdp_shard_size ({shard_size}) must be at least 1 "
+            f"and divide the world size ({world_size})"
+        )
+    return shard_size
+
+
+def get_fsdp_mesh(data_parallel_cfg, world_size: int) -> DeviceMesh | None:
+    """2D (replicate, shard) mesh for HSDP, or None for fully_shard's default 1D mesh."""
+    shard_size = get_fsdp_shard_size(data_parallel_cfg, world_size)
+    if shard_size is None:
+        return None
+    shape = (world_size // shard_size, shard_size)
+    if shape not in _FSDP_MESHES:
+        _FSDP_MESHES[shape] = init_device_mesh("cuda", shape, mesh_dim_names=("replicate", "shard"))
+        if is_root():
+            logger.info(f"HSDP: {shape[0]} replicas x {shape[1]} ranks per shard group.")
+    return _FSDP_MESHES[shape]
 
 
 def init_model_and_shard(
@@ -88,7 +128,9 @@ def init_model_and_shard(
         # this by returning float32 whatever it was handed. Off by default so autocast picks
         # the dtype per operation, identically in both passes.
         cast_forward_inputs = cf.get("fsdp_cast_forward_inputs", False)
+        mesh = get_fsdp_mesh(data_parallel_cfg, cf.world_size)
         fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=get_dtype(cf.mixed_precision_dtype),
@@ -134,6 +176,7 @@ def init_model_and_shard(
         # this is the policy the mismatch was observed under: param_dtype float32 against
         # bfloat16 activations, so the entry cast is a full float32 copy of the activation
         full_precision_fsdp_kwargs = {
+            "mesh": mesh,
             "mp_policy": (
                 MixedPrecisionPolicy(
                     param_dtype=torch.float32,
@@ -150,7 +193,7 @@ def init_model_and_shard(
                 fully_shard(module, **full_precision_fsdp_kwargs)
 
     if with_ddp and with_fsdp:
-        fully_shard(model)
+        fully_shard(model, mesh=mesh)
         for tensor in itertools.chain(model.parameters(), model.buffers()):
             assert tensor.device == torch.device("meta")
 

@@ -72,6 +72,9 @@ distributed:
     with_ddp: False
     with_fsdp: True
     find_unused_parameters: True
+    # FSDP only: number of ranks each parameter is sharded across (HSDP). Must divide the
+    # world size; 1 shards nothing (DDP-like), null shards across all ranks.
+    fsdp_shard_size: null
   spatial_parallel:
     # Split the model's HEALPix/location dimension across this many consecutive
     # distributed ranks.
