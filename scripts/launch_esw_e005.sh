@@ -10,13 +10,17 @@
 
 # ESW-E005: the sync-barrier stack (SYNC-I5) against its control, timed with the phase timer
 # (3 runs per arm, interleaved), plus one sync count of the treatment as a pinning check.
-# One node each (4 GPUs, FSDP over 4 ranks), so at most 4 nodes are in use at once.
+# One node each (4 GPUs, FSDP over 4 ranks), so at most 4 nodes are in use at once. Streams:
+# the low-resolution set (era5_georing_avhrr_synop_lowres) instead of the base config's
+# high-resolution one, whose data loader workers ran out of shared memory.
 #
 # Run with bash from the root of a clean WeatherGenerator checkout that has
 # ../WeatherGenerator-private and ../weathergen-configs next to it:
 #
 #   bash scripts/launch_esw_e005.sh            # submit
 #   DRY_RUN=1 bash scripts/launch_esw_e005.sh  # check the paths, print the commands
+#   RUNS=tc1 bash scripts/launch_esw_e005.sh   # only these runs (default: all, in order:
+#                                              # tc1 tt1 tc2 tt2 tc3 tt3 st)
 #
 # Run IDs are <RUN_TAG>tc<i> (control), <RUN_TAG>tt<i> (treatment) and <RUN_TAG>st (pinning
 # check), RUN_TAG=e5 by default. The launcher refuses a run ID whose slurm directory exists, so
@@ -34,9 +38,10 @@ main() {
   local launcher=../WeatherGenerator-private/hpc/launch-slurm.py
   local base=../weathergen-configs/performance/base_operan_georing_avhrr_forecasting_highres.yml
   local hp5=../weathergen-configs/performance/healpix_5.yml
-  local streams=../weathergen-configs/streams/era5_georing_avhrr_synop_highres_2
-  local control=96b13daf6079f5decbce295ae4f0fb2a1c04261a
-  local treatment=a15dd21d1599c33b61abcf02dba26001b154bb61
+  # the same relative form as the base config's streams_directory
+  local streams=../weathergen-configs/streams/era5_georing_avhrr_synop_lowres/
+  local control=0f1f50fefa70602d3d20d1e0e7dee44d13ca4cf3
+  local treatment=18e85186253f39da673df21f464c53f83ac753d9
 
   # preflight: fail before submitting anything
   local missing=0 path commit
@@ -68,13 +73,16 @@ main() {
   # back to where the checkout was, also when a launch fails
   trap 'git checkout -q "$orig"' EXIT
 
-  local data=(data_loading.rng_seed=1 training_config.start_date=2017-06-01T00:00)
+  local selected=" ${RUNS:-tc1 tt1 tc2 tt2 tc3 tt3 st} "
+  local data=(data_loading.rng_seed=1 training_config.start_date=2017-06-01T00:00
+    "streams_directory=$streams")
   local timing=("${data[@]}" training_config.num_mini_epochs=1
     training_config.samples_per_mini_epoch=1024 validation_config.samples_per_mini_epoch=32)
 
-  # launch <commit> <run-id> <time> <extra config> <option>...
+  # launch <commit> <run name> <time> <extra config> <option>...
   launch() {
-    local commit=$1 run_id=$2 time=$3 extra_config=$4
+    local commit=$1 run_id=$tag$2 time=$3 extra_config=$4
+    [[ "$selected" == *" $2 "* ]] || return 0
     shift 4
     git checkout -q --detach "$commit"
     [ -e "$extra_config" ] || { echo "missing at $commit: $extra_config" >&2; exit 1; }
@@ -94,12 +102,12 @@ main() {
   # that is not zero) give 8 validation batches per rank. Three repeats per arm, interleaved.
   local i
   for i in 1 2 3; do
-    launch "$control" "${tag}tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
-    launch "$treatment" "${tag}tt$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
+    launch "$control" "tc$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
+    launch "$treatment" "tt$i" 45:00 ./config/config_phase_timing.yml "${timing[@]}"
   done
 
   # pinning check, treatment only (not timed)
-  launch "$treatment" "${tag}st" 30:00 ./config/config_sync_count.yml "${data[@]}"
+  launch "$treatment" st 30:00 ./config/config_sync_count.yml "${data[@]}"
 }
 
 main "$@"
