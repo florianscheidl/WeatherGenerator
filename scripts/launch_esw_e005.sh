@@ -25,9 +25,11 @@
 #                                              # (default: none)
 #
 # Run IDs are <RUN_TAG>tc<i> (control), <RUN_TAG>tt<i> (treatment) and <RUN_TAG>st (pinning
-# check), RUN_TAG=e5 by default. The launcher refuses a run ID whose slurm directory exists, so
-# a retry after a partial launch needs a new tag (e.g. RUN_TAG=e5b), or the old directories
-# removed once their jobs are known not to exist. The script prints each run ID it submitted.
+# check). RUN_TAG is e5_<YYYYMMDDHHmmss>_ by default, new on every call, since the launcher
+# refuses a run ID whose slurm directory exists. To add runs to an earlier set (e.g. the rest
+# after a probe), pass that set's tag, which the script prints:
+#   RUN_TAG=e5_20261029143012_ RUNS="tt1 tc2 tt2 tc3 tt3 st" bash scripts/launch_esw_e005.sh
+# The script prints each run ID it submitted.
 #
 # Each launch checks out the commit it measures (the launcher copies the tracked files at
 # submission); the checkout returns to where it was at the end. Neither commit contains this
@@ -70,7 +72,8 @@ main() {
   echo "WeatherGenerator-private: $(git -C ../WeatherGenerator-private rev-parse HEAD)"
   echo "weathergen-configs:       $(git -C ../weathergen-configs rev-parse HEAD)"
 
-  local tag=${RUN_TAG:-e5}
+  local tag=${RUN_TAG:-e5_$(date +%Y%m%d%H%M%S)_}
+  echo "run tag:                  $tag"
   orig=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
   # back to where the checkout was, also when a launch fails
   trap 'git checkout -q "$orig"' EXIT
