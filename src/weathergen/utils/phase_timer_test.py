@@ -106,7 +106,7 @@ def test_exit_report_is_written_for_the_configured_rank(clock, tmp_path):
     timer = PhaseTimer("imports", clock=clock)
     timer.configure(enabled=True, out_dir=tmp_path, rank=3)
     clock.tick(1.0)
-    timer._write_at_exit()
+    timer.write_report()
 
     report = json.loads((tmp_path / "phase_timing_rank3.json").read_text())
     assert report["rank"] == 3
@@ -119,3 +119,16 @@ def test_enabled_by_performance_logging():
     assert not is_enabled(OmegaConf.create({"performance_logging": {"throughput": {}}}))
     cf = OmegaConf.create({"performance_logging": {"phase_timing": {"enabled": True}}})
     assert is_enabled(cf)
+
+
+def test_report_is_written_once(clock, tmp_path):
+    timer = PhaseTimer("imports", clock=clock)
+    timer.configure(enabled=True, out_dir=tmp_path, rank=0)
+    timer.write_report()
+    out_file = tmp_path / "phase_timing_rank0.json"
+    first = out_file.read_text()
+
+    clock.tick(5.0)
+    timer.write_report()  # e.g. the exit handler after an explicit write
+
+    assert out_file.read_text() == first

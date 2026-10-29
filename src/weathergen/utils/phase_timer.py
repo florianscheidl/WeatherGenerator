@@ -81,6 +81,7 @@ class PhaseTimer:
         self._out_file: Path | None = None
         self._pid = os.getpid()
         self._rank = 0
+        self._written = False
 
     @property
     def enabled(self) -> bool:
@@ -200,11 +201,16 @@ class PhaseTimer:
             },
         }
 
-    def _write_at_exit(self) -> None:
+    def write_report(self) -> None:
+        """
+        Write this rank's report, once. Runs at process exit; call it directly before an exit
+        that skips the exit handlers (`os._exit`).
+        """
         # forked or spawned workers inherit or re-import the module, but only report for the
         # configured process
-        if not self._enabled or self._out_file is None or os.getpid() != self._pid:
+        if not self._enabled or self._written or self._out_file is None or os.getpid() != self._pid:
             return
+        self._written = True
         report = self.report()
         try:
             self._out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -260,4 +266,4 @@ def format_report(report: dict) -> str:
 
 
 timer = PhaseTimer("imports")
-atexit.register(timer._write_at_exit)
+atexit.register(timer.write_report)

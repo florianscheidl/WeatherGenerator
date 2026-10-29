@@ -17,6 +17,8 @@ from weathergen.utils import phase_timer  # isort: skip
 import logging
 import os
 import pdb
+import shutil
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -57,6 +59,32 @@ def _configure_phase_timer(cf: Config) -> None:
         phase_timer.is_enabled(cf), config.get_path_run(cf), cf.get("rank", 0)
     )
     phase_timer.timer.switch("setup/init")
+
+
+def _handle_failure(cf: Config) -> None:
+    """
+    Debug a failed single-process run; end a failed multi-rank run at once.
+
+    Without this, the other ranks of a multi-rank run wait in their next collective until the
+    NCCL timeout, and the job runs on. So the failing rank writes what it has, cancels its
+    Slurm job step (which ends every rank of the step, this one included), and otherwise exits
+    non-zero. `os._exit`, because a normal interpreter exit can block on NCCL's threads.
+    """
+    _, _, tb = sys.exc_info()
+    traceback.print_exc()
+    if cf.get("world_size", 1) == 1:
+        pdb.post_mortem(tb)
+        return
+
+    logger.error(f"Rank {cf.get('rank', '?')} failed; ending the run.")
+    phase_timer.timer.write_report()  # exit handlers do not run after os._exit
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    job_id, step_id = os.environ.get("SLURM_JOB_ID"), os.environ.get("SLURM_STEP_ID")
+    if job_id and step_id and shutil.which("scancel"):
+        subprocess.run(["scancel", f"{job_id}.{step_id}"], check=False)
+    os._exit(1)
 
 
 def train() -> None:
@@ -148,10 +176,7 @@ def run_inference(args):
     try:
         trainer.inference(cf, devices, args.from_run_id, args.mini_epoch)
     except Exception:
-        extype, value, tb = sys.exc_info()
-        traceback.print_exc()
-        if cf.world_size == 1:
-            pdb.post_mortem(tb)
+        _handle_failure(cf)
 
 
 def run_continue(args):
@@ -191,10 +216,7 @@ def run_continue(args):
     try:
         trainer.run(cf, devices, args.from_run_id, args.mini_epoch)
     except Exception:
-        extype, value, tb = sys.exc_info()
-        traceback.print_exc()
-        if cf.world_size == 1:
-            pdb.post_mortem(tb)
+        _handle_failure(cf)
 
 
 def run_train(args):
@@ -230,10 +252,7 @@ def run_train(args):
     try:
         trainer.run(cf, devices)
     except Exception:
-        extype, value, tb = sys.exc_info()
-        traceback.print_exc()
-        if cf.world_size == 1:
-            pdb.post_mortem(tb)
+        _handle_failure(cf)
 
 
 if __name__ == "__main__":
