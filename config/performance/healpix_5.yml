@@ -1,0 +1,2 @@
+# Overlay for the base config: HEALPix level 5 instead of 6.
+healpix_level: 5
