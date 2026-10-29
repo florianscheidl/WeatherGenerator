@@ -21,6 +21,8 @@
 #   DRY_RUN=1 bash scripts/launch_esw_e005.sh  # check the paths, print the commands
 #   RUNS=tc1 bash scripts/launch_esw_e005.sh   # only these runs (default: all, in order:
 #                                              # tc1 tt1 tc2 tt2 tc3 tt3 st)
+#   RESERVATION=develbooster bash scripts/launch_esw_e005.sh  # submit to a reservation
+#                                              # (default: none)
 #
 # Run IDs are <RUN_TAG>tc<i> (control), <RUN_TAG>tt<i> (treatment) and <RUN_TAG>st (pinning
 # check), RUN_TAG=e5 by default. The launcher refuses a run ID whose slurm directory exists, so
@@ -74,6 +76,11 @@ main() {
   trap 'git checkout -q "$orig"' EXIT
 
   local selected=" ${RUNS:-tc1 tt1 tc2 tt2 tc3 tt3 st} "
+  # passed on to sbatch by the launcher
+  local reservation=()
+  if [ -n "${RESERVATION:-}" ]; then
+    reservation=("--reservation=$RESERVATION")
+  fi
   local data=(data_loading.rng_seed=1 training_config.start_date=2017-06-01T00:00
     "streams_directory=$streams")
   local timing=("${data[@]}" training_config.num_mini_epochs=1
@@ -86,7 +93,7 @@ main() {
     shift 4
     git checkout -q --detach "$commit"
     [ -e "$extra_config" ] || { echo "missing at $commit: $extra_config" >&2; exit 1; }
-    local cmd=("$launcher" --nodes=1 --time="$time"
+    local cmd=("$launcher" --nodes=1 ${reservation[@]+"${reservation[@]}"} --time="$time"
       --wgen-dir "$PWD" --run-id "$run_id" --base-config "$base"
       --config "$hp5" "$extra_config" --options "$@")
     if [ -n "${DRY_RUN:-}" ]; then
