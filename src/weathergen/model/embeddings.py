@@ -37,6 +37,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         use_xsa=False,
         unembed_mode="full",
         stream_name="stream_embed",
+        readout_batched=False,
     ):
         """Constructor
 
@@ -45,6 +46,8 @@ class StreamEmbedTransformer(torch.nn.Module):
                  (num_tokens x dim_embed) to dim_out, allowing for mixing between channels/columns
           block : per-channel/column unembedding network
                 (which is hence a block-sparse form of full)
+        readout_batched : 'block' readout of all channels in one batched matmul instead of a loop
+                over the channels (same parameters, equal up to rounding)
         """
 
         super(StreamEmbedTransformer, self).__init__()
@@ -142,6 +145,28 @@ class StreamEmbedTransformer(torch.nn.Module):
             raise ValueError(f"Unknown mode: {mode}")
 
         self.dropout_final = torch.nn.Dropout(self.dropout_final_rate)
+        self.readout_batched = readout_batched
+
+    def _readout_block_batched(self, x):
+        """
+        The block readout, ue_i(ln_i(x[:, i])) for every channel i, as one normalisation and one
+        batched matmul over the stacked per-channel weights.
+        """
+        ln = self.ln_final[0]
+        # the normalisation itself is the same for every channel, only its affine part differs
+        if isinstance(ln, torch.nn.LayerNorm):
+            x = torch.nn.functional.layer_norm(x, ln.normalized_shape, eps=ln.eps)
+        else:
+            x = torch.nn.functional.rms_norm(x, ln.normalized_shape, eps=ln.eps)
+        if ln.weight is not None:
+            x = x * torch.stack([n.weight for n in self.ln_final]).to(x.dtype)
+        if getattr(ln, "bias", None) is not None:
+            x = x + torch.stack([n.bias for n in self.ln_final]).to(x.dtype)
+        # (channels, patches, dim_embed) @ (channels, dim_embed, dim_out) + bias
+        w = torch.stack([ue.weight for ue in self.unembed]).transpose(1, 2)
+        b = torch.stack([ue.bias for ue in self.unembed]).unsqueeze(1)
+        out = torch.baddbmm(b, x.transpose(0, 1), w)
+        return out.transpose(0, 1).flatten(-2, -1)
 
     def forward_channels(self, x_in):
         peh = positional_encoding_harmonic
@@ -155,6 +180,10 @@ class StreamEmbedTransformer(torch.nn.Module):
         # read out
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
+        elif self.unembed_mode == "block" and self.readout_batched:
+            # one checkpoint around the whole batched readout: saves only x, as in the fork
+            # this comes from, where all of the readout runs under one checkpoint
+            out = checkpoint(self._readout_block_batched, x, use_reentrant=False)
         elif self.unembed_mode == "block":
             out = [
                 checkpoint(ue, ln(x[:, i]), use_reentrant=False)

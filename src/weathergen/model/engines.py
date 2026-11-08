@@ -72,6 +72,7 @@ class EmbeddingEngine(torch.nn.Module):
                     use_xsa=self.cf.get("use_xsa", False),
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
+                    readout_batched=self.cf.get("embed_readout_batched", False),
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(
