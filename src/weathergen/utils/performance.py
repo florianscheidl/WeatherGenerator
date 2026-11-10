@@ -256,16 +256,20 @@ def nvtx_annotator(enabled: bool) -> Callable[[str], AbstractContextManager]:
     return nvtx_range if enabled else lambda name: nullcontext()
 
 
-def nvtx_wrap(obj: object, method: str, name: str) -> None:
+def nvtx_wrap(obj: object, method: str, name: str, once: bool = False) -> None:
     """Run every call of `obj.<method>` inside an nvtx range `name`.
 
     Patches the instance (not its class), so only use it on objects of a run that is
-    being profiled.
+    being profiled. The wrapper holds the bound method, so the instance is part of a reference
+    cycle (instance -> wrapper -> bound method -> instance) that only the garbage collector
+    frees. With `once`, the first call removes the wrapper again, which breaks the cycle.
     """
     original = getattr(obj, method)  # pylint: disable=bad-builtin
 
     @functools.wraps(original)
     def wrapped(*args, **kwargs):
+        if once:
+            delattr(obj, method)  # pylint: disable=bad-builtin
         with nvtx_range(name):
             return original(*args, **kwargs)
 
