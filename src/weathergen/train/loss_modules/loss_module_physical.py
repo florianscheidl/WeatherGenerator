@@ -30,10 +30,11 @@ _PIN_MEMORY_DEVICE_TYPES = ("cuda", "xpu")
 
 def _host_to_device_async(t: torch.Tensor, device) -> torch.Tensor:
     """
-    Move a small host tensor to the device without stalling the host: a pageable copy waits for
-    the stream, a non_blocking copy from pinned memory does not. Plain copy on other devices.
+    Move a host tensor to the device without stalling the host: a pageable copy waits for the
+    stream, a non_blocking copy from pinned memory does not (pin_memory() is a no-op on a tensor
+    that is already pinned). Plain copy on other devices and for tensors already on a device.
     """
-    if torch.device(device).type in _PIN_MEMORY_DEVICE_TYPES:
+    if t.device.type == "cpu" and torch.device(device).type in _PIN_MEMORY_DEVICE_TYPES:
         return t.pin_memory().to(device, non_blocking=True)
     return t.to(device)
 
@@ -150,7 +151,10 @@ class LossPhysical(LossModuleBase):
         if location_weight_type is None:
             return [None for _ in substep_idxs]
 
-        target_coords = target_coords.to(self.device, non_blocking=True)
+        # target_coords is the raw host tensor of the stream data (a few MB): pinned, non_blocking
+        # copy. A non_blocking copy from pageable memory blocks the host until the stream has
+        # finished the forward pass.
+        target_coords = _host_to_device_async(target_coords, self.device)
         weights_locations_fct = getattr(loss_fns, location_weight_type)
         weights_locations = [
             weights_locations_fct(target_coords.index_select(0, idxs)) for idxs in substep_idxs
