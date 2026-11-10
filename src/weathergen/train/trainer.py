@@ -56,6 +56,7 @@ from weathergen.train.utils import (
 )
 from weathergen.utils.distributed import is_root
 from weathergen.utils.inference_logger import EXTRA_INFERENCE_WRITERS
+from weathergen.utils.python_gc import GcControl
 from weathergen.utils.train_logger import (
     ScalarMetricsJSONLWriter,
     TrainLogger,
@@ -187,6 +188,8 @@ class Trainer(TrainerBase):
         self.loss_spike_history = deque()
         # writes validation output in the background while validate() runs
         self.output_writer: AsyncOutputWriter | None = None
+        # Python garbage collector instrumentation and control (`python_gc` config section)
+        self.gc_control: GcControl | None = None
 
     def get_batch_size_total(self, batch_size_per_gpu) -> int:
         """
@@ -288,6 +291,10 @@ class Trainer(TrainerBase):
             log_fn=self.train_logger.log_metrics,
             enabled=collapse_config.get("enabled", False),
         )
+
+        # before the data loaders fork their workers, so that they inherit the gc callbacks
+        self.gc_control = GcControl.from_config(cf)
+        self.gc_control.install()
 
     def get_target_aux_calculators(self, mode_cfg):
         """
@@ -756,6 +763,7 @@ class Trainer(TrainerBase):
 
         apply_fct_to_blocks(self.model, cf.freeze_modules, set_to_eval)
 
+        self.gc_control.before_training()
         dataset_iter = iter(self.data_loader)
 
         for optimizer in self.optimizers:
@@ -763,7 +771,8 @@ class Trainer(TrainerBase):
 
         # training loop
         self.t_start = time.time()
-        for bidx, batch in self.train_batches(dataset_iter):
+        # the gc control's end-of-step work (manual collection, stats) runs after each step
+        for bidx, batch in self.gc_control.steps(self.train_batches(dataset_iter)):
             if cf.data_loading.get("memory_pinning", False):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()

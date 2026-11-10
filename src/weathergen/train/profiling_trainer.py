@@ -230,11 +230,17 @@ class ProfilingTrainer(Trainer):
             yield from batches
             return
 
+        break_cycles = self.gc_control is not None and self.gc_control.cfg.break_nvtx_cycles
         for bidx, batch in nvtx_batches(batches):
             # the batch's methods, since there is a new batch each step
             nvtx_wrap(batch, "pin_memory", "pin_memory")
             nvtx_wrap(batch, "to_device", "to_device")
             yield bidx, batch
+            if break_cycles:
+                # the wrappers keep the batch (and its device tensors) in a reference cycle
+                # until a gen-2 collection; without them refcounting frees it
+                for method in ("pin_memory", "to_device"):
+                    vars(batch).pop(method, None)
 
     def _with_nsys(
         self, batches: Iterator[tuple[int, ModelBatch]]
@@ -314,10 +320,12 @@ class ProfilingTrainer(Trainer):
 
         # backward runs on the scaled loss, a new tensor every step
         scale = self.grad_scaler.scale
+        # without `once`, the loss and its autograd graph stay in a reference cycle
+        break_cycles = self.gc_control is not None and self.gc_control.cfg.break_nvtx_cycles
 
         def scale_and_annotate_backward(outputs):
             scaled = scale(outputs)
-            nvtx_wrap(scaled, "backward", "backward")
+            nvtx_wrap(scaled, "backward", "backward", once=break_cycles)
             return scaled
 
         self.grad_scaler.scale = scale_and_annotate_backward
