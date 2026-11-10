@@ -24,7 +24,10 @@ from weathergen.model.engines import (
 
 # from weathergen.model.model import ModelParams
 from weathergen.model.parametrised_prob_dist import LatentInterpolator
-from weathergen.utils.device import supports_memory_pinning
+
+# Device types where pinned host memory makes host-to-device copies asynchronous. Elsewhere
+# (CPU, MPS) pinning is pointless, and a non_blocking copy to MPS can return wrong data.
+_PIN_MEMORY_DEVICE_TYPES = ("cuda", "xpu")
 
 
 def _host_to_device_async(t: torch.Tensor, device: torch.device) -> torch.Tensor:
@@ -34,7 +37,7 @@ def _host_to_device_async(t: torch.Tensor, device: torch.device) -> torch.Tensor
     A pageable host-to-device copy synchronizes the stream; pinning first makes the copy
     asynchronous. On devices without pinned memory this is a plain copy.
     """
-    if supports_memory_pinning(device):
+    if torch.device(device).type in _PIN_MEMORY_DEVICE_TYPES:
         return t.pin_memory().to(device, non_blocking=True)
     return t.to(device)
 
