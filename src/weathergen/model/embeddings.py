@@ -156,9 +156,11 @@ class StreamEmbedTransformer(torch.nn.Module):
         if self.unembed_mode == "full":
             out = self.unembed(self.ln_final(x.flatten(-2, -1)))
         elif self.unembed_mode == "block":
+            # unbind, not x[:, i]: the backward of each x[:, i] allocates a zero tensor the size
+            # of all of x and adds it into the gradient; unbind's backward stacks the grads once
             out = [
-                checkpoint(ue, ln(x[:, i]), use_reentrant=False)
-                for i, (ue, ln) in enumerate(zip(self.unembed, self.ln_final, strict=True))
+                checkpoint(ue, ln(xi), use_reentrant=False)
+                for xi, ue, ln in zip(x.unbind(1), self.unembed, self.ln_final, strict=True)
             ]
             out = torch.stack(out, dim=1).flatten(-2, -1)
         else:
