@@ -45,6 +45,10 @@ class MaskData:
             "loss": losses,
             "relationship": relationship,
         }
+        # plain containers: the metadata travels with the batch from the DataLoader workers, and
+        # unpickled OmegaConf nodes form reference cycles (via _parent) that only a full GC frees
+        if isinstance(cfg, omegaconf.DictConfig):
+            cfg = omegaconf.OmegaConf.to_container(cfg, resolve=True)
         self.masks += [mask]
         self.metadata += [
             SampleMetaData(
