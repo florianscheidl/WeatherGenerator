@@ -249,6 +249,10 @@ class ModelParams(torch.nn.Module):
             offset = self.num_extra_tokens * cf.ae_local_num_queries
             self.rope_coords.data.fill_(0.0)
             self.rope_coords.data[:, offset : offset + coords_flat.shape[1], :].copy_(coords_flat)
+            # .data writes do not bump the version counter: drop the RoPE tables cached on the
+            # buffer (positional_encoding.rotary_tables_2d_cached)
+            for buf in (self.rope_coords, self.rope_cell_coords):
+                buf.__dict__.pop("_rope_tables", None)
 
         # pe_global: always initialized. RoPE handles relative position in Q/K, but pe_global
         # provides per-cell token identity which is critical for masked cells that have no

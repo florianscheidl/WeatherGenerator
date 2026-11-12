@@ -27,6 +27,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.fused_glue import configure_fused_glue
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import (
@@ -509,6 +510,8 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     targets_coords_size = dataset.get_targets_coords_size()
 
     cf_with_overrides = merge_configs(cf, overrides)
-    return Model(
+    model = Model(
         cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
     ).create()
+    configure_fused_glue(model, cf_with_overrides)
+    return model
