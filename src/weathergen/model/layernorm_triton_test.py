@@ -209,3 +209,66 @@ def test_cuda_autocast_module_matches_torch():
         outs.append((y.detach().float(), xi.grad.float()))
     torch.testing.assert_close(outs[1][0], outs[0][0], atol=0.03, rtol=0.01)
     torch.testing.assert_close(outs[1][1], outs[0][1], atol=0.5, rtol=0.05)
+
+
+####################################################################################################
+# output and saved-tensor dtypes do not depend on the input dtype (FSDP2 x checkpoint recompute)
+
+
+@pytest.fixture
+def cuda_like_autocast_cpu_ref(monkeypatch):
+    from weathergen.model.layernorm_bf16_test import _fp32_layer_norm
+
+    lib = torch.library.Library("aten", "IMPL")
+    lib.impl("layer_norm", _fp32_layer_norm, "AutocastCPU")
+    monkeypatch.setattr(lt, "FORCE_REFERENCE_ON_CPU", True)
+    yield
+    lib._destroy()
+
+
+def _swapped(kind):
+    m = AutocastDtypeLayerNorm(64) if kind == "autocast_dtype" else torch.nn.LayerNorm(64)
+    lt.use_triton_layernorms(torch.nn.ModuleList([m]))
+    return m
+
+
+@pytest.mark.parametrize("kind", ["autocast_dtype", "float32"])
+def test_output_dtype_independent_of_input(cuda_like_autocast_cpu_ref, kind):
+    m = _swapped(kind)
+    expect = BF16 if kind == "autocast_dtype" else torch.float32
+    for dt in (torch.float32, BF16):
+        with torch.autocast("cpu", dtype=BF16):
+            assert m(torch.randn(5, 64, dtype=dt)).dtype == expect
+    # without autocast the float32 site keeps the dtype of the input
+    if kind == "float32":
+        assert m(torch.randn(5, 64)).dtype == torch.float32
+
+
+@pytest.mark.parametrize("kind", ["autocast_dtype", "float32"])
+def test_checkpoint_recompute_with_other_input_dtype(cuda_like_autocast_cpu_ref, kind):
+    from torch.utils.checkpoint import checkpoint
+
+    m = _swapped(kind)
+    x = torch.randn(5, 64)
+    calls = []
+
+    def fn(t):
+        # forward gets float32, the recompute bfloat16 (FSDP2 skips the input cast there)
+        calls.append(1)
+        t = t if len(calls) == 1 else t.to(BF16)
+        return m(t)
+
+    xr = x.clone().requires_grad_()
+    with torch.autocast("cpu", dtype=BF16):
+        y = checkpoint(fn, xr, use_reentrant=False)
+    y.float().sum().backward()  # CheckpointError if saved metadata differ
+    assert len(calls) == 2 and xr.grad is not None
+
+
+def test_float32_site_matches_torch_under_autocast(cuda_like_autocast_cpu_ref):
+    m = _swapped("float32")
+    ref = torch.nn.LayerNorm(64)
+    ref.load_state_dict(m.state_dict())
+    x = torch.randn(5, 64, dtype=BF16)
+    with torch.autocast("cpu", dtype=BF16):
+        torch.testing.assert_close(m(x), ref(x), atol=1e-5, rtol=1e-5)

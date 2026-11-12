@@ -387,18 +387,32 @@ def fast_layer_norm(
 # modules
 
 
+# tests: run the pure-torch reference of the kernel on CPU tensors
+FORCE_REFERENCE_ON_CPU = False
+
+
+def use_kernel_path(x: torch.Tensor) -> bool:
+    return x.is_cuda or FORCE_REFERENCE_ON_CPU
+
+
 class TritonLayerNorm(torch.nn.LayerNorm):
     """`torch.nn.LayerNorm` with the multi-row kernel; the float32 sites of `layernorm_bf16`.
 
     Matches what `torch.nn.LayerNorm` does under autocast (float32 in, float32 out) without the
-    separate `x.float()` kernel; without autocast the output has the dtype of x.
+    separate `x.float()` kernel; without autocast the output has the dtype of x. Under autocast
+    the input is cast to float32 if it is not (as `layer_norm`'s autocast policy does), so the
+    output and the tensors saved for the backward do not depend on the input dtype.
     """
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if len(self.normalized_shape) != 1 or not x.is_cuda:
+        if len(self.normalized_shape) != 1 or not use_kernel_path(x):
             return super().forward(x)
         autocast = torch.is_autocast_enabled(x.device.type)
         out_dtype = torch.float32 if autocast else x.dtype
+        if autocast and x.dtype != torch.float32:
+            # what layer_norm's autocast policy does: the saved input and the output are float32
+            # whatever the input dtype (FSDP2 skips the input cast in the checkpoint recompute)
+            x = x.float()
         with torch.autocast(device_type=x.device.type, enabled=False):
             return fast_layer_norm(x, self.weight, self.bias, self.eps, out_dtype)
 

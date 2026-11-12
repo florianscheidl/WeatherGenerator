@@ -99,10 +99,12 @@ class AutocastDtypeLayerNorm(torch.nn.LayerNorm):
         with torch.autocast(device_type=device_type, enabled=False):
             weight = None if self.weight is None else self.weight.to(dtype)
             bias = None if self.bias is None else self.bias.to(dtype)
-            if self.impl == "triton" and x.is_cuda and len(self.normalized_shape) == 1:
-                from weathergen.model.layernorm_triton import fast_layer_norm
+            if self.impl == "triton" and len(self.normalized_shape) == 1:
+                from weathergen.model.layernorm_triton import fast_layer_norm, use_kernel_path
 
-                return fast_layer_norm(x, weight, bias, self.eps, dtype)
+                if use_kernel_path(x):
+                    # cast first: the saved input must not depend on the input dtype
+                    return fast_layer_norm(x.to(dtype), weight, bias, self.eps, dtype)
             return F.layer_norm(x.to(dtype), self.normalized_shape, weight, bias, self.eps)
 
 
