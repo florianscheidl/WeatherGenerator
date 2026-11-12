@@ -94,6 +94,11 @@ layernorm_bf16_adaln: False
 # "triton": multi-row Triton LayerNorm kernels (all LayerNorms, forward and backward; fast for
 # the small q/k norms); see weathergen/model/layernorm_triton.py. Default "torch".
 layernorm_impl: torch
+# q/k norms (non-affine lnorm_q, lnorm_k): "layernorm" (default) or "rmsnorm" (no mean centring,
+# no parameters; a model change). qk_norm_impl: "torch" (F.rms_norm) or "triton"; see
+# weathergen/model/rmsnorm_triton.py
+qk_norm: layernorm
+qk_norm_impl: torch
 mlp_norm_eps: 1e-5
 norm_eps: 1e-4
 

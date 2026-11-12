@@ -515,6 +515,14 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
         cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
     ).create()
 
+    if cf_with_overrides.get("qk_norm", "layernorm") == "rmsnorm":
+        from weathergen.model.rmsnorm_triton import use_qk_rmsnorm
+
+        impl = cf_with_overrides.get("qk_norm_impl", "torch")
+        n_qk = use_qk_rmsnorm(model, impl)
+        if is_root():
+            logger.info(f"qk_norm=rmsnorm (impl={impl}): {n_qk} q/k norms replaced")
+
     if cf_with_overrides.get("layernorm_bf16", False):
         with_adaln = cf_with_overrides.get("layernorm_bf16_adaln", False)
         counts, left = use_autocast_dtype_layernorms(model, with_adaln=with_adaln)
