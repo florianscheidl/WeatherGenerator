@@ -27,6 +27,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.fused_glue import configure_fused_glue
 from weathergen.model.layernorm_bf16 import use_autocast_dtype_layernorms
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
@@ -524,4 +525,5 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
                 f"{len(left)} left in float32 under autocast (adaln={with_adaln}): {left}"
             )
 
+    configure_fused_glue(model, cf_with_overrides)
     return model
