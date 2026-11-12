@@ -2,6 +2,7 @@
 equal in outputs and gradients, and the forward counts follow the nesting (CPU)."""
 
 import collections
+from pathlib import Path
 
 import pytest
 import torch
@@ -115,3 +116,22 @@ def test_policy_defaults_and_parsing():
 def test_policy_rejects_unknown_keys(bad):
     with pytest.raises(ValueError):
         CheckpointPolicy.from_config(_cf(**bad))
+
+
+def test_default_config_section_is_all_on():
+    path = Path(__file__).parents[3] / "config" / "default_config.yml"
+    section = OmegaConf.load(path).activation_checkpointing
+    assert set(section.outer_engines) == set(OUTER_REGIONS)
+    assert set(section.blocks) == set(BLOCK_REGIONS)
+    p = CheckpointPolicy.from_config(OmegaConf.create({"activation_checkpointing": section}))
+    assert all(p.outer(r) for r in OUTER_REGIONS) and all(p.blocks(r) for r in BLOCK_REGIONS)
+    # both override forms of the command line merge into the defaults
+    for dotlist, off in [
+        (["activation_checkpointing.outer_engines=False"], set(OUTER_REGIONS)),
+        (["activation_checkpointing.outer_engines.embedding=False"], {"embedding"}),
+    ]:
+        cf = OmegaConf.merge(
+            OmegaConf.create({"activation_checkpointing": section}), OmegaConf.from_dotlist(dotlist)
+        )
+        p = CheckpointPolicy.from_config(cf)
+        assert {r for r in OUTER_REGIONS if not p.outer(r)} == off
