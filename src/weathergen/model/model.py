@@ -19,11 +19,11 @@ import astropy_healpix.healpy
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import BatchSamples
 from weathergen.datasets.utils import healpix_verts_rots, r3tos2
+from weathergen.model.checkpointing import CheckpointPolicy, maybe_checkpoint
 from weathergen.model.diffusion import (
     DiffusionForecastEngine,
     DiffusionRegisters,
@@ -360,6 +360,7 @@ class Model(torch.nn.Module):
         self.num_healpix_cells = 12 * 4**self.healpix_level
 
         self.cf = cf
+        self.ckpt_target_coords = CheckpointPolicy.from_config(cf).blocks("target_coords")
         self.dtype = get_dtype(self.cf.attention_dtype)
         self.sources_size = sources_size
         self.targets_num_channels = targets_num_channels
@@ -1188,7 +1189,9 @@ class Model(torch.nn.Module):
 
             # embed token coords
             tc_embed = self.embed_target_coords[stream_name]
-            tc_tokens = checkpoint(tc_embed, t_coords, use_reentrant=False)
+            tc_tokens = maybe_checkpoint(
+                self.ckpt_target_coords, tc_embed, t_coords, use_reentrant=False
+            )
 
             # skip when coordinate embeddings yields nan (i.e. the coord embedding network
             # diverged); branching on the device reduction forces a host-device sync per

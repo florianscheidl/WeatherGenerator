@@ -9,10 +9,10 @@
 
 import torch
 from astropy_healpix import healpy
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
+from weathergen.model.checkpointing import OUTER_REGIONS, CheckpointPolicy, maybe_checkpoint
 from weathergen.model.engines import (
     EmbeddingEngine,
     GlobalAssimilationEngine,
@@ -159,24 +159,38 @@ class EncoderModule(torch.nn.Module):
 
         self.ln = torch.nn.LayerNorm(cf.ae_global_dim_embed, elementwise_affine=False)
 
+        # outer activation checkpoints around whole engines (see checkpointing.py)
+        policy = CheckpointPolicy.from_config(cf)
+        self.ckpt_outer = {r: policy.outer(r) for r in OUTER_REGIONS}
+
     def forward(self, model_params, batch):
         """
         Encoder forward
         """
 
-        stream_cell_tokens = checkpoint(
-            self.embed_engine, batch, model_params.pe_embed, use_reentrant=False
+        stream_cell_tokens = maybe_checkpoint(
+            self.ckpt_outer["embedding"],
+            self.embed_engine,
+            batch,
+            model_params.pe_embed,
+            use_reentrant=False,
         )
 
-        tokens_global, posteriors = checkpoint(
-            self.assimilate_local, model_params, stream_cell_tokens, batch, use_reentrant=False
+        tokens_global, posteriors = maybe_checkpoint(
+            self.ckpt_outer["assimilate_local"],
+            self.assimilate_local,
+            model_params,
+            stream_cell_tokens,
+            batch,
+            use_reentrant=False,
         )
 
         intermediates: list[torch.Tensor] = []
         if self.tap_local2global:
             intermediates.append(tokens_global.clone())
 
-        tokens_global, global_intermediates = checkpoint(
+        tokens_global, global_intermediates = maybe_checkpoint(
+            self.ckpt_outer["global_assimilation"],
             self.ae_global_engine,
             tokens_global,
             coords=model_params.rope_coords,

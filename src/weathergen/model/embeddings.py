@@ -9,9 +9,9 @@
 
 import numpy as np
 import torch
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.model.attention import MultiSelfAttentionHead
+from weathergen.model.checkpointing import maybe_checkpoint
 from weathergen.model.layers import MLP
 
 # from weathergen.model.mlp import MLP
@@ -38,6 +38,7 @@ class StreamEmbedTransformer(torch.nn.Module):
         unembed_mode="full",
         stream_name="stream_embed",
         readout_batched=False,
+        checkpoint_blocks=True,
     ):
         """Constructor
 
@@ -46,6 +47,8 @@ class StreamEmbedTransformer(torch.nn.Module):
                  (num_tokens x dim_embed) to dim_out, allowing for mixing between channels/columns
           block : per-channel/column unembedding network
                 (which is hence a block-sparse form of full)
+        checkpoint_blocks : checkpoint the embed, every layer and the readout (activation
+                checkpointing policy, see checkpointing.py)
         readout_batched : 'block' readout of all channels in one batched matmul instead of a loop
                 over the channels (same parameters, equal up to rounding)
         """
@@ -146,6 +149,7 @@ class StreamEmbedTransformer(torch.nn.Module):
 
         self.dropout_final = torch.nn.Dropout(self.dropout_final_rate)
         self.readout_batched = readout_batched
+        self.ckpt_blocks = checkpoint_blocks
 
     def _readout_block_batched(self, x):
         """
@@ -172,10 +176,14 @@ class StreamEmbedTransformer(torch.nn.Module):
         peh = positional_encoding_harmonic
 
         # embed provided input data
-        x = peh(checkpoint(self.embed, x_in.transpose(-2, -1), use_reentrant=False))
+        x = peh(
+            maybe_checkpoint(
+                self.ckpt_blocks, self.embed, x_in.transpose(-2, -1), use_reentrant=False
+            )
+        )
 
         for layer in self.layers:
-            x = checkpoint(layer, x, use_reentrant=False)
+            x = maybe_checkpoint(self.ckpt_blocks, layer, x, use_reentrant=False)
 
         # read out
         if self.unembed_mode == "full":
@@ -183,10 +191,12 @@ class StreamEmbedTransformer(torch.nn.Module):
         elif self.unembed_mode == "block" and self.readout_batched:
             # one checkpoint around the whole batched readout: saves only x, as in the fork
             # this comes from, where all of the readout runs under one checkpoint
-            out = checkpoint(self._readout_block_batched, x, use_reentrant=False)
+            out = maybe_checkpoint(
+                self.ckpt_blocks, self._readout_block_batched, x, use_reentrant=False
+            )
         elif self.unembed_mode == "block":
             out = [
-                checkpoint(ue, ln(x[:, i]), use_reentrant=False)
+                maybe_checkpoint(self.ckpt_blocks, ue, ln(x[:, i]), use_reentrant=False)
                 for i, (ue, ln) in enumerate(zip(self.unembed, self.ln_final, strict=True))
             ]
             out = torch.stack(out, dim=1).flatten(-2, -1)
@@ -227,15 +237,18 @@ class StreamEmbedTransformer(torch.nn.Module):
 
 
 class StreamEmbedLinear(torch.nn.Module):
-    def __init__(self, dim_in, dim_out, stream_name="stream_embed"):
+    def __init__(self, dim_in, dim_out, stream_name="stream_embed", checkpoint_blocks=True):
         """Constructor"""
 
         super(StreamEmbedLinear, self).__init__()
 
         self.name = f"StreamEmbedder_{stream_name}"
         self.layer = torch.nn.Linear(dim_in, dim_out)
+        self.ckpt_blocks = checkpoint_blocks
 
     def forward(self, x):
-        x = checkpoint(self.layer, x.flatten(-2, -1), use_reentrant=False).unsqueeze(0)
+        x = maybe_checkpoint(
+            self.ckpt_blocks, self.layer, x.flatten(-2, -1), use_reentrant=False
+        ).unsqueeze(0)
 
         return x
