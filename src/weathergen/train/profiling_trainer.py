@@ -17,6 +17,7 @@ Selected by the `profiling` and `performance_logging` config sections, see
 import contextlib
 import functools
 import logging
+import time
 from collections.abc import Callable, Iterator
 from itertools import islice
 
@@ -83,6 +84,9 @@ class ProfilingTrainer(Trainer):
         self.nsys_windows: NsysWindows | None = None
         self.profiling_done: bool = False
         self.step_phases_annotated: bool = False
+        # `performance_logging.step_timing.enabled`: one log line per step and rank
+        self.step_timing: bool = False
+        self._wait_s: float = 0.0
         # (id(obj), method) already in an nvtx range, as training and validation share some
         self.nvtx_wrapped: set[tuple[int, str]] = set()
         # `profiling.nvtx_annotate` without the master switch is a no-op
@@ -104,6 +108,8 @@ class ProfilingTrainer(Trainer):
             self.cf, device=torch.device(self.devices[0])
         )
         self.nsys_windows = NsysWindows.from_config(self.cf)
+        step_timing_cfg = (self.cf.get("performance_logging") or {}).get("step_timing") or {}
+        self.step_timing = bool(step_timing_cfg.get("enabled", False))
         logger.info(
             f"Profiling run: {self.profiling_cfg}, "
             f"nsys windows: {vars(self.nsys_windows) if self.nsys_windows else None}, "
@@ -219,12 +225,60 @@ class ProfilingTrainer(Trainer):
         """Measure every training step, and trace the profiled stretch of them."""
         # innermost, so that the phase timer times only the wait for the data loader
         dataset_iter = timer.iterate(dataset_iter, "data_wait")
+        if self.step_timing:
+            dataset_iter = self._timed_wait(dataset_iter)
         if self.profiling_cfg.annotates_nvtx:
             # the time the training loop waits for the data loader
             dataset_iter = nvtx_next(dataset_iter, "next_batch")
         batches = self._with_throughput(self._with_profiling(dataset_iter))
         # the nsys window is opened before and closed after the batch's nvtx range
-        yield from self._with_nvtx(self._with_nsys(self._with_memory(batches)))
+        batches = self._with_nvtx(self._with_nsys(self._with_memory(batches)))
+        yield from self._with_step_timing(batches)
+
+    def _timed_wait(self, dataset_iter: Iterator) -> Iterator:
+        """Yield the batches, keeping the time of the last `next()` in `self._wait_s`."""
+        iterator = iter(dataset_iter)
+        while True:
+            start = time.perf_counter()
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+            self._wait_s = time.perf_counter() - start
+            yield item
+
+    def _with_step_timing(
+        self, batches: Iterator[tuple[int, ModelBatch]]
+    ) -> Iterator[tuple[int, ModelBatch]]:
+        """Log wall time and data wait of every step, on every rank. No sync, no collective.
+
+        `period_ms` is the time from the end of the previous step to the end of this one
+        (data wait plus step, including the step-end GC); `step_ms` is `period_ms - wait_ms`.
+        The host runs ahead of the GPU by at most the sync points of a step (the loss
+        `item()`), so `period_ms` equals the GPU step time when the data loader keeps up.
+        """
+        if not self.step_timing:
+            yield from batches
+            return
+
+        rank = self.cf.get("rank", 0) or 0
+        log = self.train_logging
+        end_prev = time.perf_counter()
+        for bidx, batch in batches:
+            start = time.perf_counter()
+            wait = self._wait_s
+            yield bidx, batch
+            end = time.perf_counter()
+            is_log = bidx % log.terminal == 0 or bidx % log.metrics == 0
+            gib = 1024**3
+            alloc = torch.cuda.max_memory_allocated() / gib if torch.cuda.is_available() else 0.0
+            reserved = torch.cuda.max_memory_reserved() / gib if torch.cuda.is_available() else 0.0
+            logger.info(
+                f"Step time rank {rank} batch {bidx}: wait_ms={1e3 * wait:.1f} "
+                f"step_ms={1e3 * (end - start):.1f} period_ms={1e3 * (end - end_prev):.1f} "
+                f"log={int(is_log)} max_alloc_gib={alloc:.2f} max_reserved_gib={reserved:.2f}"
+            )
+            end_prev = end
 
     def _with_nvtx(
         self, batches: Iterator[tuple[int, ModelBatch]]
