@@ -255,3 +255,45 @@ def test_phase_timer_makes_inference_a_root_phase():
         trainer.validate(0, None, 1)
 
     assert _seconds(timer) == {"setup/other": 0.0, "inference": 5.0, "teardown": 0.0}
+
+
+def _step_timing_trainer(enabled: bool, clock: _Clock) -> None:
+    """A trainer whose loader waits 0.25 s per batch and whose steps take 1 s on `clock`."""
+    train_logging = OmegaConf.create({"terminal": 2, "metrics": 3})
+    trainer = ProfilingTrainer(train_logging, ProfilingConfig(enabled=True))
+    trainer.cf = OmegaConf.create({"rank": 2})
+    trainer.step_timing = enabled
+
+    def slow_batches():
+        for i in range(4):
+            clock.now += 0.25
+            yield i
+
+    # the same chain as in train_batches, without the other wrappers
+    batches = trainer._timed_wait(slow_batches()) if enabled else slow_batches()
+    for _bidx, _batch in trainer._with_step_timing(enumerate(batches)):
+        clock.now += 1.0
+
+
+def test_step_timing_logs_one_line_per_step(caplog, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(profiling_trainer.time, "perf_counter", clock)
+
+    with caplog.at_level("INFO", logger=profiling_trainer.logger.name):
+        _step_timing_trainer(True, clock)
+
+    lines = [r.getMessage() for r in caplog.records if "Step time rank" in r.getMessage()]
+    assert len(lines) == 4
+    assert lines[0].startswith("Step time rank 2 batch 0: wait_ms=250.0 step_ms=1000.0 ")
+    # log steps: batch % 2 == 0 or batch % 3 == 0
+    assert [" log=1 " in line for line in lines] == [True, False, True, True]
+    assert all(" period_ms=1250.0 " in line for line in lines)
+
+
+def test_step_timing_is_off_by_default(caplog):
+    clock = _Clock()
+
+    with caplog.at_level("INFO", logger=profiling_trainer.logger.name):
+        _step_timing_trainer(False, clock)
+
+    assert not [r for r in caplog.records if "Step time rank" in r.getMessage()]
