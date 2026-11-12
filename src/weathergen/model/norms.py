@@ -65,6 +65,37 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
+class AutocastDtypeLayerNorm(torch.nn.LayerNorm):
+    """`torch.nn.LayerNorm` that runs in the autocast dtype instead of float32 under autocast.
+
+    `layer_norm` is on autocast's float32 list (CUDA, MPS): a bfloat16 input is cast up, the
+    norm returns float32, and every consumer casts it back down (each Linear, the q/k
+    `.to(attention_dtype)`), with the mirror casts in the backward. Here the norm runs on the
+    input cast to the autocast dtype, with the affine parameters cast to that dtype, inside an
+    autocast-disabled region, so it returns the autocast dtype. The bfloat16 kernels compute
+    the statistics in float32 and round the output once, as the consumer's cast did before.
+
+    The output dtype does not depend on the input dtype: during the recompute of a functional
+    checkpoint aligned with an FSDP2 unit, FSDP2 skips the cast of the unit inputs to
+    `param_dtype`, so the same norm can see bfloat16 in the forward and float32 in the
+    recompute; casting to the autocast dtype here keeps the saved tensors identical in both.
+
+    Without autocast on the input's device this is `torch.nn.LayerNorm`. Swapped in for
+    selected `torch.nn.LayerNorm` instances by `use_autocast_dtype_layernorms` (`layernorm_bf16`
+    in the config); the parameters and the state dict are those of `torch.nn.LayerNorm`.
+    """
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        device_type = x.device.type
+        if not torch.is_autocast_enabled(device_type):
+            return super().forward(x)
+        dtype = torch.get_autocast_dtype(device_type)
+        with torch.autocast(device_type=device_type, enabled=False):
+            weight = None if self.weight is None else self.weight.to(dtype)
+            bias = None if self.bias is None else self.bias.to(dtype)
+            return F.layer_norm(x.to(dtype), self.normalized_shape, weight, bias, self.eps)
+
+
 class AdaLNZero(torch.nn.Module):
     """
     AdaLayerNorm with zero initialization and with additional gate parameter

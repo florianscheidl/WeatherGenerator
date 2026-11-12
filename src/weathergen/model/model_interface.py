@@ -27,6 +27,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadLocal,
     MultiSelfAttentionHeadVarlen,
 )
+from weathergen.model.layernorm_bf16 import use_autocast_dtype_layernorms
 from weathergen.model.layers import MLP
 from weathergen.model.model import Model, ModelParams
 from weathergen.model.utils import (
@@ -509,6 +510,18 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
     targets_coords_size = dataset.get_targets_coords_size()
 
     cf_with_overrides = merge_configs(cf, overrides)
-    return Model(
+    model = Model(
         cf_with_overrides, sources_size, targets_num_channels, targets_coords_size
     ).create()
+
+    if cf_with_overrides.get("layernorm_bf16", False):
+        with_adaln = cf_with_overrides.get("layernorm_bf16_adaln", False)
+        counts, left = use_autocast_dtype_layernorms(model, with_adaln=with_adaln)
+        if is_root():
+            logger.info(
+                f"layernorm_bf16: {sum(counts.values())} LayerNorms run in the autocast dtype "
+                f"({', '.join(f'{k} {v}' for k, v in sorted(counts.items()))}), "
+                f"{len(left)} left in float32 under autocast (adaln={with_adaln}): {left}"
+            )
+
+    return model
