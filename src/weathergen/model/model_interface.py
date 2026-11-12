@@ -525,5 +525,12 @@ def get_model(cf: Config, training_mode: TrainingMode, dataset, overrides):
                 f"{len(left)} left in float32 under autocast (adaln={with_adaln}): {left}"
             )
 
+    if cf_with_overrides.get("layernorm_impl", "torch") == "triton":
+        from weathergen.model.layernorm_triton import use_triton_layernorms
+
+        counts = use_triton_layernorms(model)
+        if is_root():
+            logger.info(f"layernorm_impl=triton: {counts}")
+
     configure_fused_glue(model, cf_with_overrides)
     return model

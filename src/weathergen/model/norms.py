@@ -83,7 +83,13 @@ class AutocastDtypeLayerNorm(torch.nn.LayerNorm):
     Without autocast on the input's device this is `torch.nn.LayerNorm`. Swapped in for
     selected `torch.nn.LayerNorm` instances by `use_autocast_dtype_layernorms` (`layernorm_bf16`
     in the config); the parameters and the state dict are those of `torch.nn.LayerNorm`.
+
+    `impl = "triton"` (set by `layernorm_impl: triton`, see `layernorm_triton.py`) runs the
+    multi-row Triton kernel instead of `F.layer_norm` on CUDA; same dtypes, same autocast
+    handling.
     """
+
+    impl = "torch"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         device_type = x.device.type
@@ -93,6 +99,10 @@ class AutocastDtypeLayerNorm(torch.nn.LayerNorm):
         with torch.autocast(device_type=device_type, enabled=False):
             weight = None if self.weight is None else self.weight.to(dtype)
             bias = None if self.bias is None else self.bias.to(dtype)
+            if self.impl == "triton" and x.is_cuda and len(self.normalized_shape) == 1:
+                from weathergen.model.layernorm_triton import fast_layer_norm
+
+                return fast_layer_norm(x, weight, bias, self.eps, dtype)
             return F.layer_norm(x.to(dtype), self.normalized_shape, weight, bias, self.eps)
 
 

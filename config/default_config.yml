@@ -91,6 +91,9 @@ mixed_precision_dtype: bf16
 layernorm_bf16: False
 # with layernorm_bf16: also the AdaLN norms (the modulation then runs in the autocast dtype)
 layernorm_bf16_adaln: False
+# "triton": multi-row Triton LayerNorm kernels (all LayerNorms, forward and backward; fast for
+# the small q/k norms); see weathergen/model/layernorm_triton.py. Default "torch".
+layernorm_impl: torch
 mlp_norm_eps: 1e-5
 norm_eps: 1e-4
 
