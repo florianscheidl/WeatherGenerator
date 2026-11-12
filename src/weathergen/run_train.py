@@ -29,6 +29,7 @@ from weathergen.common.config import Config
 from weathergen.common.logger import init_loggers
 from weathergen.train.profiling_trainer import ProfilingTrainer
 from weathergen.train.trainer import Trainer
+from weathergen.utils import cuda_module_loading
 from weathergen.utils.nsys_windows import NsysWindows
 from weathergen.utils.performance import MemoryTracker, ThroughputTracker
 from weathergen.utils.profiling import ProfilingConfig
@@ -159,6 +160,7 @@ def run_inference(args):
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
     cf.data_loading.rng_seed = 42
     cf.stage = args.stage
+    cuda_loading = cuda_module_loading.apply(cf)  # before anything initialises CUDA
 
     phase_timer.timer.switch("setup/dist_init")
     devices = Trainer.init_torch()
@@ -167,6 +169,7 @@ def run_inference(args):
     _configure_phase_timer(cf)
 
     init_loggers(cf.general.run_id)
+    cuda_loading.log()
 
     logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
@@ -198,6 +201,7 @@ def run_continue(args):
     )
     cf = config.set_run_id(cf, args.run_id, args.reuse_run_id)
     cf.stage = args.stage
+    cuda_loading = cuda_module_loading.apply(cf)  # before anything initialises CUDA
 
     mp_method = cf.general.get("multiprocessing_method", "fork")
     phase_timer.timer.switch("setup/dist_init")
@@ -207,6 +211,7 @@ def run_continue(args):
     _configure_phase_timer(cf)
 
     init_loggers(cf.general.run_id)
+    cuda_loading.log()
 
     # track history of run to ensure traceability of results
     cf.general.run_history += [(args.from_run_id, cf.general.istep)]
@@ -232,6 +237,7 @@ def run_train(args):
     )
     cf = config.set_run_id(cf, args.run_id, False)
     cf.stage = args.stage
+    cuda_loading = cuda_module_loading.apply(cf)  # before anything initialises CUDA
     mp_method = cf.general.get("multiprocessing_method", "fork")
     phase_timer.timer.switch("setup/dist_init")
     devices = Trainer.init_torch(multiprocessing_method=mp_method)
@@ -242,6 +248,7 @@ def run_train(args):
     # this line should probably come after the processes have been sorted out else we get lots
     # of duplication due to multiple process in the multiGPU case
     init_loggers(cf.general.run_id)
+    cuda_loading.log()
 
     logger.info(f"DDP initialization: rank={cf.rank}, world_size={cf.world_size}")
 
