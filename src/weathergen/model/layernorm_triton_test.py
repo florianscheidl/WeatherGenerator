@@ -51,7 +51,10 @@ def _check(device, d, rows, dtype, affine, atol, rtol, out_dtype=None):
         if r is None:
             assert o is None
             continue
-        torch.testing.assert_close(o.float(), r, atol=atol, rtol=rtol, msg=lambda m, n=n: f"{n}: {m}")
+        a, t = atol, rtol
+        if n == "dx" and dtype == BF16:  # dx has the input dtype: one bf16 rounding (2^-8)
+            a, t = max(a, 0.02), max(t, 0.01)
+        torch.testing.assert_close(o.float(), r, atol=a, rtol=t, msg=lambda m, n=n: f"{n}: {m}")
 
 
 @pytest.mark.parametrize("d", SITE_DS + [96])
