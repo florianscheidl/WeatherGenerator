@@ -569,7 +569,9 @@ class Trainer(TrainerBase):
             "shuffle": False,
             "num_workers": cf.data_loading.num_workers,
         }
-        self.data_loader = torch.utils.data.DataLoader(self.dataset, **loader_params, sampler=None)
+        self.data_loader = torch.utils.data.DataLoader(
+            self.dataset, **loader_params, **self._train_loader_extra_params(cf), sampler=None
+        )
         loader_params["num_workers"] = cf.data_loading.get(
             "num_workers_validation", cf.data_loading.num_workers
         )
@@ -773,7 +775,7 @@ class Trainer(TrainerBase):
         self.t_start = time.time()
         # the gc control's end-of-step work (manual collection, stats) runs after each step
         for bidx, batch in self.gc_control.steps(self.train_batches(dataset_iter)):
-            if cf.data_loading.get("memory_pinning", False):
+            if cf.data_loading.get("memory_pinning", False) and not self._pins_in_loader(cf):
                 # pin memory for faster CPU-GPU transfer
                 batch = batch.pin_memory()
 
@@ -907,6 +909,31 @@ class Trainer(TrainerBase):
             self.cf.general.istep += 1
 
         self.dataset.advance()
+
+    @staticmethod
+    def _pins_in_loader(cf: Config) -> bool:
+        """
+        Whether the training DataLoader pins each batch (`data_loading.pin_memory_in_loader`).
+
+        The DataLoader then calls `ModelBatch.pin_memory()` in its pin-memory thread, as soon
+        as a worker has delivered the batch, so receiving the batch from the worker, copying
+        it into pinned memory and unmapping its shared memory happen off the training loop's
+        thread. The training loop then only queues the (non-blocking) copies to the device.
+        """
+        return bool(cf.data_loading.get("pin_memory_in_loader", False))
+
+    @classmethod
+    def _train_loader_extra_params(cls, cf: Config) -> dict:
+        """DataLoader arguments of the training loader only: pinning and prefetch depth."""
+        params = {}
+        if cls._pins_in_loader(cf):
+            params["pin_memory"] = True
+        prefetch_factor = cf.data_loading.get("prefetch_factor", None)
+        if prefetch_factor is not None and cf.data_loading.num_workers > 0:
+            # batches in flight per worker (PyTorch default 2); with pinning, each one that is
+            # waiting for the training loop holds pinned host memory
+            params["prefetch_factor"] = int(prefetch_factor)
+        return params
 
     def train_batches(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """

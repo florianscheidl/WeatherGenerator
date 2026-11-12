@@ -204,6 +204,10 @@ class ProfilingTrainer(Trainer):
                 stack.enter_context(
                     nvtx_patched(torch.nn.utils, "clip_grad_norm_", "clip_grad_norm")
                 )
+                if self._pins_in_loader(self.cf):
+                    # pinned in the DataLoader's pin-memory thread, before `_with_nvtx` sees
+                    # the batch, so the range is on the class (and on that thread)
+                    stack.enter_context(nvtx_patched(ModelBatch, "pin_memory", "pin_memory"))
             super().train(mini_epoch)
 
     def validate_before_training(self) -> None:

@@ -149,6 +149,12 @@ data_loading :
   # FSDP2 + DINOv2 can cause the job to hang and trigger a PyTorch timeout error.
   # If this happens, you can disable the flag, but performance will drop on GH200.
   memory_pinning: True
+  # pin each training batch in the DataLoader's pin-memory thread instead of in the training
+  # loop (replaces the loop's pinning of memory_pinning for training); holds up to
+  # num_workers * prefetch_factor pinned batches in host memory
+  pin_memory_in_loader: False
+  # batches in flight per DataLoader worker (training loader); null: PyTorch default (2)
+  prefetch_factor: null
 
 
 # config for training
