@@ -362,6 +362,7 @@ class FastLayerNormFn(torch.autograd.Function):
             dx, dw, db = layer_norm_backward_reference(
                 dy, saved, mean, rstd, weight, ctx.has_bias, dres_out
             )
+        dx = dx.reshape(saved.shape)  # the reference path returns 2D rows
         dx_x = dx.to(ctx.x_dtype)
         dx_res = dx.to(ctx.res_dtype) if ctx.has_res else None
         dw = None if dw is None else dw.to(weight.dtype)
