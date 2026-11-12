@@ -12,7 +12,6 @@ import math
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from torch.utils.checkpoint import checkpoint
 
 from weathergen.common.config import Config
 from weathergen.model.attention import (
@@ -24,6 +23,7 @@ from weathergen.model.attention import (
     MultiSelfAttentionHeadVarlen,
 )
 from weathergen.model.blocks import CrossAttentionBlock, OriginalPredictionBlock, SelfAttentionBlock
+from weathergen.model.checkpointing import CheckpointPolicy, maybe_checkpoint
 from weathergen.model.embeddings import (
     StreamEmbedLinear,
     StreamEmbedTransformer,
@@ -49,6 +49,7 @@ class EmbeddingEngine(torch.nn.Module):
         self.sources_size = sources_size  # KCT:iss130, what is this?
         self.embeds = torch.nn.ModuleDict()
         self.streams = cf.streams
+        ckpt_embed = CheckpointPolicy.from_config(cf).blocks("embedding")
 
         for i, (stream_name, si) in enumerate(self.streams.items()):
             if si.get("diagnostic", False) or self.sources_size[i] == 0:
@@ -73,12 +74,14 @@ class EmbeddingEngine(torch.nn.Module):
                     unembed_mode=self.cf.embed_unembed_mode,
                     stream_name=stream_name,
                     readout_batched=self.cf.get("embed_readout_batched", False),
+                    checkpoint_blocks=ckpt_embed,
                 )
             elif si["embed"]["net"] == "linear":
                 self.embeds[stream_name] = StreamEmbedLinear(
                     self.sources_size[i] * si["token_size"],
                     self.cf.ae_local_dim_embed,
                     stream_name=stream_name,
+                    checkpoint_blocks=ckpt_embed,
                 )
             else:
                 raise ValueError("Unsupported embedding network type")
@@ -268,6 +271,7 @@ class LocalAssimilationEngine(torch.nn.Module):
         """
         super(LocalAssimilationEngine, self).__init__()
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("local_assimilation")
         # static upper bound on tokens per cell, enforced upstream in EmbeddingEngine;
         # fallback for the varlen attention max_seqlen when no per-batch value is passed
         self.max_seqlen = get_ae_local_max_tokens_per_cell(cf)
@@ -306,7 +310,8 @@ class LocalAssimilationEngine(torch.nn.Module):
         if max_seqlen is None:
             max_seqlen = self.max_seqlen
         for block in self.ae_local_blocks:
-            tokens_c = checkpoint(
+            tokens_c = maybe_checkpoint(
+                self.ckpt_blocks,
                 block,
                 tokens_c,
                 x_lens=cell_lens_c,
@@ -327,6 +332,7 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         """
         super(Local2GlobalAssimilationEngine, self).__init__()
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("local2global")
         # static upper bound on tokens per cell (kv side), enforced upstream in
         # EmbeddingEngine; fallback for max_seqlen when no per-batch value is passed
         self.max_kv_seqlen = get_ae_local_max_tokens_per_cell(cf)
@@ -396,7 +402,8 @@ class Local2GlobalAssimilationEngine(torch.nn.Module):
         for block in self.ae_adapter:
             # q_cells_lens is all-ones (one query token per cell sequence, see
             # ModelParams.q_cells_lens), so the max query seqlen is exactly 1
-            tokens_global_c = checkpoint(
+            tokens_global_c = maybe_checkpoint(
+                self.ckpt_blocks,
                 block,
                 tokens_global_c,
                 x_kv=tokens_c,
@@ -490,6 +497,7 @@ class QueryAggregationEngine(torch.nn.Module):
         """
         super(QueryAggregationEngine, self).__init__()
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("aggregation")
         self.num_healpix_cells = num_healpix_cells
         # per-sample sequence = unmasked cells + class/register tokens; the cell count is
         # statically bounded, so this is a valid fallback for the varlen attention
@@ -559,7 +567,8 @@ class QueryAggregationEngine(torch.nn.Module):
         if max_seqlen is None:
             max_seqlen = self.max_seqlen
         for block in self.ae_aggregation_blocks:
-            tokens = checkpoint(
+            tokens = maybe_checkpoint(
+                self.ckpt_blocks,
                 block,
                 tokens,
                 x_lens=batch_lens,
@@ -586,6 +595,7 @@ class GlobalAssimilationEngine(torch.nn.Module):
         """
         super(GlobalAssimilationEngine, self).__init__()
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("global_assimilation")
         self.num_healpix_cells = num_healpix_cells
         self.tap_global_layers = tap_global_layers
 
@@ -652,7 +662,9 @@ class GlobalAssimilationEngine(torch.nn.Module):
         intermediates: list[torch.Tensor] = []
         logical_layer = 0
         for block in self.ae_global_blocks:
-            tokens = checkpoint(block, tokens, coords=coords, use_reentrant=False)
+            tokens = maybe_checkpoint(
+                self.ckpt_blocks, block, tokens, coords=coords, use_reentrant=False
+            )
             if isinstance(block, MLP):
                 if self.tap_global_layers and logical_layer in self.tap_global_layers:
                     intermediates.append(tokens)
@@ -683,6 +695,7 @@ class ForecastingEngine(torch.nn.Module):
         """
         super(ForecastingEngine, self).__init__()
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("forecasting")
         self.num_healpix_cells = num_healpix_cells
         self.fe_blocks = torch.nn.ModuleList()
 
@@ -827,8 +840,13 @@ class ForecastingEngine(torch.nn.Module):
                         if self.conditioning == "cross_attn_rev"
                         else (tokens, conditioning)
                     )
-                    tokens = checkpoint(
-                        block, x_q=x_q, x_kv=x_kv, emb=noise_emb, use_reentrant=False
+                    tokens = maybe_checkpoint(
+                        self.ckpt_blocks,
+                        block,
+                        x_q=x_q,
+                        x_kv=x_kv,
+                        emb=noise_emb,
+                        use_reentrant=False,
                     )
                 else:
                     # additive conditioning is re-added at every block (but not a plain norm
@@ -836,7 +854,8 @@ class ForecastingEngine(torch.nn.Module):
                     if self.conditioning == "additive" and not isinstance(block, KwargLayerNorm):
                         tokens = tokens + conditioning
                     ada_ln_aux = conditioning if self.conditioning == "ada_ln" else None
-                    tokens = checkpoint(
+                    tokens = maybe_checkpoint(
+                        self.ckpt_blocks,
                         block,
                         tokens,
                         coords=coords,
@@ -848,13 +867,18 @@ class ForecastingEngine(torch.nn.Module):
             for block in self.fe_blocks:
                 # conditioning is the ungated AdaLN aux signal (always None today, since
                 # dim_aux is only set for the diffusion "ada_ln" conditioning type above).
-                tokens = checkpoint(
-                    block, tokens, coords=coords, ada_ln_aux=conditioning, use_reentrant=False
+                tokens = maybe_checkpoint(
+                    self.ckpt_blocks,
+                    block,
+                    tokens,
+                    coords=coords,
+                    ada_ln_aux=conditioning,
+                    use_reentrant=False,
                 )
 
         if self.out_proj is not None:
             # tokens = self.out_proj(tokens)  # (B, H, 2D) -> (B, H, D)
-            tokens = checkpoint(self.out_proj, tokens, use_reentrant=False)
+            tokens = maybe_checkpoint(self.ckpt_blocks, self.out_proj, tokens, use_reentrant=False)
 
         return tokens if not forecast_residual else (tokens_in + tokens)
 
@@ -940,6 +964,7 @@ class TargetPredictionEngineClassic(nn.Module):
         self.name = f"TargetPredictionEngine_{stream_config['name']}"
 
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("prediction")
         self.dims_embed = dims_embed
         self.dim_coord_in = dim_coord_in
         self.tr_dim_head_proj = tr_dim_head_proj
@@ -1020,7 +1045,8 @@ class TargetPredictionEngineClassic(nn.Module):
         tcs_aux = coordinates
 
         for block in self.tte:
-            tc_tokens = checkpoint(
+            tc_tokens = maybe_checkpoint(
+                self.ckpt_blocks,
                 block,
                 tc_tokens,
                 x_lens=tcs_lens,
@@ -1072,6 +1098,7 @@ class TargetPredictionEngine(nn.Module):
         self.name = f"TargetPredictionEngine_{stream_config['name']}"
 
         self.cf = cf
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("prediction")
         self.dims_embed = dims_embed
         self.dim_coord_in = dim_coord_in
         self.tr_dim_head_proj = tr_dim_head_proj
@@ -1205,7 +1232,8 @@ class TargetPredictionEngine(nn.Module):
         )
         for layer in self.tte:
             if isinstance(layer, OriginalPredictionBlock):
-                output = checkpoint(
+                output = maybe_checkpoint(
+                    self.ckpt_blocks,
                     layer,
                     latent=latent.flatten(0, 1),
                     output=output,
@@ -1217,7 +1245,8 @@ class TargetPredictionEngine(nn.Module):
                     use_reentrant=False,
                 )
             elif isinstance(layer, CrossAttentionBlock):
-                output = checkpoint(
+                output = maybe_checkpoint(
+                    self.ckpt_blocks,
                     layer,
                     x=output,
                     x_kv=latent.flatten(0, 1),
@@ -1229,7 +1258,8 @@ class TargetPredictionEngine(nn.Module):
                     use_reentrant=False,
                 )
             else:
-                output = checkpoint(
+                output = maybe_checkpoint(
+                    self.ckpt_blocks,
                     layer,
                     x=output,
                     x_lens=output_lens,
@@ -1294,6 +1324,7 @@ class LatentPredictionHeadTransformer(nn.Module):
         super().__init__()
 
         self.name = name
+        self.ckpt_blocks = CheckpointPolicy.from_config(cf).blocks("latent_head")
 
         out_dim, num_blocks, num_heads, with_qk_lnorm, intermediate_dim, dropout_rate = (
             loss_conf["out_dim"],
@@ -1361,7 +1392,9 @@ class LatentPredictionHeadTransformer(nn.Module):
             if isinstance(block, torch.nn.modules.normalization.LayerNorm):
                 patch_class_tokens = block(patch_class_tokens)
             else:
-                patch_class_tokens = checkpoint(block, patch_class_tokens, use_reentrant=False)
+                patch_class_tokens = maybe_checkpoint(
+                    self.ckpt_blocks, block, patch_class_tokens, use_reentrant=False
+                )
         return patch_class_tokens
 
 
