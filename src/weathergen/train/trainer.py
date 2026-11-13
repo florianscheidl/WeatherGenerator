@@ -8,6 +8,7 @@
 # In applying this licence, ECMWF does not waive the privileges and immunities
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
+import contextlib
 import copy
 import json
 import logging
@@ -38,6 +39,7 @@ from weathergen.train.collapse_monitor import CollapseMonitor
 from weathergen.train.loss_calculator import LossCalculator
 from weathergen.train.lr_scheduler import LearningRateScheduler
 from weathergen.train.optimizer import build_optimizer
+from weathergen.train.prefetch import DevicePrefetcher
 from weathergen.train.target_and_aux_module_base import PhysicalTargetAndAux
 from weathergen.train.target_and_aux_ssl_teacher import EMATeacher
 from weathergen.train.target_and_aux_utils import get_target_aux_calculator
@@ -765,6 +767,16 @@ class Trainer(TrainerBase):
 
         self.gc_control.before_training()
         dataset_iter = iter(self.data_loader)
+        prefetch_to_device = cf.data_loading.get("prefetch_to_device", False)
+        if prefetch_to_device:
+            # innermost: a background thread takes the batches from the data loader and copies
+            # them to the device on a copy stream; the loop below then gets device batches
+            dataset_iter = DevicePrefetcher(
+                dataset_iter,
+                self.device,
+                pin=cf.data_loading.get("memory_pinning", False),
+                annotate=self._prefetch_annotator(),
+            )
 
         for optimizer in self.optimizers:
             optimizer.zero_grad()
@@ -773,11 +785,13 @@ class Trainer(TrainerBase):
         self.t_start = time.time()
         # the gc control's end-of-step work (manual collection, stats) runs after each step
         for bidx, batch in self.gc_control.steps(self.train_batches(dataset_iter)):
-            if cf.data_loading.get("memory_pinning", False):
-                # pin memory for faster CPU-GPU transfer
-                batch = batch.pin_memory()
+            if not prefetch_to_device:
+                # (the prefetcher has already pinned, if asked, and copied the batch)
+                if cf.data_loading.get("memory_pinning", False):
+                    # pin memory for faster CPU-GPU transfer
+                    batch = batch.pin_memory()
 
-            batch.to_device(self.device)
+                batch.to_device(self.device)
 
             with torch.autocast(
                 device_type=f"cuda:{cf.local_rank}",
@@ -906,7 +920,15 @@ class Trainer(TrainerBase):
 
             self.cf.general.istep += 1
 
+        if prefetch_to_device:
+            # also reached when the loop is ended early (e.g. the nsys capture-only mode)
+            dataset_iter.close()
+
         self.dataset.advance()
+
+    def _prefetch_annotator(self):
+        """nvtx range factory for the prefetch thread (no-op here, see ProfilingTrainer)."""
+        return lambda name: contextlib.nullcontext()
 
     def train_batches(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """

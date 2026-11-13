@@ -185,6 +185,12 @@ data_loading :
   # If this happens, you can disable the flag, but performance will drop on GH200.
   memory_pinning: True
 
+  # take the next training batch from the data loader and copy it to the GPU in a background
+  # thread, on a dedicated copy stream, instead of in the training loop. Keeps one more batch
+  # on the GPU (the batch size in memory, e.g. ~6 GB). With memory_pinning the thread pins the
+  # batch before the copy. Validation is unchanged.
+  prefetch_to_device: False
+
 
 # config for training
 training_config:

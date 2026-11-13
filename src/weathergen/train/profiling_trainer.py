@@ -217,6 +217,10 @@ class ProfilingTrainer(Trainer):
         timer.switch("train", sync=True)
         super().validate_before_training()
 
+    def _prefetch_annotator(self):
+        """nvtx ranges `prefetch_next_batch`/`prefetch_to_device` in the prefetch thread."""
+        return self.annotate
+
     def train_batches(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """Measure every training step, and trace the profiled stretch of them."""
         # innermost, so that the phase timer times only the wait for the data loader
