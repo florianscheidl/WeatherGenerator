@@ -1052,7 +1052,9 @@ class Model(torch.nn.Module):
         fstep_idx = output.fstep_idx(step)
 
         if out_step is None:
-            out_step = step
+            # chunk-local slot: from the second chunk of a chunked rollout on, the output
+            # holds only that chunk's steps (identical to `step` for the first chunk)
+            out_step = output.chunk_idx(step)
 
         tokens_post_norm = self.latent_pre_norm(tokens) if fstep_idx == 0 else None
         noise_pre_predictor_std = self.cf.get("noise_pre_predictor_std", 0)
@@ -1132,7 +1134,9 @@ class Model(torch.nn.Module):
             return output
 
         if out_step is None:
-            out_step = step
+            # chunk-local slot: from the second chunk of a chunked rollout on, the output
+            # holds only that chunk's steps (identical to `step` for the first chunk)
+            out_step = output.chunk_idx(step)
 
         # remove register  and class tokens
         tokens = tokens[:, self.num_aux_tokens :]
