@@ -1,0 +1,45 @@
+# Small model and short training run on one month of ERA5 O96 (see README.md).
+# Overwrites the default config: uv run train --config ./config/era5_local.yml
+
+embed_orientation: "channels"
+ae_local_dim_embed: 512
+ae_global_dim_embed: 512
+ae_aggregation_num_blocks: 2
+fe_num_blocks: 2
+num_class_tokens: 1
+num_register_tokens: 7
+healpix_level: 4
+with_fsdp: False
+
+streams_directory: "./config/streams/era5_local"
+
+data_loading:
+  num_workers: 2
+
+training_config:
+  num_mini_epochs: 1
+  samples_per_mini_epoch: 64
+  start_date: 2020-01-01T00:00
+  end_date: 2020-01-16T00:00
+  learning_rate_scheduling:
+    num_steps_warmup: 4
+    num_steps_cooldown: 4
+  forecast:
+    num_steps: 1
+
+validation_config:
+  samples_per_mini_epoch: 32
+  start_date: 2020-01-17T00:00
+  end_date: 2020-01-25T00:00
+  output:
+    streams: ["ERA5"]
+
+test_config:
+  start_date: 2021-10-10T00:00
+  end_date: 2022-10-11T00:00
+  output:
+    num_samples: 10
+
+inference_config:
+  output:
+    streams: ["ERA5"]

@@ -1,0 +1,23 @@
+ERA5:
+  type: anemoi
+  stream_id: 0
+  filenames: ["era5-o96-2020-1pct-6h-v1.zarr"]
+  source: ["t_850", "z_850"]
+  target: ["t_850"]
+  token_size: 32
+  tokenize_spacetime: True
+  embed:
+    net: transformer
+    num_tokens: 1
+    num_heads: 2
+    dim_embed: 16
+    num_blocks: 2
+  embed_target_coords:
+    net: linear
+    dim_embed: 16
+  target_readout:
+    num_layers: 2
+    num_heads: 2
+  pred_head:
+    ens_size: 1
+    num_layers: 1
