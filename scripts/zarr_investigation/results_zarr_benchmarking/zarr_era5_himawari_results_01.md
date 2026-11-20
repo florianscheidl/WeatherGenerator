@@ -4,7 +4,7 @@
 
 ## Setup
 
-- **Change:** zarr-python 3.1.6 → **3.4.2**. 3.1.6 fetches the chunks inside a shard one after another; 3.4.2 fetches them concurrently and merges nearby byte ranges.
+- **Change:** zarr-python 3.1.6 → **3.4.2**.
 - **Readers:** WeatherGenerator `DataReaderAnemoi` (ERA5) and the current `DataReaderObs` (Himawari; PR #2797, one read of all columns per window).
 - **Benchmark:** 6 h windows of March 2022, shuffled, median time per window. Every window's checksum matches Zarr 2.
 - **Where:** JUPITER booster nodes, one node per run type.
