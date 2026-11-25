@@ -297,3 +297,41 @@ def test_step_timing_is_off_by_default(caplog):
         _step_timing_trainer(False, clock)
 
     assert not [r for r in caplog.records if "Step time rank" in r.getMessage()]
+
+
+def _train_and_record_wall_time(monkeypatch, num_mini_epochs: int) -> list[dict]:
+    """Run ProfilingTrainer.train with Trainer.train stubbed, return the logged metrics."""
+    logged = []
+    clock = iter([110.0, 150.0, 160.0, 175.0])
+    trainer = ProfilingTrainer(OmegaConf.create({"metrics": 1}), ProfilingConfig())
+    trainer.cf = OmegaConf.create({"general": {"istep": 0}})
+    monkeypatch.setattr(trainer, "_log_metrics", lambda stage, m, istep: logged.append(m))
+    monkeypatch.setattr(profiling_trainer, "_process_start_time", lambda: 100.0)
+    monkeypatch.setattr(profiling_trainer.time, "time", lambda: next(clock))
+    with patch.object(Trainer, "train", lambda *args: None):
+        for mini_epoch in range(num_mini_epochs):
+            trainer.train(mini_epoch)
+    return logged
+
+
+def test_train_logs_startup_once_and_wall_time_per_mini_epoch(monkeypatch):
+    monkeypatch.delenv("SLURM_JOB_START_TIME", raising=False)
+
+    logged = _train_and_record_wall_time(monkeypatch, num_mini_epochs=2)
+
+    assert logged == [
+        {"performance.time.startup_s": 10.0},
+        {"performance.time.train_s": 40.0, "performance.time.elapsed_s": 50.0},
+        {"performance.time.train_s": 15.0, "performance.time.elapsed_s": 75.0},
+    ]
+
+
+def test_train_logs_startup_since_slurm_job_start(monkeypatch):
+    monkeypatch.setenv("SLURM_JOB_START_TIME", "70")
+
+    logged = _train_and_record_wall_time(monkeypatch, num_mini_epochs=1)
+
+    assert logged[0] == {
+        "performance.time.startup_s": 10.0,
+        "performance.time.job_startup_s": 40.0,
+    }
