@@ -16,9 +16,12 @@ Selected by the `profiling` and `performance_logging` config sections, see
 
 import contextlib
 import logging
+import os
+import time
 from collections.abc import Iterator
 from itertools import islice
 
+import psutil
 import torch
 
 import weathergen.train.trainer as trainer_module
@@ -74,6 +77,7 @@ class ProfilingTrainer(Trainer):
         self.memory_tracker: MemoryTracker | None = None
         self.nsys_windows: NsysWindows | None = None
         self.profiling_done: bool = False
+        self.startup_logged: bool = False
         self.step_phases_annotated: bool = False
         # (id(obj), method) already in an nvtx range, as training and validation share some
         self.nvtx_wrapped: set[tuple[int, str]] = set()
@@ -135,6 +139,43 @@ class ProfilingTrainer(Trainer):
             yield from super().mini_epochs(mini_epoch_base)
 
     def train(self, mini_epoch: int) -> None:
+        """
+        Train one mini_epoch, logging wall-clock metrics on the root rank.
+
+        Host clocks only: no device synchronization and no collective. Logged as TRAIN
+        metrics (`performance.time.*`, seconds):
+            startup_s: process creation to the start of the first mini_epoch (once).
+            job_startup_s: Slurm job start to the same point, if $SLURM_JOB_START_TIME is
+                set; also covers the job script (modules, srun) before the process.
+            train_s: this mini_epoch's training loop, including the wait for the first
+                batches.
+            elapsed_s: process creation to the end of this mini_epoch.
+        The end of a mini_epoch is taken when the host leaves the training loop; work still
+        queued on the device then is at most part of the last step.
+        """
+        process_start = _process_start_time()
+        t_start = time.time()
+        if not self.startup_logged:
+            self.startup_logged = True
+            startup = {"performance.time.startup_s": t_start - process_start}
+            job_start = _slurm_job_start_time()
+            if job_start is not None:
+                startup["performance.time.job_startup_s"] = t_start - job_start
+            self._log_metrics(TRAIN, startup, self.cf.general.istep)
+
+        self._train_with_annotations(mini_epoch)
+
+        t_end = time.time()
+        self._log_metrics(
+            TRAIN,
+            {
+                "performance.time.train_s": t_end - t_start,
+                "performance.time.elapsed_s": t_end - process_start,
+            },
+            self.cf.general.istep,
+        )
+
+    def _train_with_annotations(self, mini_epoch: int) -> None:
         """Label the phases of the training step and open the nsys startup window."""
         if self.profiling_cfg.annotates_nvtx:
             self._annotate_step_phases()
@@ -430,3 +471,17 @@ class ProfilingTrainer(Trainer):
         with self.annotate("checkpoint"):
             super().save_model(mini_epoch, name)
         self._log_peak_memory(TRAIN, "save_model")
+
+
+def _process_start_time() -> float:
+    """Creation time of this process, in epoch seconds."""
+    return psutil.Process().create_time()
+
+
+def _slurm_job_start_time() -> float | None:
+    """Start time of the Slurm job ($SLURM_JOB_START_TIME, epoch seconds), if set."""
+    value = os.environ.get("SLURM_JOB_START_TIME")
+    try:
+        return float(value) if value else None
+    except ValueError:
+        return None
