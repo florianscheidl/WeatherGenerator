@@ -55,6 +55,7 @@ from weathergen.train.utils import (
     get_active_stage_config,
     get_batch_size_from_config,
     get_target_idxs_from_cfg,
+    loader_prefetch_kwargs,
 )
 from weathergen.utils.distributed import is_root
 from weathergen.utils.inference_logger import EXTRA_INFERENCE_WRITERS
@@ -571,7 +572,12 @@ class Trainer(TrainerBase):
             "shuffle": False,
             "num_workers": cf.data_loading.num_workers,
         }
-        self.data_loader = torch.utils.data.DataLoader(self.dataset, **loader_params, sampler=None)
+        self.data_loader = torch.utils.data.DataLoader(
+            self.dataset,
+            **loader_params,
+            **loader_prefetch_kwargs(cf.data_loading, loader_params["num_workers"]),
+            sampler=None,
+        )
         loader_params["num_workers"] = cf.data_loading.get(
             "num_workers_validation", cf.data_loading.num_workers
         )
