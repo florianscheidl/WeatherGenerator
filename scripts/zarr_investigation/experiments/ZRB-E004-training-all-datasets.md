@@ -1,7 +1,15 @@
 # ZRB-E004 — Training on Zarr 3 copies of all datasets
 
 - Date: 2026-11-16
-- Status: planned. This record lists only the datasets to convert so far; set-up and runs follow.
+- Status: done, recorded in the experiments repository as
+  [Zarr 3 001](https://gitlab.jsc.fz-juelich.de/esde/weathergenerator-experiments/-/blob/main/experiments/infrastructure/2026-11-zarr3-datasets/zarr3_001_long_run.md) (2026-11-25).
+  Enxhi Kreshpa converted all ten stores (`<source>-zarr3-shard<N>.zarr` next to the sources in
+  `/e/data1/slmet/ml_training/`). Three seeds, each on Zarr 2 and on Zarr 3, with zarr-python
+  3.4.2: training works on the same data (losses identical to four decimals for 50–100
+  steps), with the same startup and memory, and costs 0 to +7 % of training time in runs
+  started together, within the run-to-run spread of these data-bound runs. Only the ERA5 store
+  differs from its source, in attributes no reader uses. The rest of this record is the plan
+  as written on 2026-11-16.
 - Question: does a training run with the hackathon baseline config work on Zarr 3 copies of
   all its datasets, and how do its step time and data waits compare with the same run on the
   Zarr 2 sources? ZRB-E001 to E003 timed only the reader, and only on the N320 ERA5 store.
