@@ -9,7 +9,7 @@
 
 import torch
 
-from weathergen.train.utils import NoOpGradScaler
+from weathergen.train.utils import NoOpGradScaler, loader_prefetch_kwargs
 
 
 def test_noop_grad_scaler_runs_an_unscaled_step():
@@ -28,3 +28,15 @@ def test_noop_grad_scaler_runs_an_unscaled_step():
 
     assert param.grad is not None and param.grad.item() == 2.0
     assert param.item() == 0.0
+
+
+def test_loader_prefetch_kwargs_passes_the_configured_factor():
+    assert loader_prefetch_kwargs({"prefetch_factor": 1}, num_workers=18) == {"prefetch_factor": 1}
+
+
+def test_loader_prefetch_kwargs_keeps_the_pytorch_default_when_unset():
+    assert loader_prefetch_kwargs({}, num_workers=8) == {}
+
+
+def test_loader_prefetch_kwargs_is_empty_without_workers():
+    assert loader_prefetch_kwargs({"prefetch_factor": 1}, num_workers=0) == {}

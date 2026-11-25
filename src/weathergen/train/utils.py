@@ -207,3 +207,16 @@ class NoOpGradScaler:
 
     def update(self):
         return None
+
+
+def loader_prefetch_kwargs(data_loading: Config | dict, num_workers: int) -> dict:
+    """
+    DataLoader keyword arguments for `data_loading.prefetch_factor`.
+
+    The number of batches each worker loads ahead. Unset keeps PyTorch's default of 2. Without
+    workers the result is empty, because PyTorch rejects a prefetch_factor then.
+    """
+    prefetch_factor = data_loading.get("prefetch_factor")
+    if prefetch_factor is None or num_workers == 0:
+        return {}
+    return {"prefetch_factor": int(prefetch_factor)}

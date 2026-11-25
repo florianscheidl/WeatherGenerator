@@ -142,6 +142,8 @@ train_logging:
 data_loading :
 
   num_workers: 12
+  # batches each training worker loads ahead; unset keeps PyTorch's default of 2
+  # prefetch_factor: 1
   rng_seed: ???
   repeat_data_in_mini_epoch : False
 
