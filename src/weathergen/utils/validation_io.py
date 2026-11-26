@@ -289,6 +289,18 @@ def stage_output(
 
     n_samples = len(batch.get_source_samples().get_samples())
 
+    # output stream names to be written, use specified ones or all if nothing specified
+    stream_names = list(cf.streams.keys())
+    if val_cfg.get("output").get("streams") is not None:
+        output_stream_names = val_cfg.output.streams
+    else:
+        output_stream_names = stream_names
+    write_latents = io.LATENT_STREAM in output_stream_names
+    # with output.skip_unwritten_decoders, physical predictions are collected only if written
+    collect_physical = not val_cfg.get("output").get("skip_unwritten_decoders", False) or any(
+        name != io.LATENT_STREAM for name in output_stream_names
+    )
+
     targets_lens = []
 
     for t_idx in timestep_idxs:
@@ -297,7 +309,7 @@ def stage_output(
         targets_coords_all += [[]]
         targets_times_all += [[]]
         targets_lens += [[]]
-        for sname in cf.streams.keys():
+        for sname in cf.streams.keys() if collect_physical else ():
             chunk_idx = model_output.chunk_idx(t_idx)
             assert model_output.forecast_steps[chunk_idx] == t_idx, (
                 f"Prediction at index {chunk_idx} is valid for forecast step "
@@ -382,7 +394,9 @@ def stage_output(
             targets_coords_all[-1] += [t_coords_s]
             targets_times_all[-1] += [t_times_s]
 
-    if sum(n for lens_step in targets_lens for lens in lens_step for n in lens) == 0:
+    if sum(n for lens_step in targets_lens for lens in lens_step for n in lens) == 0 and not (
+        write_latents and not collect_physical
+    ):
         _logger.warning("Writing no data since predictions are empty.")
         return None
 
@@ -401,15 +415,7 @@ def stage_output(
 
     # more prep work
 
-    # output stream names to be written, use specified ones or all if nothing specified
-    stream_names = list(cf.streams.keys())
     stream_infos = list(cf.streams.values())
-    if val_cfg.get("output").get("streams") is not None:
-        output_stream_names = val_cfg.output.streams
-    else:
-        output_stream_names = stream_names
-
-    write_latents = io.LATENT_STREAM in output_stream_names
     output_streams: dict[str, int] = {
         name: stream_names.index(name) for name in output_stream_names if name != io.LATENT_STREAM
     }

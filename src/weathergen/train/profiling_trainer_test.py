@@ -8,6 +8,7 @@
 # nor does it submit to any jurisdiction.
 
 import contextlib
+import types
 from unittest.mock import patch
 
 import pytest
@@ -382,3 +383,28 @@ def test_inference_nsys_windows_follow_the_model_calls():
     ]
     assert trainer.nsys_windows.done
     assert not trainer.model._forward_pre_hooks and not trainer.model._forward_hooks
+
+
+@pytest.mark.parametrize(
+    ("output", "with_targets", "decodes"),
+    [
+        ({"streams": ["latent"], "skip_unwritten_decoders": True}, False, False),
+        ({"streams": ["latent"]}, False, True),
+        ({"streams": ["latent"], "skip_unwritten_decoders": True}, True, True),
+        ({"streams": ["latent", "ERA5"], "skip_unwritten_decoders": True}, False, True),
+        ({"streams": None, "skip_unwritten_decoders": True}, False, True),
+    ],
+)
+def test_physical_decoders_are_skipped_only_when_nothing_uses_them(output, with_targets, decodes):
+    mode_cfg = OmegaConf.create({"output": output, "with_targets": with_targets})
+    assert Trainer._decodes_physical_output(mode_cfg) is decodes
+
+
+def test_physical_decoding_switch_skips_predict_decoders_and_restores():
+    from weathergen.model.model import Model  # noqa: PLC0415
+
+    model = types.SimpleNamespace(decode_physical=True, pred_heads={"ERA5": None})
+    output = types.SimpleNamespace(fstep_idx=lambda step: step)
+    with Model.physical_decoding(model, False):
+        assert Model.predict_decoders(model, None, 0, None, None, output) is output
+    assert model.decode_physical is True

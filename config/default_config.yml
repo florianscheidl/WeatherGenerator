@@ -279,6 +279,9 @@ validation_config:
     # copy the output to host and write it in the background, while the next forecast
     # steps (forecast.chunk_size) run on the device
     async_write: False,
+    # with only the latent stream in `streams` and with_targets: False, skip the physical
+    # decoders and the collection of physical predictions (neither used nor written)
+    skip_unwritten_decoders: False,
     }
 
   # run validation before training starts (mainly for model development)

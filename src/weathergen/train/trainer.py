@@ -26,6 +26,7 @@ from omegaconf import OmegaConf
 from torch.distributed.tensor import DTensor, distribute_tensor
 
 import weathergen.common.config as config
+import weathergen.common.io as io
 from weathergen.common.config import Config
 from weathergen.datasets.batch import ModelBatch
 from weathergen.datasets.multi_stream_data_sampler import MultiStreamDataSampler
@@ -354,6 +355,23 @@ class Trainer(TrainerBase):
         """
         with_targets = mode_cfg.get("with_targets", True)
         return with_targets and mode_cfg.get("compute_full_validation_loss", True)
+
+    @staticmethod
+    def _decodes_physical_output(mode_cfg) -> bool:
+        """
+        Whether validation runs the physical decoders.
+
+        Off only with `output.skip_unwritten_decoders` (default off), without targets (no loss,
+        `with_targets: False`) and with only the latent stream in `output.streams`: then the
+        decoders' predictions would be neither used nor written.
+        """
+        output_cfg = mode_cfg.get("output") or {}
+        if not output_cfg.get("skip_unwritten_decoders", False):
+            return True
+        if mode_cfg.get("with_targets", True):
+            return True
+        streams = output_cfg.get("streams")
+        return streams is None or any(name != io.LATENT_STREAM for name in streams)
 
     def _process_validation_chunks(
         self,
@@ -988,7 +1006,10 @@ class Trainer(TrainerBase):
 
         dataset_val_iter = iter(self.data_loader_validation)
 
-        with torch.no_grad():
+        decoding = getattr(self.model, "module", self.model).physical_decoding(
+            self._decodes_physical_output(mode_cfg)
+        )
+        with torch.no_grad(), decoding:
             # print progress bar but only in interactive mode, i.e. when without ddp
             with tqdm.tqdm(
                 total=len(self.data_loader_validation) * self.cf.world_size,

@@ -9,6 +9,7 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import contextlib
 import logging
 import math
 import typing
@@ -373,6 +374,8 @@ class Model(torch.nn.Module):
         self.q_cells: torch.Tensor | None = None
         self.streams: dict[str, typing.Any] = cf.streams
         self.target_token_engines = None
+        # predict_decoders runs the physical decoders only while this is True
+        self.decode_physical = True
 
         assert cf.get("forecast", {}).get("att_dense_rate", 1.0) == 1.0, (
             "Local attention not adapted for register tokens"
@@ -1107,6 +1110,22 @@ class Model(torch.nn.Module):
 
         return output
 
+    @contextlib.contextmanager
+    def physical_decoding(self, enabled: bool) -> typing.Iterator[None]:
+        """
+        Run the physical decoders (`predict_decoders`) in the enclosed block only if `enabled`.
+
+        Without them the model output holds no physical predictions, only the latent ones. The
+        rollout does not depend on them (the forecast engine carries the latent tokens from step
+        to step), so the latents are unchanged.
+        """
+        previous = self.decode_physical
+        self.decode_physical = enabled
+        try:
+            yield
+        finally:
+            self.decode_physical = previous
+
     def predict_decoders(
         self,
         model_params: ModelParams,
@@ -1135,7 +1154,7 @@ class Model(torch.nn.Module):
         fstep_idx = output.fstep_idx(step)
 
         # Empty dicts evaluate to False in python
-        if not self.pred_heads:
+        if not self.pred_heads or not self.decode_physical:
             return output
 
         if out_step is None:
