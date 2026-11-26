@@ -295,7 +295,22 @@ def _nvtx_pop():
     torch.cuda.nvtx.range_pop()
 
 
+_nvtx_hooks_registered: bool = False
+
+
 def register_nvtx_hooks(model, scope: str = "global"):
+    """
+    Register nvtx ranges around the forward and backward of every module, once per process.
+
+    The hooks are global (`torch.nn.modules.module.register_module_*_hook`): they cover every
+    module of every model, not just `model`. A second registration, e.g. for an EMA model built
+    by another `init_model_and_shard` call, would nest a duplicate range in every module range
+    and add its host overhead again, so later calls do nothing.
+    """
+    global _nvtx_hooks_registered
+    if _nvtx_hooks_registered:
+        return
+    _nvtx_hooks_registered = True
     torch.nn.modules.module.register_module_forward_pre_hook(
         lambda m, args: _nvtx_push(f"{m.__class__.__name__}.forward")
     )
