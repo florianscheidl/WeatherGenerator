@@ -95,7 +95,9 @@ class ProfilingConfig:
         schedule: length and wait/warmup/active split of the profiled stretch.
         pytorch_profiler: chrome trace and memory timeline per cycle (root rank).
         memory_snapshot: CUDA memory history from the first active step (root rank); view
-            at https://pytorch.org/memory_viz.
+            at https://pytorch.org/memory_viz. `profiling.memory_snapshot.max_entries` caps
+            the recorded events (default MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT); the oldest are
+            dropped once it is reached.
         nvtx_annotate: nvtx ranges around each training step and its phases (forward,
             loss, backward, optimizer step, ...), for nsys. A few dozen ranges per step.
         nvtx_module_ranges: nvtx ranges around the forward and backward of every module, via
@@ -193,8 +195,10 @@ def memory_snapshot_session(cf: Config) -> Generator[None, None, None]:
         return
 
     _prepare_traces_path(cf)
-    logger.info("Starting snapshot record_memory_history")
-    torch.cuda.memory._record_memory_history(max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT)
+    snapshot_cfg = (cf.get("profiling") or {}).get("memory_snapshot") or {}
+    max_entries = int(snapshot_cfg.get("max_entries", MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT))
+    logger.info(f"Starting snapshot record_memory_history (max_entries={max_entries})")
+    torch.cuda.memory._record_memory_history(max_entries=max_entries)
     try:
         yield
         _export_memory_snapshot(cf)
