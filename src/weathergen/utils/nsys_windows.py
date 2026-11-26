@@ -20,6 +20,11 @@ Windows, in order of occurrence (first mini-epoch only):
   done, i.e. data reading, preprocessing and tokenization up to the first forward.
 - ``steady``: ``steady_steps`` full training steps, after ``warmup_steps`` untraced steps.
 
+In inference the same windows follow the model calls of the rollout, one per forecast chunk
+(``ProfilingTrainer._inference_nsys_windows``): ``startup`` from before the data loader is
+iterated until the first chunk is done, ``steady`` over ``steady_steps`` chunks after
+``warmup_steps``; the rollout runs to the end.
+
 Config (all optional, disabled unless ``profiling.enabled`` and
 ``profiling.nsys_windows.enabled``)::
 

@@ -11,6 +11,7 @@ import contextlib
 from unittest.mock import patch
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
 # the trainer imports the model, which needs flash-attn (not in the cpu extra)
@@ -21,6 +22,7 @@ from weathergen.train import profiling_trainer  # noqa: E402
 from weathergen.train.profiling_trainer import ProfilingTrainer  # noqa: E402
 from weathergen.train.trainer import Trainer  # noqa: E402
 from weathergen.utils import performance  # noqa: E402
+from weathergen.utils.nsys_windows import NsysWindows  # noqa: E402
 from weathergen.utils.phase_timer import PhaseTimer  # noqa: E402
 from weathergen.utils.profiling import ProfilingConfig  # noqa: E402
 
@@ -335,3 +337,48 @@ def test_train_logs_startup_since_slurm_job_start(monkeypatch):
         "performance.time.startup_s": 10.0,
         "performance.time.job_startup_s": 40.0,
     }
+
+
+def test_inference_nsys_windows_follow_the_model_calls():
+    events = []
+
+    class RecordingWindows(NsysWindows):
+        def _start(self, name):
+            if self._open is None and name not in self._done:
+                events.append(f"open {name}")
+                self._open = name
+
+        def _stop(self, name):
+            if self._open == name:
+                events.append(f"close {name}")
+                self._open = None
+                self._done.add(name)
+
+    def fake_rollout(trainer, *args):
+        events.append("read batch")
+        for step in range(6):
+            trainer.model(torch.zeros(1))
+            events.append(f"chunk {step}")
+
+    trainer = ProfilingTrainer(OmegaConf.create({"metrics": 1}), ProfilingConfig())
+    trainer.cf = OmegaConf.create({"stage": "inference"})
+    trainer.model = torch.nn.Identity()
+    trainer.nsys_windows = RecordingWindows(warmup_steps=2, steady_steps=3)
+    with patch.object(Trainer, "validate", fake_rollout):
+        trainer.validate(0, None, 1)
+
+    assert events == [
+        "open startup",
+        "read batch",
+        "close startup",
+        "chunk 0",
+        "chunk 1",
+        "open steady",
+        "chunk 2",
+        "chunk 3",
+        "chunk 4",
+        "close steady",
+        "chunk 5",
+    ]
+    assert trainer.nsys_windows.done
+    assert not trainer.model._forward_pre_hooks and not trainer.model._forward_hooks
