@@ -37,7 +37,8 @@ from weathergen.utils.sync_counter import write_report as write_sync_report
 logger: logging.Logger = logging.getLogger(__name__)
 
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
-MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
+# one step of the preprint forecasting config records about 105,000 events
+MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 250000
 
 
 @dataclasses.dataclass(frozen=True)
@@ -95,8 +96,10 @@ class ProfilingConfig:
         schedule: length and wait/warmup/active split of the profiled stretch.
         pytorch_profiler: chrome trace and memory timeline per cycle (root rank).
         memory_snapshot: CUDA memory history from the first active step (root rank); view
-            at https://pytorch.org/memory_viz. `profiling.memory_snapshot.max_entries` caps
-            the recorded events (default MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT); the oldest are
+            at https://pytorch.org/memory_viz. The stacks of memory allocated earlier are
+            recorded from the start of the run (`record_memory_state`), which slows the steps
+            before the snapshot down. `profiling.memory_snapshot.max_entries` caps the
+            recorded events (default MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT); the oldest are
             dropped once it is reached.
         nvtx_annotate: nvtx ranges around each training step and its phases (forward,
             loss, backward, optimizer step, ...), for nsys. A few dozen ranges per step.
@@ -182,9 +185,32 @@ def pytorch_profiler_session(
     logger.info(f"PyTorch profiler traces written to {traces_path}")
 
 
+def record_memory_state() -> None:
+    """
+    From now on, keep the stack of every live CUDA allocation, on the root rank only.
+
+    Called at the start of a run with a memory snapshot, before the model exists. Memory
+    allocated before `memory_snapshot_session` and still live at the snapshot (weights,
+    gradients and their DDP buckets, optimizer state, an EMA model) otherwise has no stack
+    there: the viewer's "ghost blocks", about a third of the peak in the preprint configs.
+    Mode "state" stores the stack on each live block only, without the event history, so it
+    does not fill the history's ring buffer; it costs a stack capture per allocation, which
+    slows the steps before the snapshot down.
+    """
+    if not is_root() or not torch.cuda.is_available():
+        return
+    logger.info("Recording the stacks of live CUDA allocations (record_memory_history: state)")
+    torch.cuda.memory._record_memory_history(enabled="state")
+
+
 @contextlib.contextmanager
 def memory_snapshot_session(cf: Config) -> Generator[None, None, None]:
-    """Record the CUDA memory history over the enclosed block, on the root rank only."""
+    """
+    Record the CUDA memory history over the enclosed block, on the root rank only.
+
+    The stacks of the memory allocated before come from `record_memory_state`; switching
+    to the full history keeps them.
+    """
     if not is_root():
         yield
         return
@@ -198,7 +224,7 @@ def memory_snapshot_session(cf: Config) -> Generator[None, None, None]:
     snapshot_cfg = (cf.get("profiling") or {}).get("memory_snapshot") or {}
     max_entries = int(snapshot_cfg.get("max_entries", MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT))
     logger.info(f"Starting snapshot record_memory_history (max_entries={max_entries})")
-    torch.cuda.memory._record_memory_history(max_entries=max_entries)
+    torch.cuda.memory._record_memory_history(enabled="all", max_entries=max_entries)
     try:
         yield
         _export_memory_snapshot(cf)

@@ -7,11 +7,14 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+import logging
+import types
 from unittest.mock import patch
 
 import torch
 from omegaconf import OmegaConf
 
+from weathergen.utils import performance
 from weathergen.utils.performance import (
     MemoryTracker,
     ThroughputTracker,
@@ -70,6 +73,32 @@ def test_memory_tracker_from_config():
         patch("torch.cuda.reset_peak_memory_stats"),
     ):
         assert MemoryTracker.from_config(cfg, _DEVICE) is not None
+
+
+def test_memory_tracker_collect_is_local_and_logs_this_rank(caplog):
+    gib = 1024**3
+    reader = types.SimpleNamespace(fields=lambda: {"process_gib": 13.0, "non_pytorch_gib": 1.5})
+    with (
+        patch("torch.cuda.reset_peak_memory_stats"),
+        patch("torch.cuda.max_memory_allocated", return_value=10 * gib),
+        patch("torch.cuda.max_memory_reserved", return_value=11.5 * gib),
+        patch("torch.distributed.all_reduce", side_effect=AssertionError("no collective")),
+        patch.object(performance, "process_gpu_memory", return_value=reader),
+        patch.object(performance, "get_rank", return_value=2),
+        caplog.at_level(logging.INFO, logger=performance.logger.name),
+    ):
+        metrics = MemoryTracker(_DEVICE).collect("train")
+
+    assert metrics == {
+        "performance.memory.train.max_allocated_gib": 10.0,
+        "performance.memory.train.max_reserved_gib": 11.5,
+        "performance.memory.train.process_gib": 13.0,
+        "performance.memory.train.non_pytorch_gib": 1.5,
+    }
+    assert caplog.messages == [
+        "Peak memory rank 2 window train: max_allocated_gib=10.00 max_reserved_gib=11.50 "
+        "process_gib=13.00 non_pytorch_gib=1.50"
+    ]
 
 
 def test_nvtx_annotator_is_a_noop_unless_enabled():

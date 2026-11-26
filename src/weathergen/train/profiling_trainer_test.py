@@ -292,6 +292,48 @@ def test_step_timing_logs_one_line_per_step(caplog, monkeypatch):
     assert all(" period_ms=1250.0 " in line for line in lines)
 
 
+def test_step_timing_line_ends_with_the_process_memory(caplog, monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(profiling_trainer.time, "perf_counter", clock)
+    fields = {"process_gib": 13.0, "non_pytorch_gib": 1.5}
+    monkeypatch.setattr(ProfilingTrainer, "_process_memory_fields", lambda self: fields)
+
+    with caplog.at_level("INFO", logger=profiling_trainer.logger.name):
+        _step_timing_trainer(True, clock)
+
+    lines = [r.getMessage() for r in caplog.records if "Step time rank" in r.getMessage()]
+    assert all(line.endswith(" process_gib=13.00 non_pytorch_gib=1.50") for line in lines)
+
+
+def test_memory_after_setup_is_logged_once_with_step_timing(caplog, monkeypatch):
+    gib = 1024**3
+    trainer = ProfilingTrainer(OmegaConf.create({"metrics": 1}), ProfilingConfig())
+    trainer.cf = OmegaConf.create({"rank": 1, "general": {"istep": 0}})
+    trainer.devices = ["cuda:0"]
+    trainer.step_timing = True
+    monkeypatch.setattr(trainer, "_log_metrics", lambda *args: None)
+    monkeypatch.setattr(
+        trainer, "_process_memory_fields", lambda: {"process_gib": 6.0, "non_pytorch_gib": 1.5}
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (89 * gib, 95 * gib))
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: 4 * gib)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 4.5 * gib)
+
+    with (
+        caplog.at_level("INFO", logger=profiling_trainer.logger.name),
+        patch.object(Trainer, "train", lambda *args: None),
+    ):
+        trainer.train(0)
+        trainer.train(1)
+
+    lines = [m for m in caplog.messages if m.startswith("GPU memory after setup")]
+    assert lines == [
+        "GPU memory after setup rank 1: allocated_gib=4.00 reserved_gib=4.50 process_gib=6.00 "
+        "non_pytorch_gib=1.50 free_gib=89.00 total_gib=95.00"
+    ]
+
+
 def test_step_timing_is_off_by_default(caplog):
     clock = _Clock()
 

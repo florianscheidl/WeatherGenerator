@@ -98,6 +98,42 @@ def test_memory_snapshot_failure_is_not_reported_as_written(tmp_path: Path, capl
     assert "written" not in caplog.text
 
 
+def test_memory_state_from_the_start_then_full_history_in_the_snapshot(tmp_path: Path):
+    calls = []
+    cf = OmegaConf.create({"profiling": {"memory_snapshot": {"enabled": True}}})
+    with (
+        patch.object(profiling, "is_root", return_value=True),
+        patch.object(profiling.torch.cuda, "is_available", return_value=True),
+        patch.object(profiling, "_prepare_traces_path"),
+        patch.object(profiling, "_export_memory_snapshot"),
+        patch.object(
+            profiling.torch.cuda.memory,
+            "_record_memory_history",
+            side_effect=lambda **kwargs: calls.append(kwargs),
+        ),
+    ):
+        profiling.record_memory_state()
+        with profiling.memory_snapshot_session(cf):
+            pass
+
+    assert calls == [
+        {"enabled": "state"},
+        {"enabled": "all", "max_entries": profiling.MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT},
+        {"enabled": None},
+    ]
+
+
+def test_memory_state_is_recorded_on_the_root_rank_only():
+    with (
+        patch.object(profiling, "is_root", return_value=False),
+        patch.object(profiling.torch.cuda, "is_available", return_value=True),
+        patch.object(profiling.torch.cuda.memory, "_record_memory_history") as record,
+    ):
+        profiling.record_memory_state()
+
+    record.assert_not_called()
+
+
 def test_config_without_the_sections():
     """
     Neither section is in default_config.yml, so every run config may be missing them.
