@@ -128,3 +128,24 @@ def test_nvtx_patched_restores_the_original():
         assert torch.nn.utils.clip_grad_norm_ is not original
 
     assert torch.nn.utils.clip_grad_norm_ is original
+
+
+def test_register_nvtx_hooks_registers_once(monkeypatch):
+    from weathergen.utils import performance
+
+    calls = []
+    for name in (
+        "register_module_forward_pre_hook",
+        "register_module_forward_hook",
+        "register_module_full_backward_pre_hook",
+        "register_module_full_backward_hook",
+    ):
+        monkeypatch.setattr(
+            torch.nn.modules.module, name, lambda *a, _n=name, **k: calls.append(_n)
+        )
+    monkeypatch.setattr(performance, "_nvtx_hooks_registered", False)
+
+    performance.register_nvtx_hooks(torch.nn.Linear(2, 2))
+    performance.register_nvtx_hooks(torch.nn.Linear(2, 2))
+
+    assert len(calls) == 4
