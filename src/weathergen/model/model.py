@@ -999,7 +999,14 @@ class Model(torch.nn.Module):
                     "latent_state",
                     self.tokens_to_latent_state(None, tokens),
                 )
-                output = self.predict_decoders(model_params, step, tokens, source_samples, output)
+                output = self.predict_decoders(
+                    model_params,
+                    step,
+                    tokens,
+                    source_samples,
+                    output,
+                    out_step=output.chunk_idx(step),
+                )
 
             if "student_teacher" in self.cf.training_config.training_mode:
                 # latent predictions (raw and with SSL heads)
