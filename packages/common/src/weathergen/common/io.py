@@ -418,7 +418,9 @@ class OutputItem:
             self._append_dataset(self.target, "target")
             self._append_dataset(self.prediction, "prediction")
         if latent is not None:
-            self._append_dataset(latent, "latent")
+            # one dataset per latent field (e.g. tokens, register_tokens, class_token)
+            for dataset in latent:
+                self._append_dataset(dataset, "latent")
 
     def _append_dataset(self, dataset: OutputDataset | None, name: str) -> None:
         if dataset:
