@@ -18,6 +18,8 @@ dependencies = [
  'matplotlib',
  'packaging',
  'psutil',
+ # NVML (imported as pynvml): the process's device memory, as nvidia-smi lists it
+ "nvidia-ml-py>=12.560",
  "polars~=1.25.2",
  "omegaconf~=2.3.0",
  "dask~=2025.5.1",

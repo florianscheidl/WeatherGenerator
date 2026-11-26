@@ -23,6 +23,8 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 import torch
 
 from weathergen.common.config import Config
+from weathergen.utils.distributed import get_rank
+from weathergen.utils.gpu_memory import format_fields, process_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -113,21 +115,23 @@ class ThroughputTracker:
 
 
 class MemoryTracker:
-    """Tracks the global (max across all ranks) peak GPU memory per window.
+    """Tracks this rank's peak GPU memory per window.
 
     Reads the CUDA caching allocator's high-water marks and resets them, so each window gets
-    the peak since the previous read. `close_window` folds that peak into a window locally,
-    e.g. to keep a checkpoint's peak out of the training window; `collect` reports a window,
-    with the MAX across all ranks.
+    the peak since the previous read. `close_window` folds that peak into a window, e.g. to
+    keep a checkpoint's peak out of the training window; `collect` logs and returns a window.
+    All of it is local to the rank: the maximum over the ranks is taken from the per-rank log
+    lines afterwards, so that logging needs no collective and no device synchronization.
 
     `max_memory_allocated` is the peak of memory occupied by live tensors (parameters,
     gradients, optimizer states, activations): the model's actual demand, comparable to
     analytic memory estimates. `max_memory_reserved` is the peak of memory the caching
     allocator has claimed from the device; it also counts cached blocks that are free but not
     returned to CUDA, so reserved >= allocated and the gap measures fragmentation / caching
-    slack. An OOM is raised when a new cudaMalloc fails, so reserved (plus non-PyTorch usage
-    such as NCCL buffers and cuBLAS workspaces, which neither counter sees) is what determines
-    headroom against the device's capacity.
+    slack. An OOM is raised when a new cudaMalloc fails, so reserved plus the memory outside
+    PyTorch (CUDA context, NCCL buffers, workspaces; neither counter sees it, NVML does:
+    `process_gib`, `non_pytorch_gib`) is what determines headroom against the device's
+    capacity.
 
     Configured by `performance_logging.memory.enabled`, which is absent from
     `config/default_config.yml`. Cheap and does not change training, so safe for full runs.
@@ -172,33 +176,32 @@ class MemoryTracker:
         )
 
     def collect(self, window: str) -> dict[str, float]:
-        """Close `window` and return its peak-memory metrics since it was last collected.
+        """Close `window`, log this rank's peak memory since it was last collected, return it.
 
-        Collective: must be called on every rank at the same point in the training loop
-        (the cross-rank MAX reduction and the peak-stat reset run on every rank). The
-        returned dict is identical on all ranks.
+        Local: no collective and no device synchronization, so a rank may call it alone.
+        Every rank logs one line (``Peak memory rank <r> window <w>: ...``); the maximum over
+        the ranks is taken from those lines afterwards.
 
         Args:
             window: what the window covers (e.g. ``"train"``, ``"validation"``,
                 ``"save_model"``); becomes part of the metric key.
 
         Returns:
-            Dict of ``"performance.memory.<window>.max_{allocated,reserved}_gib"`` pairs.
+            This rank's ``"performance.memory.<window>.<field>"`` metrics: the allocator
+            peaks ``max_allocated_gib`` and ``max_reserved_gib``, and, if NVML can tell, the
+            process's device memory ``process_gib`` and the part outside PyTorch
+            ``non_pytorch_gib`` (`weathergen.utils.gpu_memory`).
         """
         self.close_window(window)
         max_allocated, max_reserved = self._pending.pop(window)
 
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            peaks = torch.tensor(
-                [max_allocated, max_reserved], dtype=torch.int64, device=self._device
-            )
-            torch.distributed.all_reduce(peaks, op=torch.distributed.ReduceOp.MAX)
-            max_allocated, max_reserved = peaks.tolist()
-
-        return {
-            f"performance.memory.{window}.max_allocated_gib": max_allocated / _GIB,
-            f"performance.memory.{window}.max_reserved_gib": max_reserved / _GIB,
+        fields = {
+            "max_allocated_gib": max_allocated / _GIB,
+            "max_reserved_gib": max_reserved / _GIB,
+            **process_gpu_memory(self._device).fields(),
         }
+        logger.info(f"Peak memory rank {get_rank()} window {window}: {format_fields(fields)}")
+        return {f"performance.memory.{window}.{key}": value for key, value in fields.items()}
 
 
 def compute_source_bytes(source_samples) -> int:

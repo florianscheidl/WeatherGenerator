@@ -31,6 +31,7 @@ from weathergen.datasets.batch import ModelBatch
 from weathergen.train.trainer import Trainer
 from weathergen.train.utils import TRAIN, VAL, Stage
 from weathergen.utils.distributed import is_root
+from weathergen.utils.gpu_memory import format_fields, process_gpu_memory
 from weathergen.utils.nsys_windows import NsysWindows
 from weathergen.utils.performance import (
     MemoryTracker,
@@ -46,6 +47,7 @@ from weathergen.utils.profiling import (
     ProfilingConfig,
     memory_snapshot_session,
     pytorch_profiler_session,
+    record_memory_state,
     sync_count_session,
     wrap_module_forward_with_profiling,
 )
@@ -111,6 +113,9 @@ class ProfilingTrainer(Trainer):
             self.cf, device=torch.device(self.devices[0])
         )
         self.nsys_windows = NsysWindows.from_config(self.cf)
+        if self.profiling_cfg.enabled and self.profiling_cfg.memory_snapshot:
+            # before the model exists, so that its memory has stacks in the snapshot
+            record_memory_state()
         step_timing_cfg = (self.cf.get("performance_logging") or {}).get("step_timing") or {}
         self.step_timing = bool(step_timing_cfg.get("enabled", False))
         logger.info(
@@ -219,6 +224,7 @@ class ProfilingTrainer(Trainer):
         t_start = time.time()
         if not self.startup_logged:
             self.startup_logged = True
+            self._log_memory_after_setup()
             startup = {"performance.time.startup_s": t_start - process_start}
             job_start = _slurm_job_start_time()
             if job_start is not None:
@@ -296,6 +302,11 @@ class ProfilingTrainer(Trainer):
         (data wait plus step, including the step-end GC); `step_ms` is `period_ms - wait_ms`.
         The host runs ahead of the GPU by at most the sync points of a step (the loss
         `item()`), so `period_ms` equals the GPU step time when the data loader keeps up.
+
+        Memory: the allocator peaks since the last reset (`max_alloc_gib`, `max_reserved_gib`)
+        and, if NVML can tell, the process's device memory as `nvidia-smi` lists it
+        (`process_gib`) and the part of it outside PyTorch (`non_pytorch_gib`); see
+        `weathergen.utils.gpu_memory`.
         """
         if not self.step_timing:
             yield from batches
@@ -313,10 +324,12 @@ class ProfilingTrainer(Trainer):
             gib = 1024**3
             alloc = torch.cuda.max_memory_allocated() / gib if torch.cuda.is_available() else 0.0
             reserved = torch.cuda.max_memory_reserved() / gib if torch.cuda.is_available() else 0.0
+            process = self._process_memory_fields()
             logger.info(
                 f"Step time rank {rank} batch {bidx}: wait_ms={1e3 * wait:.1f} "
                 f"step_ms={1e3 * (end - start):.1f} period_ms={1e3 * (end - end_prev):.1f} "
                 f"log={int(is_log)} max_alloc_gib={alloc:.2f} max_reserved_gib={reserved:.2f}"
+                + (f" {format_fields(process)}" if process else "")
             )
             end_prev = end
 
@@ -500,7 +513,6 @@ class ProfilingTrainer(Trainer):
             istep = self.cf.general.istep  # train() increments it as part of the step
             yield bidx, batch
             if self._is_metrics_step(bidx):
-                # collective, so on every rank
                 self._log_metrics(TRAIN, self.memory_tracker.collect("train"), istep)
 
     def _is_metrics_step(self, bidx: int) -> bool:
@@ -518,9 +530,41 @@ class ProfilingTrainer(Trainer):
             self.memory_tracker.close_window(window)
 
     def _log_peak_memory(self, stage: Stage, window: str) -> None:
-        """Log the peak memory of `window` (collective)."""
+        """Log the peak memory of `window`: a line per rank, the root rank's as metrics."""
         if self.memory_tracker is not None:
             self._log_metrics(stage, self.memory_tracker.collect(window), self.cf.general.istep)
+
+    def _process_memory_fields(self) -> dict[str, float]:
+        """This process's device memory via NVML (`process_gib`, `non_pytorch_gib`), or {}."""
+        if not torch.cuda.is_available():
+            return {}
+        return process_gpu_memory(torch.device(self.devices[0])).fields()
+
+    def _log_memory_after_setup(self) -> None:
+        """
+        Log this rank's GPU memory once the model and everything built with it exist, before
+        the first batch: the baseline the steps build on (weights, EMA model, CUDA context,
+        NCCL; the optimizer state is only allocated in the first step).
+
+        With step timing or peak-memory logging on. `free_gib` and `total_gib` are the device's
+        (cudaMemGetInfo), so they also count other processes on the GPU.
+        """
+        if not (self.step_timing or self.memory_tracker is not None):
+            return
+        if not torch.cuda.is_available():
+            return
+        device = torch.device(self.devices[0])
+        free, total = torch.cuda.mem_get_info(device)
+        gib = 1024**3
+        fields = {
+            "allocated_gib": torch.cuda.memory_allocated(device) / gib,
+            "reserved_gib": torch.cuda.memory_reserved(device) / gib,
+            **self._process_memory_fields(),
+            "free_gib": free / gib,
+            "total_gib": total / gib,
+        }
+        rank = self.cf.get("rank", 0) or 0
+        logger.info(f"GPU memory after setup rank {rank}: {format_fields(fields)}")
 
     def _with_profiling(self, dataset_iter: Iterator) -> Iterator[tuple[int, ModelBatch]]:
         """Trace the profiled stretch, then continue (or stop) as configured."""
@@ -579,6 +623,8 @@ class ProfilingTrainer(Trainer):
 
         # the training steps since the last metrics interval belong to the training window
         self._close_memory_window("train")
+        if inference:
+            self._log_memory_after_setup()
         with contextlib.ExitStack() as stack:
             if inference:
                 # inference is a single validate, so it is a root phase
