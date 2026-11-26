@@ -434,7 +434,9 @@ def stage_output(
     source_windows = (twh.window(idx) for idx in sample_idxs)
     source_intervals = [TimeRange(window.start, window.end) for window in source_windows]
 
-    latents_all = get_latent_output(batch, model_output, to_host) if write_latents else None
+    latents_all = (
+        get_latent_output(batch, model_output, timestep_idxs, to_host) if write_latents else None
+    )
 
     to_host.start()
 
@@ -464,16 +466,18 @@ def stage_output(
     )
 
 
-def get_latent_output(batch, model_output, to_host=None):
+def get_latent_output(batch, model_output, timestep_idxs, to_host=None):
     """
     Interface for getting latent states
+
+    Collects the latents of the forecast steps `timestep_idxs` (global step numbers, the
+    steps this chunk computed). The chunk's ModelOutput holds only those steps, so each step
+    is looked up by its index into the chunk, as the physical predictions are.
     """
     to_host = to_host if to_host is not None else _HostCopier()
 
     # collect latent outputs per forecast step and per sample
     fp32 = torch.float32
-
-    timestep_idxs = [0] if len(batch.get_output_idxs()) == 0 else batch.get_output_idxs()
 
     sample_idxs = [
         list(sample.streams_data.values())[0].sample_idx
@@ -483,7 +487,7 @@ def get_latent_output(batch, model_output, to_host=None):
     latents_all: list[list[dict]] = []
     for t_idx in timestep_idxs:
         latents_all.append([])
-        latent_pred = model_output.get_latent_prediction(t_idx)
+        latent_pred = model_output.get_latent_prediction(model_output.chunk_idx(t_idx))
         n_samples = len(sample_idxs)
         for i_sample in range(n_samples):
             per_sample: dict = {}
