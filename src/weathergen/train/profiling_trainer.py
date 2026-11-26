@@ -583,6 +583,8 @@ class ProfilingTrainer(Trainer):
                 stack.enter_context(timer.phase("validate"))
             if inference and self.profiling_cfg.enabled and self.profiling_cfg.memory_snapshot:
                 stack.enter_context(memory_snapshot_session(self.cf))
+            if inference and self.nsys_windows is not None:
+                stack.enter_context(self._inference_nsys_windows())
             if self.profiling_cfg.annotates_nvtx:
                 self._annotate_validation_phases()
                 # a module function, so patched only while validating
@@ -596,6 +598,52 @@ class ProfilingTrainer(Trainer):
         if inference:
             timer.switch("teardown", sync=True)
         self._log_peak_memory(VAL, "validation")
+
+    @contextlib.contextmanager
+    def _inference_nsys_windows(self) -> Iterator[None]:
+        """
+        Open and close the nsys windows from the model calls of an inference rollout.
+
+        `startup` opens right away, before the data loader is iterated (with 0 workers the
+        batch is read in this process), and closes after the first model call, i.e. the first
+        forecast chunk. `steady` covers the model calls `warmup_steps` to
+        `warmup_steps + steady_steps - 1`, each with the staging and writing of its output: it
+        opens right before the first of them and closes right before the next model call, or
+        when the rollout ends. The rollout itself runs to the end.
+        """
+        nsys_windows = self.nsys_windows
+        assert nsys_windows is not None
+        num_calls = 0
+
+        def before_call(module, args) -> None:
+            nonlocal num_calls
+            if num_calls > 0:
+                nsys_windows.after_step(num_calls - 1)
+            nsys_windows.before_step(num_calls)
+            num_calls += 1
+
+        def after_call(module, args, output) -> None:
+            if num_calls == 1:
+                nsys_windows.after_forward(0)
+
+        handles = [
+            self.model.register_forward_pre_hook(before_call),
+            self.model.register_forward_hook(after_call),
+        ]
+        nsys_windows.before_data_iter()
+        try:
+            yield
+        finally:
+            for handle in handles:
+                handle.remove()
+            if num_calls > 0:
+                nsys_windows.after_step(num_calls - 1)
+            if not nsys_windows.done:
+                logger.warning(
+                    f"Inference made {num_calls} model calls; not every nsys window was captured "
+                    f"(warmup_steps={nsys_windows.warmup_steps}, "
+                    f"steady_steps={nsys_windows.steady_steps})."
+                )
 
     def save_model(self, mini_epoch: int, name=None) -> None:
         """
