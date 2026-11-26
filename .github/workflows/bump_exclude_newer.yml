@@ -1,0 +1,82 @@
+name: Bump uv exclude-newer
+
+# Every two months, move the uv exclude-newer cutoff in pyproject.toml to a date
+# LAG_DAYS in the past and open an issue plus a pull request with the version changes.
+# Logic and local use: scripts/bump_exclude_newer.py.
+#
+# Pull requests opened with GITHUB_TOKEN do not start other workflows, so CI does not
+# run on them by itself. Set the secret EXCLUDE_NEWER_BOT_TOKEN (a GitHub App or
+# fine-grained token with contents, issues and pull-requests write) to fix that;
+# otherwise close and reopen the pull request to start CI.
+
+on:
+  schedule:
+    # 06:00 UTC on the first day of January, March, May, July, September and November.
+    - cron: "0 6 1 */2 *"
+  workflow_dispatch:
+    inputs:
+      cutoff:
+        description: "New cutoff date YYYY-MM-DD (empty: today minus LAG_DAYS)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  UV_VERSION: "0.13.5"
+  LAG_DAYS: "14"
+  BASE_BRANCH: develop
+
+jobs:
+  bump:
+    if: github.repository == 'ecmwf/WeatherGenerator'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Move the cutoff and compare resolutions
+        id: bump
+        env:
+          CUTOFF: ${{ inputs.cutoff }}
+        run: |
+          python3 scripts/bump_exclude_newer.py --cutoff "$CUTOFF" --lag-days "$LAG_DAYS" \
+            --summary "$RUNNER_TEMP/summary.md" --github-output "$GITHUB_OUTPUT" \
+            || [ $? -eq 3 ]
+
+      - name: Open an issue and a pull request
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.EXCLUDE_NEWER_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          NEW: ${{ steps.bump.outputs.new }}
+          STATUS: ${{ steps.bump.outputs.status }}
+        run: |
+          day="${NEW%%T*}"
+          branch="ci/exclude-newer-$day"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "Branch $branch exists already; nothing to do."
+            exit 0
+          fi
+          title="Bump the uv exclude-newer cutoff to $day"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "$title"
+          git push origin "$branch"
+          issue_url=$(gh issue create --title "$title" \
+            --body "Regular dependency update, see the linked pull request.")
+          { cat "$RUNNER_TEMP/summary.md"; echo; echo "Closes #${issue_url##*/}"; } \
+            > "$RUNNER_TEMP/body.md"
+          draft=()
+          if [ "$STATUS" != "resolved" ]; then draft=(--draft); fi
+          gh pr create --base "$BASE_BRANCH" --head "$branch" "${draft[@]}" \
+            --title "$title" --body-file "$RUNNER_TEMP/body.md"
