@@ -122,6 +122,9 @@ class StagedOutput:
         with zarrio_writer(self.store_path, self.write_config) as zio:
             for subset in data.items():
                 zio.write_zarr(subset)
+            # latents (output.streams contains "latent") are separate items
+            for subset in data.latent_items():
+                zio.write_zarr(subset)
 
 
 class AsyncOutputWriter:
